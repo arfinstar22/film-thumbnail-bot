@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: film-thumbnail-bot
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: LOCAL_API_URL
+        value: http://127.0.0.1:8081
+    healthCheckPath: /health
+    autoDeploy: true
