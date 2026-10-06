@@ -65,7 +65,8 @@ def get_caption_kb(message_id: int, watermark: str):
 
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(f"📢 Gabung {watermark}", url=channel_url)
+            InlineKeyboardButton("🚀 Posting ke Channel", callback_data=f"post:{message_id}"),
+            InlineKeyboardButton("📢 Buka Channel", url=channel_url)
         ],
         [
             InlineKeyboardButton("✏️ Edit Caption", callback_data=f"edit:{message_id}"),
@@ -75,6 +76,7 @@ def get_caption_kb(message_id: int, watermark: str):
             InlineKeyboardButton("🔄 Format Ulang", callback_data=f"info:{message_id}")
         ]
     ])
+
 
 
 @app.on_message(filters.command("start"))
@@ -200,6 +202,55 @@ async def handle_copy_callback(client: Client, call: CallbackQuery):
         f"<code>{caption}</code>",
         parse_mode=ParseMode.HTML
     )
+
+
+@app.on_callback_query(filters.regex(r"^post:"))
+async def handle_post_callback(client: Client, call: CallbackQuery):
+    chat_id = call.message.chat.id
+    job = _jobs.get(chat_id)
+    if not job:
+        await call.answer("Job kadaluarsa.", show_alert=True)
+        return
+
+    wm = _get_user_watermark(chat_id)
+    if not wm.startswith("@") or len(wm) <= 1:
+        await call.answer("Channel belum diatur. Gunakan /setwatermark @namachannel", show_alert=True)
+        return
+
+    await call.answer("🚀 Mengirim ke channel...")
+    try:
+        clean_wm = wm.lstrip("@").strip()
+        channel_url = f"https://t.me/{clean_wm}"
+        channel_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"📢 Gabung {wm}", url=channel_url)]
+        ])
+
+        await client.send_video(
+            chat_id=wm,
+            video=job["sent_msg"].video.file_id,
+            caption=job["caption_text"],
+            parse_mode=ParseMode.HTML,
+            supports_streaming=True,
+            reply_markup=channel_kb
+        )
+        await call.message.reply_text(
+            f"✅ <b>Berhasil Diposting ke {wm}!</b>\n\n"
+            f"Film sudah terbit di channel Anda lengkap dengan tombol <b>[ 📢 Gabung {wm} ]</b> yang menyala!",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.exception("Post to channel error")
+        err_msg = str(e)
+        await call.message.reply_text(
+            f"❌ <b>Gagal Posting ke {wm}:</b>\n\n"
+            f"<code>{err_msg[:120]}</code>\n\n"
+            f"💡 <b>Solusi:</b>\n"
+            f"1. Buka channel <b>{wm}</b> Anda di Telegram.\n"
+            f"2. Tambahkan bot ini sebagai <b>Administrator</b> (izin Post Messages).\n"
+            f"3. Tekan lagi tombol <b>🚀 Posting ke Channel</b>!",
+            parse_mode=ParseMode.HTML
+        )
+
 
 
 @app.on_callback_query(filters.regex(r"^info:"))
