@@ -1,42 +1,35 @@
-import asyncio
 import logging
-import sys
 import os
+import sys
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
-from aiogram import Bot, Dispatcher
-from aiogram.client.session.aiohttp import AiohttpSession
-import httpx
+from .config import BOT_TOKEN, API_ID, API_HASH
+from .handlers import app
 
-from aiohttp import web
-from .config import BOT_TOKEN, LOCAL_API_URL, USE_LOCAL_API
-from .handlers import router
+logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
-async def health_check(request):
-    return web.Response(text="OK")
 
-async def main():
-    logging.basicConfig(level=logging.INFO, stream=sys.stdout)
-    
-    # Session dengan timeout besar untuk film ukuran besar
-    session = AiohttpSession(timeout=httpx.Timeout(3600, connect=30))
-    
-    base_url = f"{LOCAL_API_URL}/bot{BOT_TOKEN}" if USE_LOCAL_API else None
-    bot = Bot(token=BOT_TOKEN, session=session, base_url=base_url)
-    
-    dp = Dispatcher()
-    dp.include_router(router)
-    
-    # Health check server for Render
-    app = web.Application()
-    app.router.add_get("/health", health_check)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "10000")))
-    await site.start()
-    
-    logging.info("Bot thumbnail film berjalan...")
-    await dp.start_polling(bot)
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        pass  # Silence noisy request logs
+
+
+def run_health_server():
+    port = int(os.getenv("PORT", "8080"))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    logging.info("Health check server active on port %s", port)
+    server.serve_forever()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    if os.getenv("PORT"):
+        threading.Thread(target=run_health_server, daemon=True).start()
+    logging.info("Bot thumbnail film berjalan...")
+    app.run()

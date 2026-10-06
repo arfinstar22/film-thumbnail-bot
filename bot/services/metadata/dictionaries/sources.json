@@ -1,0 +1,9 @@
+{
+    "WEB-DL": ["WEB-DL", "WEBDL", "WEB.DL", "WEB DL"],
+    "WEBRip": ["WEBRip", "WEB-Rip", "WEB.Rip"],
+    "BluRay": ["BluRay", "Blu-Ray", "BRRip", "BDRip"],
+    "HDRip": ["HDRip", "HD-Rip"],
+    "DVDRip": ["DVDRip", "DVD-Rip"],
+    "CAM": ["CAM", "CAMRip"],
+    "HDCAM": ["HDCAM"]
+}

@@ -3,8 +3,6 @@ import json
 import shutil
 from pathlib import Path
 
-from aiogram.filters import StateFilter
-
 FFMPEG = "ffmpeg"
 FFPROBE = "ffprobe"
 
@@ -105,7 +103,8 @@ async def photo_thumbnail(src: str, jpg_path: str):
 
 
 async def embed_thumbnail(video_path: str, thumb_path: str, output_path: str):
-    """Embed thumbnail ke video via copy codec (tidak re-encode/video lossless)."""
+    """Embed thumbnail ke video via copy codec (tidak re-encode/video lossless).
+    Skip subtitle streams yang tidak didukung di MP4."""
     await _run(
         [
             FFMPEG,
@@ -114,38 +113,43 @@ async def embed_thumbnail(video_path: str, thumb_path: str, output_path: str):
             video_path,
             "-i",
             thumb_path,
-            "-map",
-            "0",
-            "-map",
-            "1",
-            "-c",
-            "copy",
-            "-disposition:v:1",
-            "attached_pic",
-            "-metadata:s:v:1",
-            "comment=Cover (front)",
+            # Map hanya video, audio, dan thumbnail baru
+            "-map", "0:v:0",  # video pertama
+            "-map", "0:a?",   # semua audio (jika ada)
+            "-map", "1:v:0",  # thumbnail sebagai attached pic
+            "-c", "copy",
+            "-disposition:v:1", "attached_pic",
+            "-metadata:s:v:1", "comment=Cover (front)",
             output_path,
         ]
     )
 
 
 async def strip_thumbnail(video_path: str, attached_idx: int | None, output_path: str):
-    """Hapus attached_pic dari video (mkv cover) atau asalkan file tanpa cover."""
+    """Hapus attached_pic dari video (mkv cover) atau asalkan file tanpa cover.
+    Skip subtitle streams yang tidak didukung di MP4."""
     if attached_idx is None:
-        shutil.copy2(video_path, output_path)
+        # Copy dengan map selective untuk skip subtitle
+        await _run(
+            [
+                FFMPEG,
+                "-y",
+                "-i", video_path,
+                "-map", "0:v:0",  # video
+                "-map", "0:a?",   # audio
+                "-c", "copy",
+                output_path,
+            ]
+        )
         return
     await _run(
         [
             FFMPEG,
             "-y",
-            "-i",
-            video_path,
-            "-map",
-            "0",
-            "-c",
-            "copy",
-            "-map",
-            f"-{attached_idx}",
+            "-i", video_path,
+            "-map", "0:v:0",  # video (skip attached pic)
+            "-map", "0:a?",   # audio
+            "-c", "copy",
             output_path,
         ]
     )

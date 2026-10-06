@@ -11,7 +11,9 @@ services:
         sync: false
       - key: API_HASH
         sync: false
-      - key: LOCAL_API_URL
-        value: http://127.0.0.1:8081
-    healthCheckPath: /health
+      - key: GROQ_API_KEY
+        sync: false
+      - key: PORT
+        value: 10000
+    healthCheckPath: /
     autoDeploy: true

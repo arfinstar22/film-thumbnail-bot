@@ -3,181 +3,189 @@ import logging
 import os
 import shutil
 import tempfile
-from pathlib import Path
+import time
 
-from aiogram import Bot, F, Router, types
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.enums import ParseMode
 
-from .config import MAX_FILE_BYTES
-from .services.video import (
-    embed_thumbnail,
-    extract_frame,
-    parse_ts_to_seconds,
-    photo_thumbnail,
-    probe_video,
-    strip_thumbnail,
-)
-from .states import ThumbStates
+from .config import BOT_TOKEN, API_ID, API_HASH
+from .services.video import photo_thumbnail
+from .services.metadata.engine import MetadataEngine
 
-router = Router()
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Simpan jobs sementara (in-memory)
+app = Client("thumb_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
 _jobs = {}
+_engine = MetadataEngine()
 
 
-def get_menu_kb():
-    b = InlineKeyboardBuilder()
-    b.row(InlineKeyboardButton(text="🎬 Frame Otomatis (Tengah)", callback_data="act:auto"))
-    b.row(InlineKeyboardButton(text="⏱ Tentukan Menit/Detik", callback_data="act:manual"))
-    b.row(InlineKeyboardButton(text="🖼 Pakai Foto Sendiri", callback_data="act:photo"))
-    b.row(InlineKeyboardButton(text="🗑 Hapus Thumbnail", callback_data="act:strip"))
-    b.row(InlineKeyboardButton(text="❌ Batal", callback_data="act:cancel"))
-    return b.as_markup()
+def get_caption_kb(message_id: int):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🤖 Cari Info Film", callback_data=f"info:{message_id}")],
+        [InlineKeyboardButton("✏️ Edit Caption", callback_data=f"edit:{message_id}")]
+    ])
 
 
-@router.message(Command("start"))
-async def start_cmd(msg: types.Message):
-    await msg.answer("Kirim film/video untuk diedit thumbnail-nya.")
+@app.on_message(filters.command("start"))
+async def start_cmd(client: Client, msg: Message):
+    await msg.reply_text(
+        "🎬 **Bot Film Pintar**\n\n"
+        "Forward film ke sini, bot akan:\n"
+        "- Thumbnail otomatis bawaan video\n"
+        "- Info film otomatis via Smart Parser + AI\n\n"
+        "Kirim video sekarang!"
+    )
 
 
-@router.message(F.video | F.document)
-async def receive_video(msg: types.Message, state: FSMContext):
+@app.on_message(filters.video | filters.document)
+async def receive_video(client: Client, msg: Message):
     media = msg.video or msg.document
-    if media.file_size > MAX_FILE_BYTES:
-        await msg.answer("❌ File terlalu besar. Maksimal 2GB.")
+    if not media:
         return
 
-    # Cek mime type
-    mime = getattr(media, "mime_type", "video/mp4")
-    if not mime.startswith("video/"):
-        await msg.answer("❌ Itu bukan file video.")
-        return
-
-    # Simpan info job
-    _jobs[msg.from_user.id] = {
-        "file_id": media.file_id,
-        "mime": mime,
-        "name": getattr(media, "file_name", "video.mp4"),
-        "msg_id": msg.message_id,
-    }
-    
-    await state.set_state(ThumbStates.choosing_action)
-    await msg.answer("Video diterima! Pilih aksi:", reply_markup=get_menu_kb())
-
-
-@router.callback_query(F.data.startswith("act:"))
-async def handle_action(callback: types.CallbackQuery, state: FSMContext):
-    act = callback.data.split(":")[1]
-    uid = callback.from_user.id
-    
-    if act == "cancel":
-        _jobs.pop(uid, None)
-        await state.clear()
-        await callback.message.edit_text("Aksi dibatalkan.")
-        return
-
-    if uid not in _jobs:
-        await callback.answer("Job hilang, kirim ulang video.")
-        return
-
-    if act == "auto":
-        await process_video(callback, "auto")
-    elif act == "manual":
-        await state.set_state(ThumbStates.waiting_timestamp)
-        await callback.message.edit_text("Masukkan waktu (contoh: 01:30 atau 90):")
-    elif act == "photo":
-        await state.set_state(ThumbStates.waiting_photo)
-        await callback.message.edit_text("Kirim foto thumbnail:")
-    elif act == "strip":
-        await process_video(callback, "strip")
-
-
-@router.message(ThumbStates.waiting_timestamp)
-async def get_ts(msg: types.Message, state: FSMContext):
-    try:
-        ts = await parse_ts_to_seconds(msg.text)
-        await state.clear()
-        await process_video(msg, "manual", ts=ts)
-    except Exception:
-        await msg.answer("Format salah. Pakai MM:SS atau HH:MM:SS.")
-
-
-@router.message(ThumbStates.waiting_photo, F.photo)
-async def get_photo(msg: types.Message, state: FSMContext):
-    # Simpan photo_id di job
-    uid = msg.from_user.id
-    _jobs[uid]["photo_id"] = msg.photo[-1].file_id
-    await state.clear()
-    await process_video(msg, "photo")
-
-
-async def process_video(src: types.Message | types.CallbackQuery, mode: str, ts: float = 0):
-    uid = src.from_user.id
-    job = _jobs.get(uid)
-    if not job: return
-    
-    # UI Feedback
-    msg = src.message if isinstance(src, types.CallbackQuery) else src
-    status_msg = await msg.answer("⏳ Mengunduh...")
-    
-    # Init Processing
+    filename = getattr(media, "file_name", "film.mp4")
     tmp = tempfile.mkdtemp()
     try:
-        # Download
-        bot: Bot = src.bot
-        file_obj = await bot.get_file(job["file_id"])
-        ext = ".mkv" if "matroska" in job["mime"] else ".mp4"
-        in_path = os.path.join(tmp, "in" + ext)
-        await bot.download(file_obj, destination=in_path)
-        
-        await status_msg.edit_text("⏳ Memproses...")
-        
-        out_path = os.path.join(tmp, "out" + ext)
-        thumb_path = None
-        
-        # Action Logic
-        if mode == "auto":
-            dur, attached = await probe_video(in_path)
-            ts = dur / 2 if dur > 0 else 60
+        if msg.video and msg.video.thumbs:
+            raw = os.path.join(tmp, "raw_auto")
+            await client.download_media(msg.video.thumbs[0].file_id, file_name=raw)
             thumb_path = os.path.join(tmp, "thumb.jpg")
-            await extract_frame(in_path, ts, thumb_path)
-            await embed_thumbnail(in_path, thumb_path, out_path)
-        elif mode == "manual":
-            thumb_path = os.path.join(tmp, "thumb.jpg")
-            await extract_frame(in_path, ts, thumb_path)
-            await embed_thumbnail(in_path, thumb_path, out_path)
-        elif mode == "photo":
-            photo_obj = await bot.get_file(job["photo_id"])
-            p_path = os.path.join(tmp, "photo.jpg")
-            await bot.download(photo_obj, destination=p_path)
-            thumb_path = os.path.join(tmp, "thumb.jpg")
-            await photo_thumbnail(p_path, thumb_path)
-            await embed_thumbnail(in_path, thumb_path, out_path)
-        elif mode == "strip":
-            dur, attached = await probe_video(in_path)
-            await strip_thumbnail(in_path, attached, out_path)
-            thumb_path = None
-        
-        # Sending Result
-        await status_msg.edit_text("📤 Mengunggah...")
-        
-        final_thumb = FSInputFile(thumb_path) if thumb_path else None
-        final_video = FSInputFile(out_path)
-        
-        if "video" in job["mime"]:
-            await msg.answer_video(final_video, thumbnail=final_thumb, caption="Selesai!")
+            await photo_thumbnail(raw, thumb_path)
         else:
-            await msg.answer_document(final_video, thumbnail=final_thumb, caption="Selesai!")
-            
-        await status_msg.delete()
-        
+            thumb_path = os.path.join(tmp, "black.jpg")
+            await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=black:s=320x240",
+                "-frames:v", "1", thumb_path,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            )
+
+        # Kirim video tanpa caption dulu, nanti diupdate via callback info
+        sent = await client.send_video(
+            chat_id=msg.chat.id,
+            video=media.file_id,
+            thumb=thumb_path,
+            supports_streaming=True,
+            reply_markup=get_caption_kb(msg.id)
+        )
+
+        _jobs[msg.chat.id] = {
+            "filename": filename,
+            "sent_msg": sent,
+            "caption_text": "",
+            "metadata": {}
+        }
     except Exception as e:
-        logger.exception("Error process")
-        await status_msg.edit_text(f"❌ Error: {str(e)[:100]}")
+        logger.exception("Send video error")
+        await msg.reply_text(f"❌ Gagal: {str(e)[:100]}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-        _jobs.pop(uid, None)
+
+
+@app.on_callback_query(filters.regex(r"^info:"))
+async def handle_info_callback(client: Client, call: CallbackQuery):
+    chat_id = call.message.chat.id
+    job = _jobs.get(chat_id)
+
+    if not job:
+        await call.answer("Job kadaluarsa.")
+        return
+
+    await call.answer("🔍 Menganalisis film...")
+
+    try:
+        await call.message.edit_reply_markup(
+            InlineKeyboardMarkup([[InlineKeyboardButton("⏳ Sedang diproses...", callback_data="loading")]])
+        )
+
+        result = await _engine.process(job["filename"])
+        caption = result["caption"]
+        source = result["source"]
+        logger.info("Caption generated via: %s", source)
+
+        # Simpan caption & metadata ke job
+        job["caption_text"] = caption
+        if "metadata" in result:
+            job["metadata"] = result["metadata"]
+
+        await call.message.edit_caption(caption=caption, reply_markup=get_caption_kb(call.message.id))
+    except Exception as e:
+        logger.exception("Info fetch error")
+        await call.message.edit_reply_markup(
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Gagal", callback_data="failed")]])
+        )
+        await client.send_message(chat_id, f"❌ {str(e)[:100]}")
+
+
+@app.on_callback_query(filters.regex(r"^edit:"))
+async def handle_edit_callback(client: Client, call: CallbackQuery):
+    chat_id = call.message.chat.id
+    job = _jobs.get(chat_id)
+
+    if not job:
+        await call.answer("Job kadaluarsa.")
+        return
+
+    caption = job.get("caption_text", "")
+    if not caption:
+        await call.answer("Belum ada caption.")
+        return
+
+    # Set state edit
+    _jobs[chat_id]["state"] = "waiting_edit"
+    _jobs[chat_id]["edit_timeout"] = time.time() + 300  # 5 menit
+
+    # Kirim caption dalam code block biar gampang copy-edit
+    await call.message.reply_text(
+        "✏️ <b>Mode Edit Caption</b> (5 menit)\n\n"
+        "Salin, edit bagian yang mau diubah, lalu kirim balik:\n\n"
+        f"<code>{caption}</code>",
+        parse_mode=ParseMode.HTML
+    )
+    await call.answer("Mode edit aktif (5 menit)")
+
+
+@app.on_message(filters.text)
+async def handle_edit_caption(client: Client, msg: Message):
+    if msg.command:
+        return
+    chat_id = msg.chat.id
+    job = _jobs.get(chat_id)
+
+    if not job or job.get("state") != "waiting_edit":
+        return
+
+    # Cek timeout 5 menit
+    if time.time() > job.get("edit_timeout", 0):
+        _jobs[chat_id].pop("state", None)
+        _jobs[chat_id].pop("edit_timeout", None)
+        await msg.reply_text("⏰ Waktu edit habis (5 menit).")
+        return
+
+    new_caption = msg.text.strip()
+    if not new_caption:
+        await msg.reply_text("Caption kosong.")
+        return
+
+    try:
+        await client.edit_message_caption(
+            chat_id=chat_id,
+            message_id=_jobs[chat_id]["sent_msg"].id,
+            caption=msg.text,
+            parse_mode=ParseMode.HTML
+        )
+        # Update cache
+        _jobs[chat_id]["caption_text"] = msg.text
+        _jobs[chat_id].pop("state", None)
+        _jobs[chat_id].pop("edit_timeout", None)
+        await msg.reply_text("✅ Caption diperbarui!")
+    except Exception as e:
+        logger.exception("Edit caption error")
+        await msg.reply_text(f"❌ Gagal: {str(e)[:100]}")
+
+
+@app.on_callback_query(filters.regex(r"^loading"))
+async def handle_loading_callback(client: Client, call: CallbackQuery):
+    await call.answer("⏳ Sedang diproses...")

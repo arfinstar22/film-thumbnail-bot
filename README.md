@@ -1,66 +1,81 @@
-# Film Thumbnail Bot 🎬
+# Film AI Bot 🎬🤖
 
-Bot Telegram untuk mengelola thumbnail film panjang (hingga 2GB):
-- 🎬 **Ambil Frame Otomatis** (detik tengah film)
-- ⏱ **Ambil Frame Manual** (tentukan menit/detik)
-- 🖼 **Ganti Thumbnail Pakai Foto Sendiri**
-- 🗑 **Hapus Thumbnail**
-
-Menggunakan **FFmpeg copy-codec** (lossless, super cepat, tanpa re-encode video).
+Bot Telegram pintar untuk film panjang:
+- 🎬 **Frame Otomatis**: thumbnail bawaan video (instan 1 detik, tanpa download 2GB)
+- 🤖 **AI-Powered Caption**: otomatis cari Judul, Tahun, Genre, Rating & Sinopsis Bahasa Indonesia via Groq AI (Llama 3.1)
+- 🏷 **Watermark Otomatis**: `@film_indonesia1` di setiap caption
 
 ---
 
-## 🛠️ Persiapan Awal (Semuanya Gratis)
+## 🛠️ Setup (Lokal PC - Zorin OS / Linux)
 
-### 1. Dapatkan Bot Token
-1. Buka [@BotFather](https://t.me/BotFather) di Telegram
-2. Ketik `/newbot`, beri nama bot
-3. Simpan token yang diberikan
+### 1. Dapatkan Token & API Key (Semua GRATIS)
 
-### 2. Dapatkan API ID & API Hash (Wajib untuk Film >50MB)
-1. Buka [my.telegram.org](https://my.telegram.org)
-2. Login dengan nomor HP Telegram Anda
-3. Pilih **API development tools**
-4. Isi form singkat & simpan `api_id` dan `api_hash`
+1. **Telegram Bot Token**: dari [@BotFather](https://t.me/BotFather)
+2. **Telegram API ID & Hash**: dari [my.telegram.org](https://my.telegram.org)
+3. **Groq API Key**: dari [console.groq.com/keys](https://console.groq.com/keys) (gratis, model Llama 3.1)
 
 ---
 
-## 🚀 Deploy ke Render (Gratis)
+### 2. Isi File `.env`
 
-1. **Push source code ini ke GitHub Anda**:
-   ```bash
-   git init
-   git add .
-   git commit -m "Initial commit"
-   git remote add origin https://github.com/USERNAME/film-thumbnail-bot.git
-   git push -u origin main
-   ```
+Edit file `.env`:
+```bash
+nano .env
+```
 
-2. **Daftar & Login di [Render](https://render.com)** (Free Tier).
-
-3. **Deploy via Blueprint**:
-   - Di dashboard Render, klik **"New"** → **"Blueprint"**
-   - Sambungkan ke repositori GitHub Anda
-   - Render akan mendeteksi `render.yaml` secara otomatis
-   - Masukkan environment variables:
-     - `BOT_TOKEN`
-     - `API_ID`
-     - `API_HASH`
-   - Klik **Apply**! Selesai.
-
-> ⚠️ **Catatan Free Tier**: Instance sleep setelah 15 menit tidak ada trafik. Saat ada user kirim video, butuh ±30 detik cold start.
+Isi seperti format ini:
+```text
+BOT_TOKEN=123456:ABC-DEF...
+API_ID=12345678
+API_HASH=abcdef123456...
+GROQ_API_KEY=gsk_... (API Key dari console.groq.com)
+```
 
 ---
 
-## 💻 Menjalankan Secara Lokal (Opsional)
+### 3. Jalankan Bot (Lokal)
 
-1. Copy `.env.example` ke `.env`:
-   ```bash
-   cp .env.example .env
-   ```
-2. Isi `BOT_TOKEN`, `API_ID`, dan `API_HASH` di `.env`.
-3. Jalankan dengan Docker:
-   ```bash
-   docker build -t thumbbot .
-   docker run --env-file .env -p 8081:8081 thumbbot
-   ```
+```bash
+./run.sh
+```
+
+---
+
+## ☁️ Deploy 24 Jam (Cloud Gratis Tanpa PC Lokal)
+
+Bot ini sudah dilengkapi `Dockerfile` dan health check HTTP (`PORT`) otomatis sehingga dapat langsung dideploy ke platform cloud:
+
+### Opsi 1: Koyeb (Rekomendasi - Gratis 24 Jam Tanpa Sleep)
+1. Buka [koyeb.com](https://app.koyeb.com/) dan buat akun.
+2. Klik **Create App** > pilih **GitHub**.
+3. Pilih repo `film-thumbnail-bot`.
+4. Pilih builder **Dockerfile**.
+5. Di bagian **Environment Variables**, tambahkan:
+   - `BOT_TOKEN`: Token bot Telegram dari @BotFather
+   - `API_ID`: ID dari my.telegram.org
+   - `API_HASH`: Hash dari my.telegram.org
+   - `GROQ_API_KEY`: API Key Groq dari console.groq.com
+   - `PORT`: `8000`
+6. Klik **Deploy**. Bot akan online 24 jam nonstop!
+
+### Opsi 2: Render (Free Web Service)
+1. Buka [render.com](https://dashboard.render.com/) > **New** > **Blueprint** (atau **Web Service**).
+2. Hubungkan repo `film-thumbnail-bot`.
+3. Masukkan Environment Variables (`BOT_TOKEN`, `API_ID`, `API_HASH`, `GROQ_API_KEY`).
+4. Klik **Apply / Deploy**.
+
+### Opsi 3: VPS / Server Pribadi (Docker)
+```bash
+docker build -t film-bot .
+docker run -d --restart always --name film-bot --env-file .env film-bot
+```
+
+---
+
+## 🎯 Cara Pakai
+
+1. Forward video/film ke bot di Telegram
+2. Bot langsung kirim balik videonya (instan 1 detik) dengan tombol **"🤖 Cari Info Film via AI"**
+3. Klik tombolnya → AI menganalisis nama file → mengedit caption video dengan info lengkap & sinopsis Bahasa Indonesia!
+
