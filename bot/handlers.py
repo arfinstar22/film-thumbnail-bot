@@ -5,6 +5,7 @@ import re
 import shutil
 import tempfile
 import time
+import urllib.parse
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -221,8 +222,19 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
     try:
         clean_wm = wm.lstrip("@").strip()
         channel_url = f"https://t.me/{clean_wm}"
+
+        meta = job.get("metadata", {})
+        title_meta = meta.get("title") or "Film Ini"
+        year_meta = meta.get("year")
+        title_display = f"{title_meta} ({year_meta})" if year_meta else title_meta
+        share_text = f"Nonton film {title_display} di {wm}!"
+        share_url = f"https://t.me/share/url?url={urllib.parse.quote(channel_url)}&text={urllib.parse.quote(share_text)}"
+
         channel_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"📢 Gabung {wm}", url=channel_url)]
+            [
+                InlineKeyboardButton(f"📢 Gabung {wm}", url=channel_url),
+                InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
+            ]
         ])
 
         await client.send_video(
@@ -235,7 +247,7 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
         )
         await call.message.reply_text(
             f"✅ <b>Berhasil Diposting ke {wm}!</b>\n\n"
-            f"Film sudah terbit di channel Anda lengkap dengan tombol <b>[ 📢 Gabung {wm} ]</b> yang menyala!",
+            f"Film sudah terbit di channel Anda lengkap dengan tombol <b>[ 📢 Gabung {wm} ]</b> dan <b>[ 🔄 Bagikan Film ]</b>!",
             parse_mode=ParseMode.HTML
         )
     except Exception as e:

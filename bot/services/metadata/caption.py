@@ -21,13 +21,20 @@ class CaptionGenerator:
         file_size = metadata.get("fileSize")
         duration = metadata.get("duration")
 
-        # Tampilan Header Judul & Tahun
+        wm = custom_watermark or self.watermark
+        clean_wm = wm.lstrip("@").strip() if wm else ""
+        channel_url = f"https://t.me/{clean_wm}" if clean_wm else "https://t.me"
+
+        # Tampilan Header Judul & Tahun (+ Watermark)
         title_upper = title.upper()
         header = f"🎬 <b>{title_upper}</b>"
         if season is not None and episode is not None:
             header += f" (S{season:02d}E{episode:02d})"
         elif year:
             header += f" ({year})"
+
+        if wm:
+            header += f" • <a href=\"{channel_url}\"><b>{wm}</b></a>"
 
         lines = [
             header,
@@ -86,19 +93,17 @@ class CaptionGenerator:
         if src:
             tag_src = re.sub(r"[^\w]", "", src)
             hashtags.append(f"#{tag_src}")
+        if clean_wm:
+            tag_wm = re.sub(r"[^\w]", "", clean_wm)
+            if tag_wm:
+                hashtags.append(f"#{tag_wm}")
 
         if hashtags:
             lines.append(f"🔍 <i>{' '.join(hashtags)}</i>")
             lines.append("")
 
-        wm = custom_watermark or self.watermark
         if wm:
-            clean_wm = wm.lstrip("@").strip()
-            channel_url = f"https://t.me/{clean_wm}" if clean_wm else "https://t.me"
             lines.append(f"🍿 <b>Channel Resmi:</b> <a href=\"{channel_url}\">{wm}</a>")
-            lines.append("")
-            lines.append(f"👉 <b><a href=\"{channel_url}\">[ KLIK UNTUK GABUNG CHANNEL ]</a></b>")
-
 
         return "\n".join(lines)
 
