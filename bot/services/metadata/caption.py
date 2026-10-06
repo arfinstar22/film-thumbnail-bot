@@ -96,7 +96,9 @@ class CaptionGenerator:
             clean_wm = wm.lstrip("@").strip()
             channel_url = f"https://t.me/{clean_wm}" if clean_wm else "https://t.me"
             lines.append(f"🍿 <b>Channel Resmi:</b> <a href=\"{channel_url}\">{wm}</a>")
+            lines.append("")
             lines.append(f"👉 <b><a href=\"{channel_url}\">[ KLIK UNTUK GABUNG CHANNEL ]</a></b>")
+
 
         return "\n".join(lines)
 
