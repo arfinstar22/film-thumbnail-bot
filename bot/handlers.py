@@ -10,7 +10,7 @@ from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.enums import ParseMode
 
-from .config import BOT_TOKEN, API_ID, API_HASH
+from .config import BOT_TOKEN, API_ID, API_HASH, CHANNEL_WATERMARK
 from .services.video import photo_thumbnail
 from .services.metadata.engine import MetadataEngine
 
@@ -21,6 +21,10 @@ app = Client("thumb_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 _jobs = {}
 _engine = MetadataEngine()
+
+
+def _get_user_watermark(chat_id: int) -> str:
+    return _engine.cache.get_setting(f"watermark_{chat_id}", CHANNEL_WATERMARK)
 
 
 def format_size(bytes_val: int) -> str:
@@ -55,8 +59,14 @@ def extract_filename(media, msg: Message) -> str:
     return name or "Film"
 
 
-def get_caption_kb(message_id: int):
+def get_caption_kb(message_id: int, watermark: str):
+    clean_wm = watermark.lstrip("@").strip()
+    channel_url = f"https://t.me/{clean_wm}" if clean_wm else "https://t.me"
+
     return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"📢 Gabung {watermark}", url=channel_url)
+        ],
         [
             InlineKeyboardButton("✏️ Edit Caption", callback_data=f"edit:{message_id}"),
             InlineKeyboardButton("📋 Salin Teks", callback_data=f"copy:{message_id}")
@@ -69,15 +79,45 @@ def get_caption_kb(message_id: int):
 
 @app.on_message(filters.command("start"))
 async def start_cmd(client: Client, msg: Message):
+    wm = _get_user_watermark(msg.chat.id)
     await msg.reply_text(
-        "🎬 **Film AI & Watermark Cleaner Bot**\n\n"
-        "✨ **Fitur 100% Cepat & Bebas Kuota:**\n"
-        "• ⚡ **Proses Instan (1 Detik)**: Nol pemakaian kuota server Render\n"
-        "• 🤖 **Smart Parser**: Otomatis ekstrak Judul, Tahun, Kualitas, Source, Audio & Codec\n"
-        "• 🧹 **Filter Homoglif**: Otomatis bersihkan watermark channel aneh (cth: `fαιвεяsgαтє`)\n"
-        "• 🏷️ **Hashtag & Watermark**: Otomatis pasang hashtag pencarian & watermark channel Anda\n"
-        "• 📋 **1-Klik Salin Teks**: Tombol salin caption cepat untuk posting ke channel\n\n"
-        "👉 **Kirim atau forward video film sekarang!**"
+        "🎬 <b>Film AI & Watermark Cleaner Bot</b>\n\n"
+        "✨ <b>Fitur Lengkap:</b>\n"
+        "• ⚡ <b>Proses Instan (1 Detik)</b>: Bersihkan watermark lama otomatis\n"
+        "• 🎨 <b>Desain Caption Estetik</b>: Format divider premium, font tebal & emotikon rapi\n"
+        "• 🏷️ <b>Auto Hashtag</b>: Tag pencarian otomatis (#Judul #Tahun #Kualitas)\n"
+        f"• 📢 <b>Tombol Promosi Channel</b>: Tombol link langsung ke channel Anda (<b>{wm}</b>)\n"
+        "• 📋 <b>1-Klik Salin Teks</b>: Salin caption instan tinggal tempel ke channel\n"
+        "• ⚙️ <b>Ganti Watermark</b>: Ketik <code>/setwatermark @namachannel</code> kapan saja\n\n"
+        "👉 <b>Forward film ke sini sekarang!</b>",
+        parse_mode=ParseMode.HTML
+    )
+
+
+@app.on_message(filters.command("setwatermark"))
+async def set_watermark_cmd(client: Client, msg: Message):
+    args = msg.text.split(maxsplit=1)
+    if len(args) < 2 or not args[1].strip():
+        curr = _get_user_watermark(msg.chat.id)
+        await msg.reply_text(
+            f"📌 <b>Watermark Channel Anda:</b> <code>{curr}</code>\n\n"
+            "Untuk mengganti ke channel lain, kirim perintah:\n"
+            "<code>/setwatermark @namachannelanda</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    new_wm = args[1].strip()
+    if not new_wm.startswith("@"):
+        new_wm = f"@{new_wm}"
+
+    _engine.cache.set_setting(f"watermark_{msg.chat.id}", new_wm)
+    await msg.reply_text(
+        f"✅ <b>Watermark Channel Diperbarui!</b>\n\n"
+        f"• Watermark baru: <b>{new_wm}</b>\n"
+        f"• Tombol promosi otomatis: <b>https://t.me/{new_wm.lstrip('@')}</b>\n\n"
+        f"Semua film berikutnya akan otomatis memakai watermark ini!",
+        parse_mode=ParseMode.HTML
     )
 
 
@@ -88,6 +128,7 @@ async def receive_video(client: Client, msg: Message):
         return
 
     chat_id = msg.chat.id
+    wm = _get_user_watermark(chat_id)
     filename = extract_filename(media, msg)
     file_size_bytes = getattr(media, "file_size", 0) or 0
     file_size_str = format_size(file_size_bytes)
@@ -99,7 +140,7 @@ async def receive_video(client: Client, msg: Message):
     if duration_str:
         extra["duration"] = duration_str
 
-    result = await _engine.process(filename, extra=extra)
+    result = await _engine.process(filename, extra=extra, watermark=wm)
     caption = result["caption"]
 
     tmp = tempfile.mkdtemp()
@@ -122,9 +163,10 @@ async def receive_video(client: Client, msg: Message):
             chat_id=chat_id,
             video=media.file_id,
             caption=caption,
+            parse_mode=ParseMode.HTML,
             thumb=thumb_path,
             supports_streaming=True,
-            reply_markup=get_caption_kb(msg.id)
+            reply_markup=get_caption_kb(msg.id, wm)
         )
 
         _jobs[chat_id] = {
@@ -132,6 +174,7 @@ async def receive_video(client: Client, msg: Message):
             "sent_msg": sent,
             "caption_text": caption,
             "extra": extra,
+            "watermark": wm,
             "metadata": result.get("metadata", {})
         }
     except Exception as e:
@@ -168,12 +211,17 @@ async def handle_info_callback(client: Client, call: CallbackQuery):
         await call.answer("Job kadaluarsa.", show_alert=True)
         return
 
+    wm = _get_user_watermark(chat_id)
     await call.answer("🔄 Memformat ulang...")
     try:
-        result = await _engine.process(job["filename"], extra=job.get("extra"))
+        result = await _engine.process(job["filename"], extra=job.get("extra"), watermark=wm)
         caption = result["caption"]
         job["caption_text"] = caption
-        await call.message.edit_caption(caption=caption, reply_markup=get_caption_kb(call.message.id))
+        await call.message.edit_caption(
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_caption_kb(call.message.id, wm)
+        )
         await call.answer("✅ Selesai diformat ulang!")
     except Exception as e:
         logger.exception("Info fetch error")

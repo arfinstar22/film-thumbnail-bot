@@ -17,12 +17,16 @@ class MetadataEngine:
         self.caption_gen = CaptionGenerator()
         self.cache = MetadataCache()
 
-    async def process(self, filename: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        # Parse locally using regex + dictionary intelligence
+    async def process(
+        self,
+        filename: str,
+        extra: Optional[Dict[str, Any]] = None,
+        watermark: Optional[str] = None
+    ) -> Dict[str, Any]:
         metadata = self.parser.parse(filename)
         if extra:
             metadata.update(extra)
 
-        caption = self.caption_gen.generate(metadata)
+        caption = self.caption_gen.generate(metadata, custom_watermark=watermark)
         self.cache.save_caption(filename, caption)
         return {"caption": caption, "source": "local", "metadata": metadata}

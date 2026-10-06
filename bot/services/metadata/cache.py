@@ -68,3 +68,22 @@ class MetadataCache:
             self._conn().commit()
         except Exception as e:
             logger.error(f"Cache save error: {e}")
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        try:
+            self._conn().execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+            cur = self._conn().execute("SELECT value FROM settings WHERE key = ?", (key,))
+            row = cur.fetchone()
+            if row and row[0]:
+                return row[0]
+        except Exception as e:
+            logger.error(f"Get setting error: {e}")
+        return default
+
+    def set_setting(self, key: str, value: str):
+        try:
+            self._conn().execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+            self._conn().execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+            self._conn().commit()
+        except Exception as e:
+            logger.error(f"Set setting error: {e}")
