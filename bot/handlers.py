@@ -17,14 +17,17 @@ from pyrogram.types import (
 )
 from pyrogram.enums import ParseMode
 
-from .config import BOT_TOKEN, API_ID, API_HASH, CHANNEL_WATERMARK, DEFAULT_REQUEST_LINK
+from .config import BOT_TOKEN, API_ID, API_HASH, SESSION_STRING, CHANNEL_WATERMARK, DEFAULT_REQUEST_LINK
 from .services.video import photo_thumbnail
 from .services.metadata.engine import MetadataEngine
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = Client("thumb_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+if SESSION_STRING:
+    app = Client("thumb_bot", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
+else:
+    app = Client("thumb_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 _jobs = {}
 _engine = MetadataEngine()
