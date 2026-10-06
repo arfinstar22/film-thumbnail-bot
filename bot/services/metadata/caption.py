@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Dict, Any
 
 class CaptionGenerator:
@@ -43,6 +44,24 @@ class CaptionGenerator:
             lines.append(f"📦 **Ukuran** : {file_size}")
         if duration:
             lines.append(f"⏱️ **Durasi** : {duration}")
+
+        # Auto Hashtags untuk pencarian mudah di channel
+        hashtags = []
+        if title:
+            tag_title = re.sub(r"[^\w]", "", title)
+            if tag_title and not tag_title.isdigit():
+                hashtags.append(f"#{tag_title}")
+        if year:
+            hashtags.append(f"#Tahun{year}")
+        if res:
+            hashtags.append(f"#{res}")
+        if src:
+            tag_src = re.sub(r"[^\w]", "", src)
+            hashtags.append(f"#{tag_src}")
+
+        if hashtags:
+            lines.append("")
+            lines.append(" ".join(hashtags))
 
         if self.watermark:
             lines.append("")

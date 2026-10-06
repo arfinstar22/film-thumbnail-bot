@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 app = Client("thumb_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 _jobs = {}
-_custom_thumbs = {}
 _engine = MetadataEngine()
 
 
@@ -59,8 +58,8 @@ def extract_filename(media, msg: Message) -> str:
 def get_caption_kb(message_id: int):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🖼️ Ubah Thumbnail", callback_data=f"thumb:{message_id}"),
-            InlineKeyboardButton("✏️ Edit Caption", callback_data=f"edit:{message_id}")
+            InlineKeyboardButton("✏️ Edit Caption", callback_data=f"edit:{message_id}"),
+            InlineKeyboardButton("📋 Salin Teks", callback_data=f"copy:{message_id}")
         ],
         [
             InlineKeyboardButton("🔄 Format Ulang", callback_data=f"info:{message_id}")
@@ -72,116 +71,14 @@ def get_caption_kb(message_id: int):
 async def start_cmd(client: Client, msg: Message):
     await msg.reply_text(
         "🎬 **Film AI & Watermark Cleaner Bot**\n\n"
-        "✨ **Fitur Utama:**\n"
-        "• 🖼️ **Thumbnail Bersih**: Hapus tulisan watermark pada cover video\n"
-        "• 🤖 **Smart Parser**: Otomatis kenali Judul, Tahun, Kualitas, Source, Audio & Codec\n"
+        "✨ **Fitur 100% Cepat & Bebas Kuota:**\n"
+        "• ⚡ **Proses Instan (1 Detik)**: Nol pemakaian kuota server Render\n"
+        "• 🤖 **Smart Parser**: Otomatis ekstrak Judul, Tahun, Kualitas, Source, Audio & Codec\n"
         "• 🧹 **Filter Homoglif**: Otomatis bersihkan watermark channel aneh (cth: `fαιвεяsgαтє`)\n"
-        "• 🏷️ **Watermark Channel**: Otomatis tempel watermark channel di caption\n"
-        "• 🎨 **Tombol Ubah Thumbnail**: Ganti thumbnail memakai poster sendiri kapan saja\n\n"
+        "• 🏷️ **Hashtag & Watermark**: Otomatis pasang hashtag pencarian & watermark channel Anda\n"
+        "• 📋 **1-Klik Salin Teks**: Tombol salin caption cepat untuk posting ke channel\n\n"
         "👉 **Kirim atau forward video film sekarang!**"
     )
-
-
-@app.on_callback_query(filters.regex(r"^thumb:"))
-async def handle_thumb_callback(client: Client, call: CallbackQuery):
-    chat_id = call.message.chat.id
-    job = _jobs.get(chat_id)
-
-    if not job:
-        await call.answer("Job kadaluarsa.", show_alert=True)
-        return
-
-    job["state"] = "waiting_thumb"
-    job["thumb_timeout"] = time.time() + 300  # 5 menit
-
-    await call.answer()
-    await call.message.reply_text(
-        "🖼️ <b>Mode Ubah Thumbnail (Aktif 5 menit)</b>\n\n"
-        "Silakan kirim foto poster yang ingin dipasang sebagai thumbnail baru.\n"
-        "Bot akan memproses dan memasangnya ke film ini.",
-        parse_mode=ParseMode.HTML
-    )
-
-
-@app.on_message(filters.photo)
-async def handle_photo(client: Client, msg: Message):
-    chat_id = msg.chat.id
-    job = _jobs.get(chat_id)
-
-    # 1. Jika user sedang menekan tombol 'Ubah Thumbnail'
-    if job and job.get("state") == "waiting_thumb" and time.time() <= job.get("thumb_timeout", 0):
-        job.pop("state", None)
-        job.pop("thumb_timeout", None)
-
-        file_size_bytes = job.get("file_size_bytes", 0)
-        file_size_str = job.get("file_size_str", "")
-        caption = job.get("caption_text", "")
-        media = job.get("media")
-
-        tmp = tempfile.mkdtemp()
-        status_msg = await msg.reply_text("⏳ <b>Sedang menyiapkan poster...</b>", parse_mode=ParseMode.HTML)
-        try:
-            raw_poster = os.path.join(tmp, "poster.jpg")
-            thumb_path = os.path.join(tmp, "thumb.jpg")
-            await client.download_media(msg.photo.file_id, file_name=raw_poster)
-            await photo_thumbnail(raw_poster, thumb_path)
-
-            # Limit upload bot Telegram adalah 2000 MB (2 GB)
-            MAX_BOT_UPLOAD = 2000 * 1024 * 1024
-            if file_size_bytes > MAX_BOT_UPLOAD:
-                await status_msg.edit_text(
-                    f"⚠️ <b>Limit Ukuran Telegram:</b>\n\n"
-                    f"Film ini berukuran <b>{file_size_str}</b> (di atas batas bot Telegram 2.0 GB).\n"
-                    f"Telegram melarang bot mengunggah file di atas 2 GB.\n\n"
-                    f"💡 <i>Berikut dikirimkan poster berkualitas tinggi dengan caption lengkap:</i>",
-                    parse_mode=ParseMode.HTML
-                )
-                await client.send_photo(
-                    chat_id=chat_id,
-                    photo=raw_poster,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML
-                )
-                return
-
-            await status_msg.edit_text("⏳ <b>Mengunduh video & memasang thumbnail baru...</b>\n(Mohon tunggu sebentar)", parse_mode=ParseMode.HTML)
-            video_path = os.path.join(tmp, "video.mp4")
-            await client.download_media(media.file_id, file_name=video_path)
-
-            await status_msg.edit_text("⏳ <b>Mengunggah video dengan thumbnail baru...</b>", parse_mode=ParseMode.HTML)
-            sent_new = await client.send_video(
-                chat_id=chat_id,
-                video=video_path,
-                caption=caption,
-                thumb=thumb_path,
-                supports_streaming=True,
-                reply_markup=get_caption_kb(msg.id)
-            )
-            _jobs[chat_id]["sent_msg"] = sent_new
-            await status_msg.edit_text("✅ <b>Thumbnail berhasil diperbarui!</b>", parse_mode=ParseMode.HTML)
-        except Exception as e:
-            logger.exception("Change thumbnail error")
-            await status_msg.edit_text(f"❌ Gagal ganti thumbnail: {str(e)[:120]}")
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-        return
-
-    # 2. Jika kirim foto sebelum video
-    tmp = tempfile.mkdtemp()
-    raw = os.path.join(tmp, "raw_poster.jpg")
-    custom_thumb = os.path.join(tmp, "custom_poster.jpg")
-    try:
-        await client.download_media(msg.photo.file_id, file_name=raw)
-        await photo_thumbnail(raw, custom_thumb)
-        _custom_thumbs[chat_id] = custom_thumb
-        await msg.reply_text(
-            "🖼️ <b>Poster Kustom Tersimpan!</b>\n\n"
-            "Sekarang kirim atau forward video filmnya.",
-            parse_mode=ParseMode.HTML
-        )
-    except Exception as e:
-        logger.exception("Save custom poster error")
-        await msg.reply_text(f"❌ Gagal simpan poster: {str(e)[:100]}")
 
 
 @app.on_message(filters.video | filters.document)
@@ -208,9 +105,7 @@ async def receive_video(client: Client, msg: Message):
     tmp = tempfile.mkdtemp()
     thumb_path = None
     try:
-        if chat_id in _custom_thumbs and os.path.exists(_custom_thumbs[chat_id]):
-            thumb_path = _custom_thumbs.pop(chat_id)
-        elif getattr(media, "thumbs", None):
+        if getattr(media, "thumbs", None):
             raw = os.path.join(tmp, "raw_auto")
             await client.download_media(media.thumbs[0].file_id, file_name=raw)
             thumb_path = os.path.join(tmp, "thumb.jpg")
@@ -235,11 +130,6 @@ async def receive_video(client: Client, msg: Message):
         _jobs[chat_id] = {
             "filename": filename,
             "sent_msg": sent,
-            "media_msg": msg,
-            "media": media,
-            "file_size_bytes": file_size_bytes,
-            "file_size_str": file_size_str,
-            "duration_str": duration_str,
             "caption_text": caption,
             "extra": extra,
             "metadata": result.get("metadata", {})
@@ -249,6 +139,24 @@ async def receive_video(client: Client, msg: Message):
         await msg.reply_text(f"❌ Gagal: {str(e)[:100]}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+@app.on_callback_query(filters.regex(r"^copy:"))
+async def handle_copy_callback(client: Client, call: CallbackQuery):
+    chat_id = call.message.chat.id
+    job = _jobs.get(chat_id)
+    caption = job.get("caption_text") if job else (call.message.caption or "")
+
+    if not caption:
+        await call.answer("Caption tidak ditemukan.", show_alert=True)
+        return
+
+    await call.answer("Teks siap disalin!")
+    await call.message.reply_text(
+        f"📋 <b>Salin Caption (Klik teks di bawah untuk copy):</b>\n\n"
+        f"<code>{caption}</code>",
+        parse_mode=ParseMode.HTML
+    )
 
 
 @app.on_callback_query(filters.regex(r"^info:"))
