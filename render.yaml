@@ -1,9 +1,10 @@
 services:
   - type: web
     name: film-thumbnail-bot
-    env: docker
-    dockerfilePath: ./Dockerfile
+    runtime: docker
     plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     envVars:
       - key: BOT_TOKEN
         sync: false
