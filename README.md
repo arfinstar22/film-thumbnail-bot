@@ -60,10 +60,19 @@ Bot ini sudah dilengkapi `Dockerfile` dan health check HTTP (`PORT`) otomatis se
 6. Klik **Deploy**. Bot akan online 24 jam nonstop!
 
 ### Opsi 2: Render (Free Web Service)
-1. Buka [render.com](https://dashboard.render.com/) > **New** > **Blueprint** (atau **Web Service**).
-2. Hubungkan repo `film-thumbnail-bot`.
-3. Masukkan Environment Variables (`BOT_TOKEN`, `API_ID`, `API_HASH`, `GROQ_API_KEY`).
-4. Klik **Apply / Deploy**.
+Deploy 1-klik menggunakan tombol Render Blueprint:
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/arfinstar22/film-thumbnail-bot)
+
+Atau via browser:
+1. Buka [https://render.com/deploy?repo=https://github.com/arfinstar22/film-thumbnail-bot](https://render.com/deploy?repo=https://github.com/arfinstar22/film-thumbnail-bot) (atau [dashboard.render.com/blueprints/new](https://dashboard.render.com/blueprints/new)).
+2. Masukkan Environment Variables:
+   - `BOT_TOKEN`: Token bot Telegram
+   - `API_ID`: ID dari my.telegram.org
+   - `API_HASH`: Hash dari my.telegram.org
+   - `GROQ_API_KEY`: API Key dari console.groq.com
+3. Klik **Apply**. Render otomatis build Docker dan jalankan bot 24 jam!
+
 
 ### Opsi 3: VPS / Server Pribadi (Docker)
 ```bash
