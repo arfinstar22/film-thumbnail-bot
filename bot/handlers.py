@@ -120,7 +120,8 @@ async def start_cmd(client: Client, msg: Message):
             BotCommand("start", "Panduan & info bot"),
             BotCommand("setwatermark", "Atur channel tujuan (@namachannel)"),
             BotCommand("setrequest", "Atur link tombol Request Film"),
-            BotCommand("setdivider", "Atur stiker pemisah film di channel")
+            BotCommand("setdivider", "Atur stiker pemisah film di channel"),
+            BotCommand("setsynopsis", "Aktif/matikan sinopsis film otomatis")
         ])
     except Exception:
         pass
@@ -128,8 +129,10 @@ async def start_cmd(client: Client, msg: Message):
     wm = _get_user_watermark(msg.chat.id)
     divider = _get_user_divider(msg.chat.id)
     req_link = _get_user_request_link(msg.chat.id)
+    syn_val = _engine.cache.get_setting(f"synopsis_{msg.chat.id}", "on")
     div_status = "Logo Custom Film Indonesia" if divider == "default" else ("Mati (Off)" if divider == "off" else "Stiker Pilihan Anda")
     req_status = f"<code>{req_link}</code>" if req_link and req_link != "off" else ("Mati (Off)" if req_link == "off" else "<i>Belum diatur</i>")
+    syn_status = "Aktif (On)" if syn_val != "off" else "Mati (Off)"
 
     text = (
         "🎬 <b>FILM CLEANER & PUBLISHER BOT</b>\n"
@@ -151,9 +154,13 @@ async def start_cmd(client: Client, msg: Message):
         "  ▫️ <code>/setdivider default</code> untuk kembali ke logo custom Film Indonesia.\n"
         "  ▫️ <code>/setdivider off</code> untuk mematikan stiker pemisah.\n"
         f"  <i>Stiker aktif saat ini:</i> <b>{div_status}</b>\n\n"
+        "• <code>/setsynopsis on / off</code>\n"
+        "  Mengatur sinopsis lipat otomatis dari ensiklopedia Wikipedia Indonesia.\n"
+        f"  <i>Sinopsis saat ini:</i> <b>{syn_status}</b>\n\n"
         "⚡ <b>FITUR UTAMA:</b>\n"
         "• 🧹 <b>Pembersih Cerdas</b>: Menghapus teks uploader lama & noise secara otomatis.\n"
         "• 📝 <b>Caption Multi-Titik</b>: Watermark permanen anti-curi di Judul, Hashtags, dan Footer.\n"
+        "• 📖 <b>Sinopsis Lipat Otomatis</b>: Ringkasan alur cerita akurat via kutipan lipat Telegram.\n"
         "• 🚀 <b>1-Klik Posting Channel</b>: Terbit ke channel dengan tombol 2x2 simetris (Gabung, Trailer, Request, Share).\n"
         "• 🎞️ <b>Stiker Pembatas</b>: Otomatis kirim stiker pemisah visual setelah setiap film di channel.\n"
         "• 📋 <b>Salin & Edit Teks</b>: Tombol cepat untuk copy caption atau edit teks manual.\n\n"
@@ -276,6 +283,31 @@ async def set_request_cmd(client: Client, msg: Message):
     )
 
 
+@app.on_message(filters.command("setsynopsis"))
+async def set_synopsis_cmd(client: Client, msg: Message):
+    args = msg.text.split(maxsplit=1)
+    if len(args) < 2 or not args[1].strip():
+        curr = _engine.cache.get_setting(f"synopsis_{msg.chat.id}", "on")
+        status_text = "Aktif (On)" if curr != "off" else "Mati (Off)"
+        await msg.reply_text(
+            f"📖 <b>Pengaturan Sinopsis Otomatis:</b>\n"
+            f"• Status saat ini: <b>{status_text}</b>\n\n"
+            f"<b>Perintah:</b>\n"
+            f"• <code>/setsynopsis on</code> (Aktifkan sinopsis lipat Wikipedia Indonesia)\n"
+            f"• <code>/setsynopsis off</code> (Matikan fitur sinopsis)",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    subcmd = args[1].strip().lower()
+    if subcmd == "off":
+        _engine.cache.set_setting(f"synopsis_{msg.chat.id}", "off")
+        await msg.reply_text("⏹️ <b>Sinopsis lipat otomatis dinonaktifkan.</b>", parse_mode=ParseMode.HTML)
+    else:
+        _engine.cache.set_setting(f"synopsis_{msg.chat.id}", "on")
+        await msg.reply_text("✅ <b>Sinopsis lipat otomatis diaktifkan!</b>", parse_mode=ParseMode.HTML)
+
+
 @app.on_message(filters.video | filters.document)
 async def receive_video(client: Client, msg: Message):
     media = msg.video or msg.document
@@ -295,7 +327,8 @@ async def receive_video(client: Client, msg: Message):
     if duration_str:
         extra["duration"] = duration_str
 
-    result = await _engine.process(filename, extra=extra, watermark=wm)
+    syn_enabled = _engine.cache.get_setting(f"synopsis_{chat_id}", "on") != "off"
+    result = await _engine.process(filename, extra=extra, watermark=wm, enable_synopsis=syn_enabled)
     caption = result["caption"]
 
     tmp = tempfile.mkdtemp()

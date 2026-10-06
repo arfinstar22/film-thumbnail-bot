@@ -80,6 +80,12 @@ class CaptionGenerator:
 
         lines.append("━━━━━━━━━━━━━━━━━━")
 
+        synopsis = metadata.get("synopsis")
+        if synopsis:
+            lines.append("📖 <b>Sinopsis:</b>")
+            lines.append(f"<blockquote expandable>{synopsis}</blockquote>")
+            lines.append("━━━━━━━━━━━━━━━━━━")
+
         # Auto Hashtags
         hashtags = []
         if title:
@@ -105,5 +111,15 @@ class CaptionGenerator:
         if wm:
             lines.append(f"🍿 <b>Channel Resmi:</b> <a href=\"{channel_url}\">{wm}</a>")
 
-        return "\n".join(lines)
+        result_text = "\n".join(lines)
+        if len(result_text) > 980 and synopsis:
+            excess = len(result_text) - 980
+            trimmed = synopsis[:max(50, len(synopsis) - excess - 3)].rstrip() + "..."
+            for i, line in enumerate(lines):
+                if line.startswith("<blockquote expandable>"):
+                    lines[i] = f"<blockquote expandable>{trimmed}</blockquote>"
+                    break
+            result_text = "\n".join(lines)
+
+        return result_text
 
