@@ -26,9 +26,22 @@ def test_parse(filename, expected_title, expected_year=None, expected_res=None):
 
 if __name__ == "__main__":
     results = []
-    # 12 Mandatory test cases from prompt
-    results.append(test_parse("Kupilih.Jalur.Langit.2026.1080p.WEB.DL.x264.AAC.2.0.N3X.mkv",
+
+    # Cases from user request
+    results.append(test_parse("🎬 Kupilih.Jalur.Langit.2026.1080p.WEB.DL.x264.AAC.2.0.N3X.mkv",
         "Kupilih Jalur Langit", 2026, "1080p"))
+    results.append(test_parse("🎬 Janji.Joni.2005.1080p.HS.WEB.DL.AAC2.0.H.264.SEIKEL.mkv",
+        "Janji Joni", 2005, "1080p"))
+    results.append(test_parse("Penyalin.Cahaya.2022.1080p.NF.WEB.DL.DDP5.1.x264.SEIKEL.mkv",
+        "Penyalin Cahaya", 2022, "1080p"))
+    results.append(test_parse("Mirror.2005.1080p.VSP.WEBRip.AAC2.0.x264.0n.3.mkv",
+        "Mirror", 2005, "1080p"))
+    results.append(test_parse("fαιвεяsgαтє.Kuntilanak.Beranak.2009.720p.WEB.DL.mp4",
+        "Kuntilanak Beranak", 2009, "720p"))
+    results.append(test_parse("www.1xcinema.com - Dilan.1990.2018.1080p.mkv",
+        "Dilan 1990", 2018, "1080p"))
+
+    # Benchmark test cases
     results.append(test_parse("Avatar.2009.1080p.BluRay.x264",
         "Avatar", 2009, "1080p"))
     results.append(test_parse("Blade.Runner.2049.2017.1080p.WEB-DL.x265",
@@ -52,4 +65,6 @@ if __name__ == "__main__":
     results.append(test_parse("Anime.Title.S01E12.1080p.WEBRip.AAC",
         "Anime Title", None, "1080p"))
 
-    print(f"\n{sum(results)}/{len(results)} mandatory tests passed.")
+    print(f"\n{sum(results)}/{len(results)} tests passed.")
+    if sum(results) != len(results):
+        sys.exit(1)

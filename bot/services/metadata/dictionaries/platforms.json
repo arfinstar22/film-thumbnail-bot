@@ -1,0 +1,13 @@
+{
+    "Netflix": ["NF", "Netflix"],
+    "Hotstar": ["HS", "Hotstar", "DisneyHotstar"],
+    "Vision+": ["VSP", "VisionPlus", "Vision+"],
+    "Vidio": ["Vidio", "VID"],
+    "Prime Video": ["AMZN", "PrimeVideo", "Prime"],
+    "Apple TV+": ["ATVP", "ATV", "AppleTV"],
+    "Disney+": ["DSNP", "Disney", "Disney+"],
+    "HBO Max": ["MAX", "HBOMax", "HBO"],
+    "Viu": ["VIU"],
+    "iQiyi": ["IQ", "iQiyi"],
+    "WeTV": ["WETV"]
+}

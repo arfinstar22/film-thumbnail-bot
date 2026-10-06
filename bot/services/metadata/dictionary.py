@@ -11,6 +11,8 @@ class MetadataDictionary:
         self.sources = self._load("sources.json")
         self.video_codecs = self._load("video_codecs.json")
         self.audio_codecs = self._load("audio_codecs.json")
+        self.platforms = self._load("platforms.json")
+
 
     def _load(self, filename: str) -> Dict[str, List[str]]:
         path = os.path.join(self.dict_dir, filename)

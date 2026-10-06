@@ -1,9 +1,11 @@
 {
     "WEB-DL": ["WEB-DL", "WEBDL", "WEB.DL", "WEB DL"],
-    "WEBRip": ["WEBRip", "WEB-Rip", "WEB.Rip"],
-    "BluRay": ["BluRay", "Blu-Ray", "BRRip", "BDRip"],
+    "WEBRip": ["WEBRip", "WEB-Rip", "WEB.Rip", "WEB Rip"],
+    "BluRay": ["BluRay", "Blu-Ray", "BRRip", "BDRip", "BD-Rip"],
+    "REMUX": ["REMUX", "BD-REMUX"],
+    "HDTV": ["HDTV", "HDTVRip"],
     "HDRip": ["HDRip", "HD-Rip"],
-    "DVDRip": ["DVDRip", "DVD-Rip"],
+    "DVDRip": ["DVDRip", "DVD-Rip", "DVD"],
     "CAM": ["CAM", "CAMRip"],
     "HDCAM": ["HDCAM"]
 }
