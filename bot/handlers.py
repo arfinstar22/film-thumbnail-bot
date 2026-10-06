@@ -11,7 +11,7 @@ from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand
 from pyrogram.enums import ParseMode
 
-from .config import BOT_TOKEN, API_ID, API_HASH, CHANNEL_WATERMARK
+from .config import BOT_TOKEN, API_ID, API_HASH, CHANNEL_WATERMARK, DEFAULT_REQUEST_LINK
 from .services.video import photo_thumbnail
 from .services.metadata.engine import MetadataEngine
 
@@ -32,8 +32,40 @@ def _get_user_divider(chat_id: int) -> str:
     return _engine.cache.get_setting(f"divider_{chat_id}", "default")
 
 
+def normalize_telegram_link(val: str) -> str:
+    val = val.strip()
+    if val.lower() == "off":
+        return "off"
+    if val.lower() == "default":
+        return DEFAULT_REQUEST_LINK
+
+    m = re.match(r"^(?:https?://)?([a-zA-Z0-9_]+)\.t\.me(?:\?(.*))?$", val, re.I)
+    if m:
+        bot_name = m.group(1)
+        query = f"?{m.group(2)}" if m.group(2) else ""
+        return f"https://t.me/{bot_name}{query}"
+
+    m2 = re.match(r"^(?:https?://)?t\.me/(.+)$", val, re.I)
+    if m2:
+        return f"https://t.me/{m2.group(1)}"
+
+    if val.startswith("@"):
+        return f"https://t.me/{val.lstrip('@')}"
+
+    if not (val.startswith("http://") or val.startswith("https://")):
+        return f"https://{val}"
+
+    return val
+
+
 def _get_user_request_link(chat_id: int) -> str:
-    return _engine.cache.get_setting(f"request_link_{chat_id}", "")
+    link = _engine.cache.get_setting(f"request_link_{chat_id}", "")
+    if link:
+        return link
+    link = _engine.cache.get_setting("global_request_link", "")
+    if link:
+        return link
+    return DEFAULT_REQUEST_LINK
 
 
 async def _send_channel_divider(client: Client, chat_id: int, channel_id: str):
@@ -265,16 +297,17 @@ async def set_request_cmd(client: Client, msg: Message):
         )
         return
 
-    val = args[1].strip()
-    if val.lower() == "off":
+    raw_val = args[1].strip()
+    val = normalize_telegram_link(raw_val)
+
+    if val == "off":
         _engine.cache.set_setting(f"request_link_{msg.chat.id}", "off")
+        _engine.cache.set_setting("global_request_link", "off")
         await msg.reply_text("⏹️ <b>Tombol Request Film dinonaktifkan dari channel.</b>", parse_mode=ParseMode.HTML)
         return
 
-    if not (val.startswith("http://") or val.startswith("https://") or val.startswith("t.me/")):
-        val = f"https://t.me/{val.lstrip('@')}"
-
     _engine.cache.set_setting(f"request_link_{msg.chat.id}", val)
+    _engine.cache.set_setting("global_request_link", val)
     await msg.reply_text(
         f"✅ <b>Link Request Film Berhasil Disimpan!</b>\n\n"
         f"• Link tujuan: <b>{val}</b>\n\n"

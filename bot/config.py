@@ -9,6 +9,7 @@ API_ID = os.getenv("API_ID", "").strip()
 API_HASH = os.getenv("API_HASH", "").strip()
 MAX_FILE_BYTES = int(os.getenv("MAX_FILE_BYTES", str(2 * 1024**3)))
 CHANNEL_WATERMARK = os.getenv("CHANNEL_WATERMARK", "@film_indonesia1").strip()
+DEFAULT_REQUEST_LINK = os.getenv("DEFAULT_REQUEST_LINK", "https://t.me/AnoMessBot?start=MLtA2pX").strip()
 
 
 if not BOT_TOKEN:
