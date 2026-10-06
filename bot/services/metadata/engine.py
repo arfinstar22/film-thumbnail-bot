@@ -33,8 +33,11 @@ class MetadataEngine:
         if enable_synopsis and not metadata.get("synopsis"):
             title = metadata.get("title")
             year = metadata.get("year")
+            season = metadata.get("season")
+            episode = metadata.get("episode")
+            is_series = bool(season is not None or episode is not None)
             if title:
-                syn = await self.synopsis_service.get_synopsis(title, year)
+                syn = await self.synopsis_service.get_synopsis(title, year, is_series=is_series)
                 if syn:
                     metadata["synopsis"] = syn
 

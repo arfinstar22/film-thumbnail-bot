@@ -12,8 +12,8 @@ logger = logging.getLogger(__name__)
 
 
 class WikipediaSynopsisService:
-    """Smart Zero-AI Indonesian Film Synopsis Extractor.
-    Extracts authentic story plots without encyclopedic boilerplate or paid AI API keys."""
+    """Smart Zero-AI Synopsis Extractor for Movies and TV Series.
+    Extracts authentic story plots and avoids encyclopedic fluff or actor biographies."""
 
     def __init__(self, cache: Optional[MetadataCache] = None):
         self.cache = cache or MetadataCache()
@@ -74,15 +74,32 @@ class WikipediaSynopsisService:
         # 10. Normalize spaces
         return re.sub(r"\s+", " ", text).strip()
 
+    def _is_biography(self, text: str) -> bool:
+        """Reject pages that are human biographies rather than media plots."""
+        bio_patterns = [
+            r"\badalah\s+(?:seorang\s+)?(?:aktris|aktor|pemeran|sutradara|produser|penyanyi|musisi|model|politikus|atlet)\b",
+            r"\blahir\s+\d+\s+(?:Januari|Februari|Maret|April|Mei|Juni|Juli|Agustus|September|Oktober|November|Desember|\w+)\s+\d{4}\b",
+            r"\(Hangul:\s*[^,)]+,\s*lahir\b",
+            r"\bmemulai\s+kariernya\s+sebagai\b",
+            r"\bkelahiran\s+\d+\s+\w+\s+\d{4}\b",
+        ]
+        for p in bio_patterns:
+            if re.search(p, text, re.IGNORECASE):
+                return True
+        return False
+
     def _extract_storyline_from_lead(self, lead_text: str) -> str:
         """Extract genuine plot sentences from lead paragraphs, dropping encyclopedic fluff."""
         if not lead_text:
             return ""
+        if self._is_biography(lead_text):
+            return ""
+
         sentences = re.split(r"(?<=[.!?])\s+", lead_text)
         story_sentences = []
 
         metadata_patterns = [
-            r"\badalah\s+(?:sebuah\s+)?film\b",
+            r"\badalah\s+(?:sebuah\s+)?(?:film|seri\s+televisi|serial\s+televisi|drama|anime)\b",
             r"\bdisutradarai\s+oleh\b",
             r"\bditulis\s+oleh\b",
             r"\bmerilisnya\s+pada\b",
@@ -94,6 +111,7 @@ class WikipediaSynopsisService:
             r"\bfestival\s+film\b",
             r"\btayang\s+secara\s+global\b",
             r"\bpenayangan\b",
+            r"\bjuga\s+tersedia\s+untuk\s+penonton\b",
         ]
 
         for s in sentences:
@@ -105,7 +123,7 @@ class WikipediaSynopsisService:
             for p in metadata_patterns:
                 if re.search(p, s_clean, re.IGNORECASE):
                     # Exception: if it introduces the protagonist / conflict
-                    if re.search(r"sebagai\s+[^,]+,\s*(?:seorang|yang|pembunuh|detektif|anak|gadis|pria|wanita|sosok)", s_clean, re.IGNORECASE):
+                    if re.search(r"sebagai\s+[^,]+,\s*(?:seorang|yang|pembunuh|detektif|anak|gadis|pria|wanita|sosok|pengacara)", s_clean, re.IGNORECASE):
                         continue
                     is_pure_metadata = True
                     break
@@ -116,32 +134,56 @@ class WikipediaSynopsisService:
         res = " ".join(story_sentences)
         # Polish opening syntax if actor intro was retained
         res = re.sub(r"^Film ini (?:sendiri )?dibintangi [^,]+ sebagai ", "Menceritakan ", res, flags=re.IGNORECASE)
+        res = re.sub(r"^Seri ini (?:sendiri )?dibintangi [^,]+ sebagai ", "Menceritakan ", res, flags=re.IGNORECASE)
         res = re.sub(r"^Film ini menceritakan ", "Menceritakan ", res, flags=re.IGNORECASE)
+        res = re.sub(r"^Seri ini menceritakan ", "Menceritakan ", res, flags=re.IGNORECASE)
         res = re.sub(r"^Film ini mengisahkan ", "Mengisahkan ", res, flags=re.IGNORECASE)
+        res = re.sub(r"^Seri ini mengisahkan ", "Mengisahkan ", res, flags=re.IGNORECASE)
         return res
 
-    def _score_page(self, page_title: str, snippet: str, target_title: str, target_year: Optional[int]) -> int:
-        """Score candidate Wikipedia pages to avoid picking sequels or wrong films."""
-        score = 0
-        t_lower = target_title.lower()
-        p_lower = page_title.lower()
-        snip_lower = snippet.lower()
-
+    def _score_page(self, page_title: str, snippet: str, target_title: str, target_year: Optional[int], is_series: bool) -> int:
+        """Score candidate Wikipedia pages to avoid picking sequels, actors, or wrong items."""
+        t_lower = target_title.lower().strip()
+        p_lower = page_title.lower().strip()
         clean_p = re.sub(r"\s*\([^)]*\)", "", p_lower).strip()
+
+        stop_words = {"the", "a", "an", "di", "ke", "dan", "of", "in", "on", "for"}
+        t_words = [w for w in re.findall(r"\w+", t_lower) if w not in stop_words]
+        p_words = set(re.findall(r"\w+", clean_p))
+
+        if not t_words:
+            return 0
+
+        overlap = sum(1 for w in t_words if w in p_words)
+        overlap_ratio = overlap / len(t_words)
+
+        # REJECT if word overlap is too weak (e.g. Park Eun-bin for Extraordinary Attorney Woo)
+        if overlap_ratio < 0.5 and clean_p != t_lower:
+            return -9999
+
+        score = int(overlap_ratio * 60)
+
+        # Exact title match gets massive boost
         if clean_p == t_lower:
             score += 50
         elif t_lower in p_lower:
             score += 30
 
-        t_words = set(re.findall(r"\w+", t_lower))
-        p_words = set(re.findall(r"\w+", p_lower))
-        overlap = len(t_words & p_words)
-        score += overlap * 10
+        snip_lower = snippet.lower()
+        if is_series:
+            if any(k in p_lower for k in ["seri televisi", "drama", "serial", "series", "anime"]):
+                score += 25
+            if any(k in snip_lower for k in ["seri televisi", "drama", "serial", "series"]):
+                score += 15
+        else:
+            if any(k in p_lower for k in ["film", "(film"]):
+                score += 25
+            if "film" in snip_lower:
+                score += 10
 
-        if "(film" in p_lower or "film" in p_lower:
-            score += 15
-        if "film" in snip_lower:
-            score += 5
+        # Penalize biographical articles
+        if any(k in snip_lower for k in ["aktris", "aktor", "pemeran", "kelahiran", "model anak"]):
+            score -= 50
 
         if target_year:
             str_year = str(target_year)
@@ -151,7 +193,7 @@ class WikipediaSynopsisService:
                 score += 10
             other_years = re.findall(r"\b(19\d{2}|20\d{2})\b", p_lower)
             if other_years and str_year not in other_years:
-                score -= 25
+                score -= 30
 
         return score
 
@@ -180,20 +222,24 @@ class WikipediaSynopsisService:
 
         return text[:max_chars].rstrip() + "..."
 
-    def _sync_fetch(self, title: str, year: Optional[int] = None) -> str:
+    def _sync_fetch(self, title: str, year: Optional[int] = None, is_series: bool = False) -> str:
         if not title:
             return ""
 
-        cache_key = f"synopsis_v2_{title.lower()}_{year}" if year else f"synopsis_v2_{title.lower()}"
+        cache_key = f"synopsis_v3_{title.lower()}_{year}_{is_series}" if year else f"synopsis_v3_{title.lower()}_{is_series}"
         cached = self.cache.get_setting(cache_key, "")
         if cached:
             return "" if cached == "none" else cached
 
-        queries = []
-        if year:
-            queries.append(f"{title} {year} film")
-        queries.append(f"{title} film")
-        queries.append(title)
+        # Build prioritized queries: exact title first!
+        queries = [title]
+        if is_series:
+            queries.append(f"{title} seri televisi")
+            queries.append(f"{title} drama")
+        else:
+            if year:
+                queries.append(f"{title} {year} film")
+            queries.append(f"{title} film")
 
         for query in queries:
             try:
@@ -202,7 +248,7 @@ class WikipediaSynopsisService:
                     "list": "search",
                     "srsearch": query,
                     "format": "json",
-                    "srlimit": 3
+                    "srlimit": 4
                 })
                 req = urllib.request.Request(search_url, headers=self.headers)
                 with urllib.request.urlopen(req, timeout=2.5) as resp:
@@ -211,11 +257,18 @@ class WikipediaSynopsisService:
                     if not results:
                         continue
 
-                    # Select best candidate by score
-                    best_page = max(
-                        results,
-                        key=lambda r: self._score_page(r.get("title", ""), r.get("snippet", ""), title, year)
-                    )["title"]
+                    # Filter and score candidates
+                    candidates = []
+                    for r in results:
+                        sc = self._score_page(r.get("title", ""), r.get("snippet", ""), title, year, is_series)
+                        if sc > 0:
+                            candidates.append((sc, r["title"]))
+
+                    if not candidates:
+                        continue
+
+                    candidates.sort(key=lambda x: x[0], reverse=True)
+                    best_page = candidates[0][1]
 
                 # Strategy 1: Dedicated Section (Sinopsis, Alur cerita, Plot, Premis)
                 sec_url = "https://id.wikipedia.org/w/api.php?" + urllib.parse.urlencode({
@@ -249,7 +302,7 @@ class WikipediaSynopsisService:
                         p_data = json.loads(resp_p.read().decode("utf-8"))
                         wt = p_data.get("parse", {}).get("wikitext", {}).get("*", "")
                         clean = self._clean_wikitext(wt)
-                        if clean and len(clean) > 35:
+                        if clean and len(clean) > 35 and not self._is_biography(clean):
                             result = self._truncate_smart(clean)
                             self.cache.set_setting(cache_key, result)
                             return result
@@ -272,7 +325,7 @@ class WikipediaSynopsisService:
                         break
                     lead = raw_ext.split("==")[0].strip()
                     story = self._extract_storyline_from_lead(lead)
-                    if story and len(story) > 35:
+                    if story and len(story) > 35 and not self._is_biography(story):
                         result = self._truncate_smart(story)
                         self.cache.set_setting(cache_key, result)
                         return result
@@ -285,5 +338,5 @@ class WikipediaSynopsisService:
         self.cache.set_setting(cache_key, "none")
         return ""
 
-    async def get_synopsis(self, title: str, year: Optional[int] = None) -> str:
-        return await asyncio.to_thread(self._sync_fetch, title, year)
+    async def get_synopsis(self, title: str, year: Optional[int] = None, is_series: bool = False) -> str:
+        return await asyncio.to_thread(self._sync_fetch, title, year, is_series)
