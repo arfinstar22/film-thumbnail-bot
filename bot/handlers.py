@@ -32,6 +32,10 @@ def _get_user_divider(chat_id: int) -> str:
     return _engine.cache.get_setting(f"divider_{chat_id}", "default")
 
 
+def _get_user_request_link(chat_id: int) -> str:
+    return _engine.cache.get_setting(f"request_link_{chat_id}", "")
+
+
 async def _send_channel_divider(client: Client, chat_id: int, channel_id: str):
     divider = _get_user_divider(chat_id)
     if not divider or divider.lower() == "off":
@@ -115,6 +119,7 @@ async def start_cmd(client: Client, msg: Message):
         await client.set_bot_commands([
             BotCommand("start", "Panduan & info bot"),
             BotCommand("setwatermark", "Atur channel tujuan (@namachannel)"),
+            BotCommand("setrequest", "Atur link tombol Request Film"),
             BotCommand("setdivider", "Atur stiker pemisah film di channel")
         ])
     except Exception:
@@ -122,7 +127,9 @@ async def start_cmd(client: Client, msg: Message):
 
     wm = _get_user_watermark(msg.chat.id)
     divider = _get_user_divider(msg.chat.id)
+    req_link = _get_user_request_link(msg.chat.id)
     div_status = "Logo Custom Film Indonesia" if divider == "default" else ("Mati (Off)" if divider == "off" else "Stiker Pilihan Anda")
+    req_status = f"<code>{req_link}</code>" if req_link and req_link != "off" else ("Mati (Off)" if req_link == "off" else "<i>Belum diatur</i>")
 
     text = (
         "🎬 <b>FILM CLEANER & PUBLISHER BOT</b>\n"
@@ -134,6 +141,10 @@ async def start_cmd(client: Client, msg: Message):
         f"• <code>/setwatermark @namachannel</code>\n"
         f"  Mengatur channel tujuan dan link promosi watermark.\n"
         f"  <i>Channel aktif saat ini:</i> <b>{wm}</b>\n\n"
+        "• <code>/setrequest https://t.me/linkanda</code>\n"
+        "  Mengatur link tujuan tombol <b>[ 💬 Request Film ]</b> di channel.\n"
+        "  ▫️ Ketik <code>/setrequest off</code> untuk menyembunyikan tombol request.\n"
+        f"  <i>Link request saat ini:</i> {req_status}\n\n"
         "• <code>/setdivider</code>\n"
         "  Mengatur stiker pemisah antar film di channel:\n"
         "  ▫️ <b>Reply stiker apa saja</b> dengan <code>/setdivider</code> untuk pasang stiker itu.\n"
@@ -143,7 +154,7 @@ async def start_cmd(client: Client, msg: Message):
         "⚡ <b>FITUR UTAMA:</b>\n"
         "• 🧹 <b>Pembersih Cerdas</b>: Menghapus teks uploader lama & noise secara otomatis.\n"
         "• 📝 <b>Caption Multi-Titik</b>: Watermark permanen anti-curi di Judul, Hashtags, dan Footer.\n"
-        "• 🚀 <b>1-Klik Posting Channel</b>: Terbit ke channel lengkap dengan dual tombol <b>[ Gabung ]</b> & <b>[ Bagikan ]</b>.\n"
+        "• 🚀 <b>1-Klik Posting Channel</b>: Terbit ke channel dengan tombol 2x2 simetris (Gabung, Trailer, Request, Share).\n"
         "• 🎞️ <b>Stiker Pembatas</b>: Otomatis kirim stiker pemisah visual setelah setiap film di channel.\n"
         "• 📋 <b>Salin & Edit Teks</b>: Tombol cepat untuk copy caption atau edit teks manual.\n\n"
         "💡 <b>CARA PENGGUNAAN:</b>\n"
@@ -226,6 +237,43 @@ async def set_divider_cmd(client: Client, msg: Message):
             f"• <code>/setdivider off</code> (Matikan stiker pemisah)",
             parse_mode=ParseMode.HTML
         )
+
+
+@app.on_message(filters.command("setrequest"))
+async def set_request_cmd(client: Client, msg: Message):
+    args = msg.text.split(maxsplit=1)
+    if len(args) < 2 or not args[1].strip():
+        curr = _get_user_request_link(msg.chat.id)
+        status_text = f"<code>{curr}</code>" if curr and curr != "off" else ("<i>Mati (Off)</i>" if curr == "off" else "<i>Belum diatur</i>")
+        await msg.reply_text(
+            f"💬 <b>Pengaturan Link Tombol Request Film:</b>\n"
+            f"• Link saat ini: {status_text}\n\n"
+            f"<b>Cara Mengatur Link:</b>\n"
+            f"Ketik perintah beserta link tujuan:\n"
+            f"<code>/setrequest https://t.me/film_indonesia1/123</code>\n"
+            f"<i>(Bisa link postingan tersemat, grup obrolan, bot request, atau akun admin)</i>\n\n"
+            f"<b>Pilihan Lain:</b>\n"
+            f"• <code>/setrequest off</code> (Sembunyikan tombol request)",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    val = args[1].strip()
+    if val.lower() == "off":
+        _engine.cache.set_setting(f"request_link_{msg.chat.id}", "off")
+        await msg.reply_text("⏹️ <b>Tombol Request Film dinonaktifkan dari channel.</b>", parse_mode=ParseMode.HTML)
+        return
+
+    if not (val.startswith("http://") or val.startswith("https://") or val.startswith("t.me/")):
+        val = f"https://t.me/{val.lstrip('@')}"
+
+    _engine.cache.set_setting(f"request_link_{msg.chat.id}", val)
+    await msg.reply_text(
+        f"✅ <b>Link Request Film Berhasil Disimpan!</b>\n\n"
+        f"• Link tujuan: <b>{val}</b>\n\n"
+        f"Setiap kali Anda menekan <b>🚀 Posting ke Channel</b>, tombol <b>[ 💬 Request Film ]</b> akan otomatis tampil di baris ke-2 dan mengarah ke link ini!",
+        parse_mode=ParseMode.HTML
+    )
 
 
 @app.on_message(filters.video | filters.document)
@@ -334,12 +382,26 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
         share_text = f"Nonton film {title_display} di {wm}!"
         share_url = f"https://t.me/share/url?url={urllib.parse.quote(channel_url)}&text={urllib.parse.quote(share_text)}"
 
-        channel_kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(f"📢 Gabung {wm}", url=channel_url),
+        trailer_query = f"Trailer {title_meta}" + (f" {year_meta}" if year_meta else "")
+        trailer_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(trailer_query)}"
+
+        row1 = [
+            InlineKeyboardButton(f"📢 Gabung {wm}", url=channel_url),
+            InlineKeyboardButton("🎬 Tonton Trailer", url=trailer_url)
+        ]
+
+        req_link = _get_user_request_link(chat_id)
+        if req_link and req_link.lower() != "off":
+            row2 = [
+                InlineKeyboardButton("💬 Request Film", url=req_link),
                 InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
             ]
-        ])
+        else:
+            row2 = [
+                InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
+            ]
+
+        channel_kb = InlineKeyboardMarkup([row1, row2])
 
         await client.send_video(
             chat_id=wm,
@@ -355,7 +417,7 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
 
         await call.message.reply_text(
             f"✅ <b>Berhasil Diposting ke {wm}!</b>\n\n"
-            f"• Film sudah terbit lengkap dengan tombol [ Gabung ] & [ Bagikan ]\n"
+            f"• Film sudah terbit lengkap dengan tombol [ Gabung ], [ Trailer ], [ Request ], dan [ Bagikan ]\n"
             f"• Stiker pemisah otomatis terkirim di bawahnya sebagai pembatas!",
             parse_mode=ParseMode.HTML
         )
