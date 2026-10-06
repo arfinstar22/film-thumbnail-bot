@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import re
@@ -6,6 +7,8 @@ import shutil
 import tempfile
 import time
 import urllib.parse
+import urllib.request
+from typing import Union
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand
@@ -22,6 +25,48 @@ app = Client("thumb_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 _jobs = {}
 _engine = MetadataEngine()
+
+
+async def _apply_expandable_caption(chat_id: Union[int, str], message_id: int, caption: str, reply_markup=None):
+    """Enforce native Telegram expandable blockquote via Bot API HTTP endpoint."""
+    if not caption or "<blockquote expandable>" not in caption:
+        return
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageCaption"
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "caption": caption,
+        "parse_mode": "HTML"
+    }
+
+    if reply_markup and hasattr(reply_markup, "inline_keyboard"):
+        kb = []
+        for row in reply_markup.inline_keyboard:
+            r = []
+            for btn in row:
+                b = {"text": btn.text}
+                if getattr(btn, "url", None):
+                    b["url"] = btn.url
+                elif getattr(btn, "callback_data", None):
+                    b["callback_data"] = btn.callback_data
+                r.append(b)
+            kb.append(r)
+        payload["reply_markup"] = {"inline_keyboard": kb}
+
+    def _sync_call():
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=3.5) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    try:
+        await asyncio.to_thread(_sync_call)
+    except Exception as e:
+        logger.debug(f"Bot API expandable caption sync error: {e}")
 
 
 def _get_user_watermark(chat_id: int) -> str:
@@ -389,6 +434,8 @@ async def receive_video(client: Client, msg: Message):
             supports_streaming=True,
             reply_markup=get_caption_kb(msg.id, wm)
         )
+        if sent:
+            await _apply_expandable_caption(chat_id, sent.id, caption, get_caption_kb(msg.id, wm))
 
         _jobs[chat_id] = {
             "filename": filename,
@@ -469,7 +516,7 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
 
         channel_kb = InlineKeyboardMarkup([row1, row2])
 
-        await client.send_video(
+        sent_channel = await client.send_video(
             chat_id=wm,
             video=job["sent_msg"].video.file_id,
             caption=job["caption_text"],
@@ -477,6 +524,8 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
             supports_streaming=True,
             reply_markup=channel_kb
         )
+        if sent_channel:
+            await _apply_expandable_caption(wm, sent_channel.id, job["caption_text"], channel_kb)
 
         # Kirim stiker pemisah otomatis di bawah film
         await _send_channel_divider(client, chat_id, wm)
@@ -522,6 +571,7 @@ async def handle_info_callback(client: Client, call: CallbackQuery):
             parse_mode=ParseMode.HTML,
             reply_markup=get_caption_kb(call.message.id, wm)
         )
+        await _apply_expandable_caption(chat_id, call.message.id, caption, get_caption_kb(call.message.id, wm))
         await call.answer("✅ Selesai diformat ulang!")
     except Exception as e:
         logger.exception("Info fetch error")
@@ -576,12 +626,16 @@ async def handle_edit_caption(client: Client, msg: Message):
         return
 
     try:
+        sent_id = _jobs[chat_id]["sent_msg"].id
+        wm = _get_user_watermark(chat_id)
+        kb = get_caption_kb(sent_id, wm)
         await client.edit_message_caption(
             chat_id=chat_id,
-            message_id=_jobs[chat_id]["sent_msg"].id,
+            message_id=sent_id,
             caption=msg.text,
             parse_mode=ParseMode.HTML
         )
+        await _apply_expandable_caption(chat_id, sent_id, msg.text, kb)
         _jobs[chat_id]["caption_text"] = msg.text
         _jobs[chat_id].pop("state", None)
         _jobs[chat_id].pop("edit_timeout", None)
