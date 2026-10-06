@@ -8,7 +8,7 @@ import time
 import urllib.parse
 
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand
 from pyrogram.enums import ParseMode
 
 from .config import BOT_TOKEN, API_ID, API_HASH, CHANNEL_WATERMARK
@@ -111,20 +111,48 @@ def get_caption_kb(message_id: int, watermark: str):
 
 @app.on_message(filters.command("start"))
 async def start_cmd(client: Client, msg: Message):
+    try:
+        await client.set_bot_commands([
+            BotCommand("start", "Panduan & info bot"),
+            BotCommand("setwatermark", "Atur channel tujuan (@namachannel)"),
+            BotCommand("setdivider", "Atur stiker pemisah film di channel")
+        ])
+    except Exception:
+        pass
+
     wm = _get_user_watermark(msg.chat.id)
-    await msg.reply_text(
-        "🎬 <b>Film AI & Watermark Cleaner Bot</b>\n\n"
-        "✨ <b>Fitur Lengkap:</b>\n"
-        "• ⚡ <b>Proses Instan (1 Detik)</b>: Bersihkan watermark lama otomatis\n"
-        "• 🎨 <b>Desain Caption Estetik</b>: Format divider premium, font tebal & emotikon rapi\n"
-        "• 🏷️ <b>Auto Hashtag</b>: Tag pencarian otomatis (#Judul #Tahun #Kualitas)\n"
-        f"• 📢 <b>Tombol Promosi Channel</b>: Tombol link langsung ke channel Anda (<b>{wm}</b>)\n"
-        "• 📋 <b>1-Klik Salin Teks</b>: Salin caption instan tinggal tempel ke channel\n"
-        "• ⚙️ <b>Ganti Watermark</b>: Ketik <code>/setwatermark @namachannel</code> kapan saja\n"
-        "• 🎞️ <b>Stiker Pemisah Otomatis</b>: Ketik <code>/setdivider</code> untuk atur stiker pembatas channel\n\n"
-        "👉 <b>Forward film ke sini sekarang!</b>",
-        parse_mode=ParseMode.HTML
+    divider = _get_user_divider(msg.chat.id)
+    div_status = "Logo Custom Film Indonesia" if divider == "default" else ("Mati (Off)" if divider == "off" else "Stiker Pilihan Anda")
+
+    text = (
+        "🎬 <b>FILM CLEANER & PUBLISHER BOT</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Selamat datang! Bot ini otomatis membersihkan watermark lama, merapikan info film secara estetik, dan menerbitkan langsung ke channel Telegram Anda.\n\n"
+        "📌 <b>DAFTAR PERINTAH (COMMANDS):</b>\n\n"
+        "• <code>/start</code>\n"
+        "  Menampilkan menu bantuan dan daftar fitur ini.\n\n"
+        f"• <code>/setwatermark @namachannel</code>\n"
+        f"  Mengatur channel tujuan dan link promosi watermark.\n"
+        f"  <i>Channel aktif saat ini:</i> <b>{wm}</b>\n\n"
+        "• <code>/setdivider</code>\n"
+        "  Mengatur stiker pemisah antar film di channel:\n"
+        "  ▫️ <b>Reply stiker apa saja</b> dengan <code>/setdivider</code> untuk pasang stiker itu.\n"
+        "  ▫️ <code>/setdivider default</code> untuk kembali ke logo custom Film Indonesia.\n"
+        "  ▫️ <code>/setdivider off</code> untuk mematikan stiker pemisah.\n"
+        f"  <i>Stiker aktif saat ini:</i> <b>{div_status}</b>\n\n"
+        "⚡ <b>FITUR UTAMA:</b>\n"
+        "• 🧹 <b>Pembersih Cerdas</b>: Menghapus teks uploader lama & noise secara otomatis.\n"
+        "• 📝 <b>Caption Multi-Titik</b>: Watermark permanen anti-curi di Judul, Hashtags, dan Footer.\n"
+        "• 🚀 <b>1-Klik Posting Channel</b>: Terbit ke channel lengkap dengan dual tombol <b>[ Gabung ]</b> & <b>[ Bagikan ]</b>.\n"
+        "• 🎞️ <b>Stiker Pembatas</b>: Otomatis kirim stiker pemisah visual setelah setiap film di channel.\n"
+        "• 📋 <b>Salin & Edit Teks</b>: Tombol cepat untuk copy caption atau edit teks manual.\n\n"
+        "💡 <b>CARA PENGGUNAAN:</b>\n"
+        "1. Kirim atau forward file video film ke bot ini.\n"
+        "2. Tunggu 1 detik hingga bot merapikan caption dan metadata.\n"
+        "3. Tekan tombol <b>🚀 Posting ke Channel</b> untuk menerbitkannya ke channel Anda!"
     )
+
+    await msg.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 @app.on_message(filters.command("setwatermark"))
