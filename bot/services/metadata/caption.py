@@ -48,6 +48,14 @@ class CaptionGenerator:
         if year:
             lines.append(f"🗓️ <b>Tahun :</b> {year}")
 
+        rating = metadata.get("rating")
+        if rating:
+            lines.append(f"⭐ <b>Rating :</b> {rating}")
+
+        genre = metadata.get("genre")
+        if genre:
+            lines.append(f"🎭 <b>Genre :</b> {genre}")
+
         if res:
             res_display = {
                 "2160p": "2160p • 4K UHD",

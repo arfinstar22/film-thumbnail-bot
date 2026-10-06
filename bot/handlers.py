@@ -11,7 +11,10 @@ import urllib.request
 from typing import Union
 
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand
+from pyrogram.types import (
+    Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand,
+    InlineQuery, InlineQueryResultArticle, InputTextMessageContent, ChatJoinRequest
+)
 from pyrogram.enums import ParseMode
 
 from .config import BOT_TOKEN, API_ID, API_HASH, CHANNEL_WATERMARK, DEFAULT_REQUEST_LINK
@@ -195,10 +198,12 @@ async def start_cmd(client: Client, msg: Message):
     try:
         await client.set_bot_commands([
             BotCommand("start", "Panduan & info bot"),
+            BotCommand("cari", "Cari film di database channel"),
             BotCommand("setwatermark", "Atur channel tujuan (@namachannel)"),
             BotCommand("setrequest", "Atur link tombol Request Film"),
             BotCommand("setdivider", "Atur stiker pemisah film di channel"),
-            BotCommand("setsynopsis", "Aktif/matikan sinopsis film otomatis")
+            BotCommand("setsynopsis", "Aktif/matikan sinopsis film otomatis"),
+            BotCommand("autojoin", "Aktif/matikan persetujuan join request otomatis")
         ])
     except Exception:
         pass
@@ -207,17 +212,22 @@ async def start_cmd(client: Client, msg: Message):
     divider = _get_user_divider(msg.chat.id)
     req_link = _get_user_request_link(msg.chat.id)
     syn_val = _engine.cache.get_setting(f"synopsis_{msg.chat.id}", "on")
+    autojoin_val = _engine.cache.get_setting("global_autojoin", "on")
     div_status = "Logo Custom Film Indonesia" if divider == "default" else ("Mati (Off)" if divider == "off" else "Stiker Pilihan Anda")
     req_status = f"<code>{req_link}</code>" if req_link and req_link != "off" else ("Mati (Off)" if req_link == "off" else "<i>Belum diatur</i>")
     syn_status = "Aktif (On)" if syn_val != "off" else "Mati (Off)"
+    autojoin_status = "Aktif (On)" if autojoin_val != "off" else "Mati (Off)"
 
     text = (
         "🎬 <b>FILM CLEANER & PUBLISHER BOT</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "Selamat datang! Bot ini otomatis membersihkan watermark lama, merapikan info film secara estetik, dan menerbitkan langsung ke channel Telegram Anda.\n\n"
+        "Selamat datang! Bot ini otomatis membersihkan watermark lama, mengekstrak rating & genre resmi, merapikan sinopsis lipat, dan menerbitkan langsung ke channel Telegram Anda.\n\n"
         "📌 <b>DAFTAR PERINTAH (COMMANDS):</b>\n\n"
         "• <code>/start</code>\n"
         "  Menampilkan menu bantuan dan daftar fitur ini.\n\n"
+        "• <code>/cari &lt;judul film&gt;</code>\n"
+        "  Mencari film di katalog channel dengan link tonton langsung.\n"
+        "  ▫️ <i>Mode Inline:</i> Ketik <code>@bot &lt;judul&gt;</code> di chat mana pun!\n\n"
         f"• <code>/setwatermark @namachannel</code>\n"
         f"  Mengatur channel tujuan dan link promosi watermark.\n"
         f"  <i>Channel aktif saat ini:</i> <b>{wm}</b>\n\n"
@@ -234,9 +244,14 @@ async def start_cmd(client: Client, msg: Message):
         "• <code>/setsynopsis on / off</code>\n"
         "  Mengatur sinopsis lipat otomatis dari ensiklopedia Wikipedia Indonesia.\n"
         f"  <i>Sinopsis saat ini:</i> <b>{syn_status}</b>\n\n"
+        "• <code>/autojoin on / off</code>\n"
+        "  Otomatis setujui member yang minta join ke channel private.\n"
+        f"  <i>Auto-join saat ini:</i> <b>{autojoin_status}</b>\n\n"
         "⚡ <b>FITUR UTAMA:</b>\n"
         "• 🧹 <b>Pembersih Cerdas</b>: Menghapus teks uploader lama & noise secara otomatis.\n"
-        "• 📝 <b>Caption Multi-Titik</b>: Watermark permanen anti-curi di Judul, Hashtags, dan Footer.\n"
+        "• ⭐ <b>Rating & Genre IMDb</b>: Deteksi otomatis rating dan genre film tanpa API key.\n"
+        "• 🔍 <b>Pencarian Cepat & Inline</b>: Cari film lewat <code>/cari</code> atau ketik <code>@bot judul</code> di chat grup/PM.\n"
+        "• 👥 <b>Auto-Approve Join Request</b>: Setujui member channel private otomatis & sambut dengan pesan ramah.\n"
         "• 📖 <b>Sinopsis Lipat Otomatis</b>: Ringkasan alur cerita akurat via kutipan lipat Telegram.\n"
         "• 🚀 <b>1-Klik Posting Channel</b>: Terbit ke channel dengan tombol 2x2 simetris (Gabung, Trailer, Request, Share).\n"
         "• 🎞️ <b>Stiker Pembatas</b>: Otomatis kirim stiker pemisah visual setelah setiap film di channel.\n"
@@ -386,6 +401,88 @@ async def set_synopsis_cmd(client: Client, msg: Message):
         await msg.reply_text("✅ <b>Sinopsis lipat otomatis diaktifkan!</b>", parse_mode=ParseMode.HTML)
 
 
+@app.on_message(filters.command(["cari", "search"]))
+async def search_movie_cmd(client: Client, msg: Message):
+    args = msg.text.split(maxsplit=1)
+    if len(args) < 2 or not args[1].strip():
+        bot_info = await client.get_me()
+        bot_user = bot_info.username or "bot"
+        await msg.reply_text(
+            "🔍 <b>Pencarian Film</b>\n\n"
+            "Ketik judul film yang ingin Anda cari:\n"
+            "<code>/cari &lt;judul film&gt;</code>\n\n"
+            "<i>Contoh:</i>\n"
+            "• <code>/cari Dilan</code>\n"
+            "• <code>/cari Gundala</code>\n\n"
+            f"💡 <i>Tips: Anda juga bisa ketik langsung di chat grup/PM manapun:</i>\n"
+            f"<code>@{bot_user} judul film</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    query = args[1].strip()
+    results = _engine.cache.search_catalog(query, limit=8)
+
+    if not results:
+        await msg.reply_text(
+            f"🔍 Tidak ditemukan film dengan kata kunci '<b>{query}</b>' di katalog channel.\n\n"
+            "💡 Film akan otomatis tercatat di katalog saat Anda mempostingnya ke channel.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    text = f"🍿 <b>Hasil Pencarian untuk '<code>{query}</code>':</b>\n\n"
+    buttons = []
+    for idx, item in enumerate(results, 1):
+        title = item["title"]
+        year = f" ({item['year']})" if item.get("year") else ""
+        rating = f"⭐ {item['rating']} | " if item.get("rating") else ""
+        genre = f"🎭 {item['genre']}" if item.get("genre") else ""
+        info_line = f"{rating}{genre}".strip(" | ")
+        channel = item["channel_username"].lstrip("@")
+        msg_id = item["message_id"]
+        post_url = f"https://t.me/{channel}/{msg_id}"
+
+        text += f"{idx}. 🎬 <b>{title}{year}</b>\n"
+        if info_line:
+            text += f"   {info_line}\n"
+        text += f"   👉 <a href='{post_url}'>Tonton di Channel</a>\n\n"
+
+        buttons.append([InlineKeyboardButton(f"🎬 {idx}. {title}{year}", url=post_url)])
+
+    await msg.reply_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+        reply_markup=InlineKeyboardMarkup(buttons[:5])
+    )
+
+
+@app.on_message(filters.command("autojoin"))
+async def autojoin_cmd(client: Client, msg: Message):
+    args = msg.text.split(maxsplit=1)
+    if len(args) < 2 or not args[1].strip():
+        curr = _engine.cache.get_setting("global_autojoin", "on")
+        status = "Aktif (On)" if curr != "off" else "Mati (Off)"
+        await msg.reply_text(
+            f"👥 <b>Auto-Approve Join Request:</b> <b>{status}</b>\n\n"
+            "Fitur ini otomatis menyetujui member yang mengajukan join request ke channel private Anda dan mengirimkan pesan sambutan + tombol pencarian film ke PM mereka.\n\n"
+            "<b>Perintah:</b>\n"
+            "• <code>/autojoin on</code> (Aktifkan auto-approve)\n"
+            "• <code>/autojoin off</code> (Matikan auto-approve)",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    sub = args[1].strip().lower()
+    if sub == "off":
+        _engine.cache.set_setting("global_autojoin", "off")
+        await msg.reply_text("⏹️ <b>Auto-approve join request dinonaktifkan.</b>", parse_mode=ParseMode.HTML)
+    else:
+        _engine.cache.set_setting("global_autojoin", "on")
+        await msg.reply_text("✅ <b>Auto-approve join request diaktifkan!</b>", parse_mode=ParseMode.HTML)
+
+
 @app.on_message(filters.video | filters.document)
 async def receive_video(client: Client, msg: Message):
     media = msg.video or msg.document
@@ -530,9 +627,25 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
         # Kirim stiker pemisah otomatis di bawah film
         await _send_channel_divider(client, chat_id, wm)
 
+        # Simpan ke katalog pencarian film
+        try:
+            _engine.cache.save_movie_post(
+                title=title_meta,
+                year=year_meta,
+                rating=meta.get("rating"),
+                genre=meta.get("genre"),
+                quality=meta.get("resolution") or meta.get("quality"),
+                channel_username=clean_wm,
+                message_id=sent_channel.id,
+                caption=job["caption_text"]
+            )
+        except Exception as ce:
+            logger.warning(f"Gagal mencatat ke katalog film: {ce}")
+
         await call.message.reply_text(
             f"✅ <b>Berhasil Diposting ke {wm}!</b>\n\n"
             f"• Film sudah terbit lengkap dengan tombol [ Gabung ], [ Trailer ], [ Request ], dan [ Bagikan ]\n"
+            f"• Film otomatis masuk ke katalog pencarian (<code>/cari {title_meta}</code>)\n"
             f"• Stiker pemisah otomatis terkirim di bawahnya sebagai pembatas!",
             parse_mode=ParseMode.HTML
         )
@@ -550,7 +663,6 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
         )
 
 
-
 @app.on_callback_query(filters.regex(r"^info:"))
 async def handle_info_callback(client: Client, call: CallbackQuery):
     chat_id = call.message.chat.id
@@ -563,9 +675,11 @@ async def handle_info_callback(client: Client, call: CallbackQuery):
     wm = _get_user_watermark(chat_id)
     await call.answer("🔄 Memformat ulang...")
     try:
-        result = await _engine.process(job["filename"], extra=job.get("extra"), watermark=wm)
+        syn_enabled = _engine.cache.get_setting(f"synopsis_{chat_id}", "on") != "off"
+        result = await _engine.process(job["filename"], extra=job.get("extra"), watermark=wm, enable_synopsis=syn_enabled)
         caption = result["caption"]
         job["caption_text"] = caption
+        job["metadata"] = result.get("metadata", {})
         await call.message.edit_caption(
             caption=caption,
             parse_mode=ParseMode.HTML,
@@ -643,3 +757,92 @@ async def handle_edit_caption(client: Client, msg: Message):
     except Exception as e:
         logger.exception("Edit caption error")
         await msg.reply_text(f"❌ Gagal: {str(e)[:100]}")
+
+
+@app.on_inline_query()
+async def inline_search_handler(client: Client, query: InlineQuery):
+    q = query.query.strip()
+    results = _engine.cache.search_catalog(q, limit=15)
+
+    articles = []
+    for item in results:
+        title = item["title"]
+        year = f" ({item['year']})" if item.get("year") else ""
+        full_title = f"{title}{year}"
+        rating = f"⭐ {item['rating']}" if item.get("rating") else ""
+        genre = f"🎭 {item['genre']}" if item.get("genre") else ""
+        desc_parts = [p for p in [rating, genre] if p]
+        description = " | ".join(desc_parts) or "Koleksi Film Channel"
+        channel = item["channel_username"].lstrip("@")
+        msg_id = item["message_id"]
+        post_url = f"https://t.me/{channel}/{msg_id}"
+
+        msg_content = (
+            f"🎬 <b>{full_title}</b>\n\n"
+            f"⭐ Rating: {item.get('rating') or '-'}\n"
+            f"🎭 Genre: {item.get('genre') or '-'}\n"
+            f"📢 Channel: @{channel}\n\n"
+            f"👉 <a href='{post_url}'>Klik di sini untuk menonton film</a>"
+        )
+
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🍿 Tonton Film di Channel", url=post_url)]
+        ])
+
+        articles.append(
+            InlineQueryResultArticle(
+                title=full_title,
+                description=description,
+                input_message_content=InputTextMessageContent(
+                    message_text=msg_content,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=False
+                ),
+                reply_markup=kb
+            )
+        )
+
+    await query.answer(
+        results=articles,
+        cache_time=5,
+        is_personal=True,
+        switch_pm_text="🔍 Cari Film di Bot" if not articles else None,
+        switch_pm_parameter="search" if not articles else None
+    )
+
+
+@app.on_chat_join_request()
+async def auto_approve_join_request(client: Client, req: ChatJoinRequest):
+    autojoin_status = _engine.cache.get_setting("global_autojoin", "on")
+    if autojoin_status == "off":
+        return
+
+    try:
+        await req.approve()
+        logger.info(f"Auto-approved join request for user {req.from_user.id} in chat {req.chat.id}")
+    except Exception as e:
+        logger.error(f"Gagal menyetujui join request: {e}")
+        return
+
+    try:
+        chat_title = req.chat.title or "Channel Film"
+        user_name = req.from_user.first_name or "Sobat Film"
+        welcome_text = (
+            f"👋 Halo <b>{user_name}</b>!\n\n"
+            f"✅ Permintaan bergabung Anda ke <b>{chat_title}</b> sudah disetujui otomatis.\n\n"
+            f"🍿 Selamat menonton! Anda bisa mencari koleksi film langsung melalui tombol di bawah:"
+        )
+
+        buttons = []
+        if req.chat.username:
+            buttons.append([InlineKeyboardButton(f"🍿 Buka {chat_title}", url=f"https://t.me/{req.chat.username}")])
+        buttons.append([InlineKeyboardButton("🔍 Cari Koleksi Film", switch_inline_query_current_chat="")])
+
+        await client.send_message(
+            chat_id=req.from_user.id,
+            text=welcome_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+    except Exception as e:
+        logger.debug(f"Info PM user welcome join request: {e}")
