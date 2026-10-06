@@ -28,6 +28,35 @@ def _get_user_watermark(chat_id: int) -> str:
     return _engine.cache.get_setting(f"watermark_{chat_id}", CHANNEL_WATERMARK)
 
 
+def _get_user_divider(chat_id: int) -> str:
+    return _engine.cache.get_setting(f"divider_{chat_id}", "default")
+
+
+async def _send_channel_divider(client: Client, chat_id: int, channel_id: str):
+    divider = _get_user_divider(chat_id)
+    if not divider or divider.lower() == "off":
+        return
+
+    try:
+        sticker_target = divider
+        if divider == "default":
+            cached_fid = _engine.cache.get_setting("custom_divider_fid", "")
+            if cached_fid:
+                sticker_target = cached_fid
+            else:
+                asset_path = os.path.join(os.path.dirname(__file__), "assets", "divider_sticker.webp")
+                if os.path.exists(asset_path):
+                    sticker_target = asset_path
+                else:
+                    sticker_target = "CAACAgQAAxUAAWrFHuZw3PQKz0c--t8Vyxk1eNziAAKeOAACMY1GAAE6x0wralVnuR4E"
+
+        sent_stk = await client.send_sticker(chat_id=channel_id, sticker=sticker_target)
+        if divider == "default" and getattr(sent_stk, "sticker", None):
+            _engine.cache.set_setting("custom_divider_fid", sent_stk.sticker.file_id)
+    except Exception as e:
+        logger.warning(f"Gagal mengirim stiker pemisah: {e}")
+
+
 def format_size(bytes_val: int) -> str:
     if not bytes_val or bytes_val <= 0:
         return ""
@@ -91,7 +120,8 @@ async def start_cmd(client: Client, msg: Message):
         "• 🏷️ <b>Auto Hashtag</b>: Tag pencarian otomatis (#Judul #Tahun #Kualitas)\n"
         f"• 📢 <b>Tombol Promosi Channel</b>: Tombol link langsung ke channel Anda (<b>{wm}</b>)\n"
         "• 📋 <b>1-Klik Salin Teks</b>: Salin caption instan tinggal tempel ke channel\n"
-        "• ⚙️ <b>Ganti Watermark</b>: Ketik <code>/setwatermark @namachannel</code> kapan saja\n\n"
+        "• ⚙️ <b>Ganti Watermark</b>: Ketik <code>/setwatermark @namachannel</code> kapan saja\n"
+        "• 🎞️ <b>Stiker Pemisah Otomatis</b>: Ketik <code>/setdivider</code> untuk atur stiker pembatas channel\n\n"
         "👉 <b>Forward film ke sini sekarang!</b>",
         parse_mode=ParseMode.HTML
     )
@@ -122,6 +152,52 @@ async def set_watermark_cmd(client: Client, msg: Message):
         f"Semua film berikutnya akan otomatis memakai watermark ini!",
         parse_mode=ParseMode.HTML
     )
+
+
+@app.on_message(filters.command("setdivider"))
+async def set_divider_cmd(client: Client, msg: Message):
+    reply = msg.reply_to_message
+    if reply and reply.sticker:
+        new_fid = reply.sticker.file_id
+        _engine.cache.set_setting(f"divider_{msg.chat.id}", new_fid)
+        await msg.reply_text(
+            "✅ <b>Stiker Pemisah Berhasil Diubah!</b>\n\n"
+            "Stiker yang Anda reply sekarang akan otomatis dikirim sebagai pembatas setiap kali posting ke channel.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    args = msg.text.split(maxsplit=1)
+    subcmd = args[1].strip().lower() if len(args) > 1 else ""
+
+    if subcmd == "off":
+        _engine.cache.set_setting(f"divider_{msg.chat.id}", "off")
+        await msg.reply_text(
+            "⏹️ <b>Stiker Pemisah Dimatikan!</b>\n\n"
+            "Bot tidak akan mengirim stiker setelah film. Untuk mengaktifkan kembali, ketik <code>/setdivider default</code>.",
+            parse_mode=ParseMode.HTML
+        )
+    elif subcmd == "default":
+        _engine.cache.set_setting(f"divider_{msg.chat.id}", "default")
+        await msg.reply_text(
+            "✅ <b>Stiker Pemisah Di-reset ke Bawaan!</b>\n\n"
+            "Menggunakan stiker logo sinema custom Film Indonesia.",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        curr = _get_user_divider(msg.chat.id)
+        status_text = "Logo Custom Film Indonesia (Default)" if curr == "default" else ("Mati (Off)" if curr == "off" else "Stiker Kustom Pilihan Anda")
+        await msg.reply_text(
+            f"🎞️ <b>Pengaturan Stiker Pemisah Channel:</b>\n"
+            f"• Status saat ini: <b>{status_text}</b>\n\n"
+            f"<b>Cara Ganti Stiker:</b>\n"
+            f"1. Kirim stiker apa saja ke chat ini.\n"
+            f"2. <b>Reply (balas)</b> stiker tersebut dengan perintah <code>/setdivider</code>.\n\n"
+            f"<b>Pilihan Lain:</b>\n"
+            f"• <code>/setdivider default</code> (Kembalikan ke logo custom Film Indonesia)\n"
+            f"• <code>/setdivider off</code> (Matikan stiker pemisah)",
+            parse_mode=ParseMode.HTML
+        )
 
 
 @app.on_message(filters.video | filters.document)
@@ -245,9 +321,14 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
             supports_streaming=True,
             reply_markup=channel_kb
         )
+
+        # Kirim stiker pemisah otomatis di bawah film
+        await _send_channel_divider(client, chat_id, wm)
+
         await call.message.reply_text(
             f"✅ <b>Berhasil Diposting ke {wm}!</b>\n\n"
-            f"Film sudah terbit di channel Anda lengkap dengan tombol <b>[ 📢 Gabung {wm} ]</b> dan <b>[ 🔄 Bagikan Film ]</b>!",
+            f"• Film sudah terbit lengkap dengan tombol [ Gabung ] & [ Bagikan ]\n"
+            f"• Stiker pemisah otomatis terkirim di bawahnya sebagai pembatas!",
             parse_mode=ParseMode.HTML
         )
     except Exception as e:
