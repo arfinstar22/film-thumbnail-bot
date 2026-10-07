@@ -20,7 +20,7 @@ from pyrogram.enums import ParseMode
 from .config import BOT_TOKEN, API_ID, API_HASH, SESSION_STRING, CHANNEL_WATERMARK, DEFAULT_REQUEST_LINK
 from .services.video import photo_thumbnail
 from .services.metadata.engine import MetadataEngine
-from .services.metadata.catalog import format_pinned_catalog
+from .services.metadata.catalog import format_pinned_catalog, publish_or_update_telegraph_catalog
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -590,13 +590,25 @@ async def update_pinned_catalog(client: Client, channel_username: str, chat_id: 
             pass
     bot_username = bot_user.username if bot_user else ""
 
-    catalog_text = format_pinned_catalog(movies, clean_channel, bot_username)
+    # Publish / update Telegra.ph Instant View page
+    telegraph_url = publish_or_update_telegraph_catalog(movies, clean_channel, _engine.cache, bot_username)
 
-    catalog_kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🔍 Cari Koleksi Film", switch_inline_query_current_chat="")
-        ]
+    catalog_text = format_pinned_catalog(movies, clean_channel, bot_username, telegraph_url)
+
+    buttons = []
+    if telegraph_url:
+        buttons.append([
+            InlineKeyboardButton(f"⚡ BUKA KATALOG LENGKAP ({len(movies)} Film)", url=telegraph_url)
+        ])
+    buttons.append([
+        InlineKeyboardButton("🔍 Cari Koleksi Film", switch_inline_query_current_chat="")
     ])
+    req_link = _get_user_request_link(chat_id) if chat_id else (_engine.cache.get_setting("global_request_link", "") or DEFAULT_REQUEST_LINK)
+    if req_link and req_link != "off":
+        buttons.append([
+            InlineKeyboardButton("💬 Request Film", url=req_link)
+        ])
+    catalog_kb = InlineKeyboardMarkup(buttons)
 
     pinned_key = f"pinned_catalog_{clean_channel}"
     stored_msg_id = _engine.cache.get_setting(pinned_key, "")
