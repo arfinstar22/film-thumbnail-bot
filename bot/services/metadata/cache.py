@@ -1,11 +1,27 @@
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_movie_title_and_year(title: str, year: Optional[int] = None):
+    t = (title or "").strip()
+    m = re.search(r'[\(\[]\s*(\d{4})\s*[\)\]]$', t)
+    if m:
+        if not year:
+            try:
+                year = int(m.group(1))
+            except ValueError:
+                pass
+        t = t[:m.start()].strip()
+    clean_key = re.sub(r'[^a-zA-Z0-9]', '', t).lower()
+    return t, year, clean_key
+
 
 class MetadataCache:
     def __init__(self, db_path: Optional[str] = None):
@@ -88,6 +104,23 @@ class MetadataCache:
         except Exception as e:
             logger.error(f"Set setting error: {e}")
 
+    def _ensure_catalog_table(self, conn):
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS movie_catalog (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT,
+                year INTEGER,
+                rating TEXT,
+                genre TEXT,
+                quality TEXT,
+                channel_username TEXT,
+                message_id INTEGER,
+                caption TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cat_chan_msg ON movie_catalog (channel_username, message_id)")
+
     def save_movie_post(
         self,
         title: str,
@@ -99,67 +132,107 @@ class MetadataCache:
         message_id: int,
         caption: str
     ):
+        clean_channel = (channel_username or "").lstrip("@").strip()
+        clean_title, year, _ = normalize_movie_title_and_year(title, year)
         try:
             conn = self._conn()
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS movie_catalog (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title TEXT,
-                    year INTEGER,
-                    rating TEXT,
-                    genre TEXT,
-                    quality TEXT,
-                    channel_username TEXT,
-                    message_id INTEGER,
-                    caption TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
+            self._ensure_catalog_table(conn)
+            cur = conn.execute("SELECT 1 FROM movie_catalog WHERE channel_username = ? AND message_id = ?", (clean_channel, message_id))
+            if cur.fetchone():
+                return
+
             conn.execute("""
                 INSERT INTO movie_catalog (title, year, rating, genre, quality, channel_username, message_id, caption)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (title, year, rating, genre, quality, channel_username, message_id, caption))
+            """, (clean_title, year, rating, genre, quality, clean_channel, message_id, caption))
             conn.commit()
         except Exception as e:
             logger.error(f"Save movie catalog error: {e}")
 
-    def search_catalog(self, query: str = "", limit: int = 8):
-        results = []
+    def get_deduplicated_catalog(self, channel_username: str) -> List[Dict[str, Any]]:
+        """Retrieve unique movies for a channel, automatically keeping only the latest post for duplicates."""
+        raw_items = []
+        clean_channel = (channel_username or "").lstrip("@").strip()
         try:
             conn = self._conn()
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS movie_catalog (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title TEXT,
-                    year INTEGER,
-                    rating TEXT,
-                    genre TEXT,
-                    quality TEXT,
-                    channel_username TEXT,
-                    message_id INTEGER,
-                    caption TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
+            self._ensure_catalog_table(conn)
+            cur = conn.execute("""
+                SELECT title, year, rating, genre, quality, channel_username, message_id, caption
+                FROM movie_catalog
+                WHERE channel_username = ?
+                ORDER BY message_id DESC
+            """, (clean_channel,))
+
+            for row in cur.fetchall():
+                raw_items.append({
+                    "title": row[0],
+                    "year": row[1],
+                    "rating": row[2],
+                    "genre": row[3],
+                    "quality": row[4],
+                    "channel_username": row[5],
+                    "message_id": row[6],
+                    "caption": row[7]
+                })
+        except Exception as e:
+            logger.error(f"Get deduplicated catalog error: {e}")
+            return []
+
+        seen_keys = {}
+        dedup_results = []
+        for item in raw_items:
+            t, y, key = normalize_movie_title_and_year(item["title"], item["year"])
+            if not key:
+                continue
+
+            is_dup = False
+            if key in seen_keys:
+                prev_y = seen_keys[key].get("year")
+                if not prev_y or not y or prev_y == y:
+                    is_dup = True
+
+            if is_dup:
+                target = seen_keys[key]
+                if not target.get("year") and y:
+                    target["year"] = y
+                if not target.get("rating") and item.get("rating"):
+                    target["rating"] = item.get("rating")
+                if not target.get("genre") and item.get("genre"):
+                    target["genre"] = item.get("genre")
+            else:
+                item_copy = dict(item)
+                item_copy["title"] = t
+                item_copy["year"] = y
+                seen_keys[key] = item_copy
+                dedup_results.append(item_copy)
+
+        dedup_results.sort(key=lambda x: (x.get("title") or "").lower())
+        return dedup_results
+
+    def search_catalog(self, query: str = "", limit: int = 8) -> List[Dict[str, Any]]:
+        raw_items = []
+        try:
+            conn = self._conn()
+            self._ensure_catalog_table(conn)
             q = (query or "").strip()
             if q:
                 cur = conn.execute("""
                     SELECT title, year, rating, genre, quality, channel_username, message_id, caption
                     FROM movie_catalog
                     WHERE title LIKE ? OR caption LIKE ?
-                    ORDER BY id DESC
+                    ORDER BY message_id DESC
                     LIMIT ?
-                """, (f"%{q}%", f"%{q}%", limit))
+                """, (f"%{q}%", f"%{q}%", limit * 3))
             else:
                 cur = conn.execute("""
                     SELECT title, year, rating, genre, quality, channel_username, message_id, caption
                     FROM movie_catalog
-                    ORDER BY id DESC
+                    ORDER BY message_id DESC
                     LIMIT ?
-                """, (limit,))
+                """, (limit * 3,))
 
             for row in cur.fetchall():
-                results.append({
+                raw_items.append({
                     "title": row[0],
                     "year": row[1],
                     "rating": row[2],
@@ -171,4 +244,34 @@ class MetadataCache:
                 })
         except Exception as e:
             logger.error(f"Search catalog error: {e}")
-        return results
+            return []
+
+        seen_keys = {}
+        dedup_results = []
+        for item in raw_items:
+            t, y, key = normalize_movie_title_and_year(item["title"], item["year"])
+            if not key:
+                continue
+            is_dup = False
+            if key in seen_keys:
+                prev_y = seen_keys[key].get("year")
+                if not prev_y or not y or prev_y == y:
+                    is_dup = True
+            if is_dup:
+                target = seen_keys[key]
+                if not target.get("year") and y:
+                    target["year"] = y
+                if not target.get("rating") and item.get("rating"):
+                    target["rating"] = item.get("rating")
+                if not target.get("genre") and item.get("genre"):
+                    target["genre"] = item.get("genre")
+            else:
+                item_copy = dict(item)
+                item_copy["title"] = t
+                item_copy["year"] = y
+                seen_keys[key] = item_copy
+                dedup_results.append(item_copy)
+                if len(dedup_results) >= limit:
+                    break
+
+        return dedup_results

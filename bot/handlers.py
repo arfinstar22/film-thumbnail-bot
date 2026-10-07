@@ -8,7 +8,7 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
-from typing import Union
+from typing import Union, Optional, Dict, Any
 
 from pyrogram import Client, filters
 from pyrogram.types import (
@@ -20,6 +20,7 @@ from pyrogram.enums import ParseMode
 from .config import BOT_TOKEN, API_ID, API_HASH, SESSION_STRING, CHANNEL_WATERMARK, DEFAULT_REQUEST_LINK
 from .services.video import photo_thumbnail
 from .services.metadata.engine import MetadataEngine
+from .services.metadata.catalog import format_pinned_catalog
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -202,6 +203,7 @@ async def start_cmd(client: Client, msg: Message):
         await client.set_bot_commands([
             BotCommand("start", "Panduan & info bot"),
             BotCommand("cari", "Cari film di database channel"),
+            BotCommand("synckatalog", "Scan channel & update Pinned Catalog A-Z"),
             BotCommand("setwatermark", "Atur channel tujuan (@namachannel)"),
             BotCommand("setrequest", "Atur link tombol Request Film"),
             BotCommand("setdivider", "Atur stiker pemisah film di channel"),
@@ -231,6 +233,8 @@ async def start_cmd(client: Client, msg: Message):
         "• <code>/cari &lt;judul film&gt;</code>\n"
         "  Mencari film di katalog channel dengan link tonton langsung.\n"
         "  ▫️ <i>Mode Inline:</i> Ketik <code>@bot &lt;judul&gt;</code> di chat mana pun!\n\n"
+        "• <code>/synckatalog</code>\n"
+        "  Scan riwayat channel, bersihkan film duplikat (hanya ambil post terbaru), dan perbarui Pinned Catalog A-Z di channel.\n\n"
         f"• <code>/setwatermark @namachannel</code>\n"
         f"  Mengatur channel tujuan dan link promosi watermark.\n"
         f"  <i>Channel aktif saat ini:</i> <b>{wm}</b>\n\n"
@@ -486,6 +490,200 @@ async def autojoin_cmd(client: Client, msg: Message):
         await msg.reply_text("✅ <b>Auto-approve join request diaktifkan!</b>", parse_mode=ParseMode.HTML)
 
 
+def parse_movie_from_channel_message(msg: Message) -> Optional[Dict[str, Any]]:
+    media = msg.video or msg.document
+    if not media:
+        return None
+
+    if msg.document:
+        mime = getattr(msg.document, "mime_type", "") or ""
+        fname = getattr(msg.document, "file_name", "") or ""
+        if not (mime.startswith("video/") or re.search(r"\.(mp4|mkv|avi|webm|mov)$", fname, re.I)):
+            return None
+
+    caption = msg.caption or ""
+    plain = re.sub(r"<[^>]+>", "", caption) if caption else ""
+
+    title, year, rating, genre, quality = None, None, None, None, None
+
+    if plain:
+        m_head = re.search(r"🎬\s*([^\n\(•]+)(?:\s*\((\d{4})\))?", plain)
+        if m_head:
+            title = m_head.group(1).strip()
+            if m_head.group(2):
+                try:
+                    year = int(m_head.group(2))
+                except ValueError:
+                    pass
+
+        if not year:
+            m_year = re.search(r"(?:Tahun|🗓️)[^\d\n]*(\d{4})", plain, re.I)
+            if m_year:
+                try:
+                    year = int(m_year.group(1))
+                except ValueError:
+                    pass
+
+        m_rate = re.search(r"⭐[^\d\n]*([\d\.]+(?:/\d+)?)", plain)
+        if m_rate:
+            rating = m_rate.group(1).strip()
+
+        m_genre = re.search(r"(?:🎭|Genre)[^\n:]*:\s*([^\n]+)", plain, re.I)
+        if m_genre:
+            genre = m_genre.group(1).strip()
+
+        m_qual = re.search(r"(?:🎞️|Kualitas|Resolusi)[^\n:]*:\s*([^\n]+)", plain, re.I)
+        if m_qual:
+            quality = m_qual.group(1).strip()
+
+    if not title:
+        file_name = getattr(media, "file_name", "") or ""
+        if file_name:
+            parsed = _engine.parser.parse(file_name)
+            title = parsed.get("title")
+            if not year and parsed.get("year"):
+                year = parsed.get("year")
+            if not quality and parsed.get("resolution"):
+                quality = parsed.get("resolution")
+
+    if not title:
+        return None
+
+    return {
+        "title": title,
+        "year": year,
+        "rating": rating,
+        "genre": genre,
+        "quality": quality,
+        "message_id": msg.id,
+        "caption": caption
+    }
+
+
+async def update_pinned_catalog(client: Client, channel_username: str, chat_id: Optional[int] = None) -> int:
+    """Update or create the pinned alphabetical A-Z catalog in the channel.
+    Automatically deduplicates movies, keeping only the latest post.
+    """
+    clean_channel = (channel_username or "").lstrip("@").strip()
+    if not clean_channel:
+        return 0
+
+    movies = _engine.cache.get_deduplicated_catalog(clean_channel)
+    bot_user = getattr(client, "me", None)
+    if not bot_user:
+        try:
+            bot_user = await client.get_me()
+        except Exception:
+            pass
+    bot_username = bot_user.username if bot_user else ""
+
+    catalog_text = format_pinned_catalog(movies, clean_channel, bot_username)
+
+    catalog_kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔍 Cari Koleksi Film", switch_inline_query_current_chat="")
+        ]
+    ])
+
+    pinned_key = f"pinned_catalog_{clean_channel}"
+    stored_msg_id = _engine.cache.get_setting(pinned_key, "")
+
+    if stored_msg_id:
+        try:
+            msg_id_int = int(stored_msg_id)
+            await client.edit_message_text(
+                chat_id=channel_username,
+                message_id=msg_id_int,
+                text=catalog_text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=catalog_kb
+            )
+            logger.info(f"Updated existing pinned catalog in {channel_username} (msg {msg_id_int})")
+            return len(movies)
+        except Exception as e:
+            logger.warning(f"Could not edit pinned catalog msg {stored_msg_id}: {e}. Creating new pin...")
+
+    try:
+        new_msg = await client.send_message(
+            chat_id=channel_username,
+            text=catalog_text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=catalog_kb
+        )
+        await client.pin_chat_message(
+            chat_id=channel_username,
+            message_id=new_msg.id,
+            disable_notification=True
+        )
+        _engine.cache.set_setting(pinned_key, str(new_msg.id))
+        logger.info(f"Created & pinned new catalog message in {channel_username} (msg {new_msg.id})")
+        return len(movies)
+    except Exception as e:
+        logger.error(f"Failed to post/pin catalog in {channel_username}: {e}")
+        return len(movies)
+
+
+@app.on_message(filters.command(["synckatalog", "scanchannel"]))
+async def sync_catalog_cmd(client: Client, msg: Message):
+    chat_id = msg.chat.id
+    wm = _get_user_watermark(chat_id)
+    clean_wm = (wm or "").lstrip("@").strip()
+    if not clean_wm:
+        await msg.reply_text("❌ Channel watermark belum diatur. Gunakan <code>/setwatermark @namachannel</code> terlebih dahulu.")
+        return
+
+    status_msg = await msg.reply_text(
+        f"⏳ <b>Memulai Pemindaian Channel @{clean_wm}...</b>\n\n"
+        "• Membaca riwayat postingan film di channel...\n"
+        "• Menyaring film duplikat (mengambil post paling terbaru)...\n"
+        "• Memperbarui Pinned Catalog A-Z...",
+        parse_mode=ParseMode.HTML
+    )
+
+    scanned_total = 0
+    scanned_movies = 0
+
+    try:
+        async for ch_msg in client.get_chat_history(wm, limit=1000):
+            scanned_total += 1
+            info = parse_movie_from_channel_message(ch_msg)
+            if info:
+                scanned_movies += 1
+                _engine.cache.save_movie_post(
+                    title=info["title"],
+                    year=info["year"],
+                    rating=info["rating"],
+                    genre=info["genre"],
+                    quality=info["quality"],
+                    channel_username=clean_wm,
+                    message_id=info["message_id"],
+                    caption=info["caption"]
+                )
+
+        unique_count = await update_pinned_catalog(client, wm, chat_id=chat_id)
+        duplicates_removed = max(0, scanned_movies - unique_count)
+
+        await status_msg.edit_text(
+            f"✅ <b>Sinkronisasi & Pinned Catalog Selesai!</b>\n\n"
+            f"📢 <b>Channel:</b> @{clean_wm}\n"
+            f"📊 <b>Total Postingan Dipindai:</b> {scanned_total}\n"
+            f"🎬 <b>Total Film Ditemukan:</b> {scanned_movies}\n"
+            f"🧹 <b>Film Duplikat Dibersihkan:</b> {duplicates_removed} (diambil post terbaru)\n"
+            f"📚 <b>Koleksi Unik di Pinned Catalog:</b> {unique_count} film\n\n"
+            f"📌 <i>Pesan indeks katalog A-Z telah diperbarui dan di-pin di channel!</i>",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.exception("Sync catalog error")
+        await status_msg.edit_text(
+            f"❌ <b>Gagal Menyinkronkan Channel:</b>\n\n<code>{e}</code>\n\n"
+            "<i>Pastikan bot sudah dijadikan Administrator di channel dengan izin Kirim & Pin Pesan!</i>",
+            parse_mode=ParseMode.HTML
+        )
+
+
 @app.on_message(filters.video | filters.document)
 async def receive_video(client: Client, msg: Message):
     media = msg.video or msg.document
@@ -645,10 +843,17 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
         except Exception as ce:
             logger.warning(f"Gagal mencatat ke katalog film: {ce}")
 
+        # Update pinned catalog channel otomatis
+        try:
+            await update_pinned_catalog(client, wm)
+        except Exception as pce:
+            logger.warning(f"Gagal memperbarui pinned catalog: {pce}")
+
         await call.message.reply_text(
             f"✅ <b>Berhasil Diposting ke {wm}!</b>\n\n"
             f"• Film sudah terbit lengkap dengan tombol [ Gabung ], [ Trailer ], [ Request ], dan [ Bagikan ]\n"
             f"• Film otomatis masuk ke katalog pencarian (<code>/cari {title_meta}</code>)\n"
+            f"• Pinned Catalog A-Z di channel otomatis diperbarui!\n"
             f"• Stiker pemisah otomatis terkirim di bawahnya sebagai pembatas!",
             parse_mode=ParseMode.HTML
         )
