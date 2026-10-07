@@ -260,7 +260,10 @@ BOT_COMMANDS_LIST = [
     BotCommand("setrequest", "Atur link tombol Request Film"),
     BotCommand("setdivider", "Atur stiker pemisah film"),
     BotCommand("setsynopsis", "Aktif/matikan sinopsis otomatis"),
-    BotCommand("autojoin", "Aktif/matikan auto approve join")
+    BotCommand("autojoin", "Aktif/matikan auto approve join"),
+    BotCommand("addadmin", "Tambah admin baru ke bot"),
+    BotCommand("deladmin", "Hapus admin dari bot"),
+    BotCommand("admins", "Daftar admin bot yang aktif")
 ]
 
 
@@ -402,6 +405,13 @@ async def start_cmd(client: Client, msg: Message):
         "• <code>/autojoin on / off</code>\n"
         "  Otomatis setujui member yang minta join ke channel private.\n"
         f"  <i>Status auto-join:</i> <b>{autojoin_status}</b>\n\n"
+        "👑 <b>MANAJEMEN ADMINISTRATOR:</b>\n"
+        "• <code>/addadmin &lt;user_id atau @username&gt;</code>\n"
+        "  Tambah hak akses admin baru (bisa juga reply pesan/forward orangnya dengan /addadmin).\n\n"
+        "• <code>/deladmin &lt;user_id atau @username&gt;</code>\n"
+        "  Cabut hak akses admin dari pengguna.\n\n"
+        "• <code>/admins</code>\n"
+        "  Lihat daftar semua admin bot yang sedang aktif.\n\n"
         "⚡ <b>FITUR UTAMA:</b>\n"
         "• 🛡️ <b>Queue Worker Antrean</b>: Forward 10-20 film diproses berurutan, aman dari Render OOM RAM 512MB.\n"
         "• 🔒 <b>Admin Security Lock</b>: Akses posting & pengaturan terkunci aman hanya untuk admin.\n"
@@ -850,6 +860,153 @@ async def set_vault_cmd(client: Client, msg: Message):
             f"<i>Pastikan bot sudah ditambahkan ke channel tersebut dan dijadikan <b>Administrator</b>!</i>",
             parse_mode=ParseMode.HTML
         )
+
+
+# ================= ADMIN ACCESS MANAGEMENT =================
+@app.on_message(filters.command(["addadmin", "tambahadmin"]))
+async def add_admin_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Khusus Administrator.", parse_mode=ParseMode.HTML)
+        return
+
+    target_id = None
+    target_name = "Pengguna"
+
+    # 1. Reply to user or forward
+    if msg.reply_to_message:
+        target_user = msg.reply_to_message.from_user or msg.reply_to_message.forward_from
+        if target_user:
+            target_id = target_user.id
+            target_name = target_user.first_name or f"@{target_user.username}"
+
+    # 2. Argument: ID or @username
+    if not target_id:
+        args = msg.text.split(maxsplit=1)
+        if len(args) > 1:
+            raw_arg = args[1].strip()
+            if raw_arg.lstrip("-").isdigit():
+                target_id = int(raw_arg)
+            elif raw_arg.startswith("@"):
+                try:
+                    u = await client.get_users(raw_arg)
+                    if u:
+                        target_id = u.id
+                        target_name = u.first_name or raw_arg
+                except Exception as e:
+                    await msg.reply_text(f"❌ Tidak dapat menemukan user dengan username <b>{raw_arg}</b>: {e}", parse_mode=ParseMode.HTML)
+                    return
+
+    if not target_id:
+        await msg.reply_text(
+            "👑 <b>Cara Menambah Admin Bot:</b>\n\n"
+            "1. <b>Ketik ID:</b> <code>/addadmin 123456789</code>\n"
+            "2. <b>Ketik Username:</b> <code>/addadmin @username</code>\n"
+            "3. <b>Reply Pesan:</b> Reply pesan orang yang ingin dijadikan admin lalu ketik <code>/addadmin</code>\n\n"
+            "💡 <i>User ID Telegram bisa dicek lewat bot @userinfobot.</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    _engine.cache.add_admin_id(target_id)
+    await msg.reply_text(
+        f"✅ <b>Admin Berhasil Ditambahkan!</b>\n\n"
+        f"• Nama: <b>{target_name}</b>\n"
+        f"• User ID: <code>{target_id}</code>\n\n"
+        f"Pengguna ini sekarang memiliki akses penuh untuk upload film, mengatur channel, dan menggunakan semua fitur admin bot.",
+        parse_mode=ParseMode.HTML
+    )
+
+
+@app.on_message(filters.command(["deladmin", "hapusadmin"]))
+async def del_admin_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Khusus Administrator.", parse_mode=ParseMode.HTML)
+        return
+
+    target_id = None
+    if msg.reply_to_message:
+        target_user = msg.reply_to_message.from_user or msg.reply_to_message.forward_from
+        if target_user:
+            target_id = target_user.id
+
+    if not target_id:
+        args = msg.text.split(maxsplit=1)
+        if len(args) > 1:
+            raw_arg = args[1].strip()
+            if raw_arg.lstrip("-").isdigit():
+                target_id = int(raw_arg)
+            elif raw_arg.startswith("@"):
+                try:
+                    u = await client.get_users(raw_arg)
+                    if u:
+                        target_id = u.id
+                except Exception as e:
+                    await msg.reply_text(f"❌ User <b>{raw_arg}</b> tidak ditemukan: {e}", parse_mode=ParseMode.HTML)
+                    return
+
+    if not target_id:
+        await msg.reply_text(
+            "👑 <b>Cara Menghapus Admin:</b>\n\n"
+            "• Ketik: <code>/deladmin 123456789</code> atau <code>/deladmin @username</code>\n"
+            "• Atau reply pesan orangnya dengan <code>/deladmin</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    my_id = msg.from_user.id if msg.from_user else msg.chat.id
+    if target_id == my_id:
+        await msg.reply_text("⚠️ Anda tidak dapat menghapus ID Anda sendiri dari daftar admin.", parse_mode=ParseMode.HTML)
+        return
+
+    _engine.cache.remove_admin_id(target_id)
+    env_note = ""
+    if target_id in ADMIN_USER_IDS:
+        env_note = "\n\n⚠️ <i>Catatan: User ID ini juga terdaftar di environment variable (Render). Untuk menghapus permanen, hapus juga dari ADMIN_USER_IDS di dashboard Render.</i>"
+
+    await msg.reply_text(
+        f"🗑️ <b>Admin Berhasil Dihapus:</b>\n\n"
+        f"• User ID: <code>{target_id}</code> sudah dicabut dari akses admin bot.{env_note}",
+        parse_mode=ParseMode.HTML
+    )
+
+
+@app.on_message(filters.command(["admins", "listadmin"]))
+async def list_admins_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Khusus Administrator.", parse_mode=ParseMode.HTML)
+        return
+
+    env_admins = ADMIN_USER_IDS
+    db_admins = _engine.cache.get_admin_ids()
+    primary = _engine.cache.get_setting("primary_admin_id", "")
+
+    all_ids = set(env_admins + db_admins)
+    if primary and primary.isdigit():
+        all_ids.add(int(primary))
+
+    lines = [
+        "👑 <b>DAFTAR ADMINISTRATOR BOT</b>",
+        "━━━━━━━━━━━━━━━━━━━━"
+    ]
+    if not all_ids:
+        lines.append("<i>Belum ada admin terdaftar.</i>")
+    else:
+        for idx, aid in enumerate(sorted(all_ids), 1):
+            tags = []
+            if aid in env_admins:
+                tags.append("ENV")
+            if str(aid) == primary:
+                tags.append("Primary")
+            if aid in db_admins:
+                tags.append("Dynamic")
+            tag_str = f" <i>({', '.join(tags)})</i>" if tags else ""
+            lines.append(f"{idx}. <code>{aid}</code>{tag_str}")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("<i>• Tambah: <code>/addadmin &lt;user_id atau @username&gt;</code></i>")
+    lines.append("<i>• Hapus: <code>/deladmin &lt;user_id&gt;</code></i>")
+
+    await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 # ================= MULTI-CHANNEL SWITCHER =================
