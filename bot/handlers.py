@@ -198,27 +198,30 @@ def get_caption_kb(message_id: int, watermark: str):
 
 
 
+BOT_COMMANDS_LIST = [
+    BotCommand("start", "Panduan lengkap & status bot"),
+    BotCommand("autopost", "Atur mode posting (Otomatis / Manual)"),
+    BotCommand("stats", "Statistik & analitik koleksi film"),
+    BotCommand("healthcheck", "Audit link mati & post terhapus"),
+    BotCommand("rekomendasi", "Posting rekomendasi film ke channel"),
+    BotCommand("sethighlight", "Atur rekomendasi harian otomatis"),
+    BotCommand("retarget", "Update tombol post lama massal"),
+    BotCommand("cari", "Cari film di database channel"),
+    BotCommand("synckatalog", "Scan channel & update Pinned Catalog"),
+    BotCommand("backup", "Ekspor backup database & file_id JSON"),
+    BotCommand("restorechannel", "Restore/migrasi film ke channel baru"),
+    BotCommand("setwatermark", "Atur channel tujuan (@namachannel)"),
+    BotCommand("setrequest", "Atur link tombol Request Film"),
+    BotCommand("setdivider", "Atur stiker pemisah film di channel"),
+    BotCommand("setsynopsis", "Aktif/matikan sinopsis film otomatis"),
+    BotCommand("autojoin", "Aktif/matikan auto approve join request")
+]
+
+
 @app.on_message(filters.command("start"))
 async def start_cmd(client: Client, msg: Message):
     try:
-        await client.set_bot_commands([
-            BotCommand("start", "Panduan & info bot"),
-            BotCommand("autopost", "Atur mode posting: Otomatis atau Manual"),
-            BotCommand("stats", "Statistik & analitik koleksi film"),
-            BotCommand("healthcheck", "Audit link mati & post terhapus"),
-            BotCommand("rekomendasi", "Posting rekomendasi film ke channel"),
-            BotCommand("sethighlight", "Atur rekomendasi harian otomatis"),
-            BotCommand("retarget", "Update tombol & watermark post lama massal"),
-            BotCommand("cari", "Cari film di database channel"),
-            BotCommand("synckatalog", "Scan channel & update Pinned Catalog A-Z"),
-            BotCommand("backup", "Backup katalog & file_id film ke file JSON"),
-            BotCommand("restorechannel", "Restore/migrasi semua film ke channel baru"),
-            BotCommand("setwatermark", "Atur channel tujuan (@namachannel)"),
-            BotCommand("setrequest", "Atur link tombol Request Film"),
-            BotCommand("setdivider", "Atur stiker pemisah film di channel"),
-            BotCommand("setsynopsis", "Aktif/matikan sinopsis film otomatis"),
-            BotCommand("autojoin", "Aktif/matikan persetujuan join request otomatis")
-        ])
+        await client.set_bot_commands(BOT_COMMANDS_LIST)
     except Exception:
         pass
 
@@ -242,62 +245,59 @@ async def start_cmd(client: Client, msg: Message):
     text = (
         "🎬 <b>FILM CLEANER & PUBLISHER BOT</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "Selamat datang! Bot ini otomatis membersihkan watermark lama, mengekstrak rating & genre resmi, merapikan sinopsis lipat, mendeteksi duplikat, dan menerbitkan langsung ke channel Telegram Anda.\n\n"
+        "Selamat datang! Bot ini otomatis membersihkan watermark lama, mengekstrak rating & genre resmi, merapikan sinopsis lipat, mendeteksi duplikat, dan menerbitkan film langsung ke channel Telegram Anda.\n\n"
         "📌 <b>DAFTAR PERINTAH (COMMANDS):</b>\n\n"
-        "• <code>/start</code>\n"
-        "  Menampilkan menu bantuan dan daftar fitur ini.\n\n"
+        "🚀 <b>PENGATURAN & UPLOAD CHANNEL:</b>\n"
         "• <code>/autopost</code>\n"
-        "  Mengatur mode upload ke channel: Otomatis langsung kirim vs Manual pratinjau dulu.\n"
-        f"  <i>Mode aktif saat ini:</i> <b>{autopost_status}</b>\n\n"
-        "• <code>/stats</code>\n"
-        "  Statistik analitik channel: Total film, sebaran genre teratas, era tahun, dan distribusi resolusi.\n\n"
-        "• <code>/healthcheck</code>\n"
-        "  Audit kesehatan channel: Mendeteksi & membersihkan postingan yang terhapus / takedown agar Pinned Catalog bebas dari link mati.\n\n"
-        "• <code>/rekomendasi</code>\n"
-        "  Posting rekomendasi film acak pilihan ke channel dengan tombol lompat langsung ke video.\n\n"
-        "• <code>/sethighlight on / off</code>\n"
-        "  Mengatur pengiriman rekomendasi film harian otomatis ke channel.\n"
-        f"  <i>Status harian:</i> <b>{hl_status}</b>\n\n"
-        "• <code>/retarget</code>\n"
-        "  Update tombol massal: Memperbarui tombol [ Gabung ], [ Trailer ], [ Request ], dan [ Bagikan ] pada semua postingan lama di channel tanpa re-upload video.\n\n"
+        "  Atur mode terbit: Otomatis langsung kirim vs Manual pratinjau dulu.\n"
+        f"  <i>Status saat ini:</i> <b>{autopost_status}</b>\n\n"
+        f"• <code>/setwatermark @namachannel</code>\n"
+        f"  Mengatur channel tujuan posting dan promosi watermark.\n"
+        f"  <i>Channel aktif:</i> <b>{wm}</b>\n\n"
+        "• <code>/setrequest https://t.me/linkanda</code>\n"
+        "  Mengatur link tujuan tombol <b>[ 💬 Request Film ]</b> di channel (ketik <code>/setrequest off</code> untuk mematikan).\n"
+        f"  <i>Link request:</i> {req_status}\n\n"
+        "• <code>/setdivider</code>\n"
+        "  Mengatur stiker pemisah antar film di channel (reply stiker apa saja dengan /setdivider, atau <code>default</code> / <code>off</code>).\n"
+        f"  <i>Stiker aktif:</i> <b>{div_status}</b>\n\n"
+        "• <code>/setsynopsis on / off</code>\n"
+        "  Mengatur sinopsis lipat otomatis dari Wikipedia Indonesia.\n"
+        f"  <i>Status sinopsis:</i> <b>{syn_status}</b>\n\n"
+        "📚 <b>PENCARIAN & KATALOG PINNED:</b>\n"
         "• <code>/cari &lt;judul film&gt;</code>\n"
-        "  Mencari film di katalog channel dengan link tonton langsung.\n"
+        "  Cari film di katalog channel dengan link tonton langsung.\n"
         "  ▫️ <i>Mode Inline:</i> Ketik <code>@bot &lt;judul&gt;</code> di chat mana pun!\n\n"
         "• <code>/synckatalog</code>\n"
-        "  Scan riwayat channel, bersihkan film duplikat (hanya ambil post terbaru), dan perbarui Pinned Catalog A-Z di channel.\n\n"
+        "  Scan channel, bersihkan duplikat, dan update Pinned Catalog A-Z + Telegra.ph.\n\n"
+        "🛡️ <b>PEMELIHARAAN & DISASTER RECOVERY:</b>\n"
+        "• <code>/stats</code>\n"
+        "  Statistik analitik: Total film, sebaran genre, era tahun, dan resolusi.\n\n"
+        "• <code>/healthcheck</code>\n"
+        "  Audit link mati: Bersihkan postingan yang terhapus/takedown dari katalog.\n\n"
+        "• <code>/retarget</code>\n"
+        "  Update tombol massal pada semua postingan lama channel tanpa re-upload.\n\n"
         "• <code>/backup</code>\n"
-        "  Mengekspor file JSON cadangan secara manual (Bot juga otomatis mengirim & update file ini tiap ada film baru, serta auto-hapus file lama).\n\n"
+        "  Ekspor file JSON cadangan lengkap dengan file_id (bot juga auto-update tiap ada film baru & auto-hapus file lama).\n\n"
         "• <code>/restorechannel @channel_baru</code>\n"
-        "  Restore / migrasi otomatis semua film ke channel baru dengan jeda anti-spam 3.5s.\n"
-        "  ▫️ <i>Cara:</i> Reply file <code>katalog_backup.json</code> dengan <code>/restorechannel @channel_baru</code>.\n\n"
-        f"• <code>/setwatermark @namachannel</code>\n"
-        f"  Mengatur channel tujuan dan link promosi watermark.\n"
-        f"  <i>Channel aktif saat ini:</i> <b>{wm}</b>\n\n"
-        "• <code>/setrequest https://t.me/linkanda</code>\n"
-        "  Mengatur link tujuan tombol <b>[ 💬 Request Film ]</b> di channel.\n"
-        "  ▫️ Ketik <code>/setrequest off</code> untuk menyembunyikan tombol request.\n"
-        f"  <i>Link request saat ini:</i> {req_status}\n\n"
-        "• <code>/setdivider</code>\n"
-        "  Mengatur stiker pemisah antar film di channel:\n"
-        "  ▫️ <b>Reply stiker apa saja</b> dengan <code>/setdivider</code> untuk pasang stiker itu.\n"
-        "  ▫️ <code>/setdivider default</code> untuk kembali ke logo custom Film Indonesia.\n"
-        "  ▫️ <code>/setdivider off</code> untuk mematikan stiker pemisah.\n"
-        f"  <i>Stiker aktif saat ini:</i> <b>{div_status}</b>\n\n"
-        "• <code>/setsynopsis on / off</code>\n"
-        "  Mengatur sinopsis lipat otomatis dari ensiklopedia Wikipedia Indonesia.\n"
-        f"  <i>Sinopsis saat ini:</i> <b>{syn_status}</b>\n\n"
+        "  Restore / migrasi semua film ke channel baru dengan jeda anti-spam 3.5s (reply file <code>katalog_backup.json</code>).\n\n"
+        "✨ <b>ENGAGEMENT & MEMBER:</b>\n"
+        "• <code>/rekomendasi</code>\n"
+        "  Posting rekomendasi 1 film pilihan acak berating tinggi ke channel.\n\n"
+        "• <code>/sethighlight on / off</code>\n"
+        "  Aktifkan / matikan posting rekomendasi film harian otomatis.\n"
+        f"  <i>Status rekomendasi harian:</i> <b>{hl_status}</b>\n\n"
         "• <code>/autojoin on / off</code>\n"
         "  Otomatis setujui member yang minta join ke channel private.\n"
-        f"  <i>Auto-join saat ini:</i> <b>{autojoin_status}</b>\n\n"
+        f"  <i>Status auto-join:</i> <b>{autojoin_status}</b>\n\n"
         "⚡ <b>FITUR UTAMA:</b>\n"
         "• 🧹 <b>Pembersih Cerdas</b>: Menghapus teks uploader lama & noise secara otomatis.\n"
+        "• ⚠️ <b>Deteksi Duplikat</b>: Mencegah upload ganda & menahan auto-post jika film sudah ada.\n"
         "• ⭐ <b>Rating & Genre IMDb</b>: Deteksi otomatis rating dan genre film tanpa API key.\n"
-        "• 🔍 <b>Pencarian Cepat & Inline</b>: Cari film lewat <code>/cari</code> atau ketik <code>@bot judul</code> di chat grup/PM.\n"
-        "• 👥 <b>Auto-Approve Join Request</b>: Setujui member channel private otomatis & sambut dengan pesan ramah.\n"
-        "• 📖 <b>Sinopsis Lipat Otomatis</b>: Ringkasan alur cerita akurat via kutipan lipat Telegram.\n"
-        "• 🚀 <b>1-Klik Posting Channel</b>: Terbit ke channel dengan tombol 2x2 simetris (Gabung, Trailer, Request, Share).\n"
-        "• 🎞️ <b>Stiker Pembatas</b>: Otomatis kirim stiker pemisah visual setelah setiap film di channel.\n"
-        "• 📋 <b>Salin & Edit Teks</b>: Tombol cepat untuk copy caption atau edit teks manual.\n\n"
+        "• 📖 <b>Sinopsis Lipat Wikipedia</b>: Ringkasan alur cerita akurat via kutipan lipat Telegram.\n"
+        "• 🚀 <b>1-Klik Posting Channel</b>: Terbit ke channel dengan tombol 2x2 simetris.\n"
+        "• 🎞️ <b>Stiker Pembatas</b>: Otomatis kirim stiker pemisah visual setelah setiap film.\n"
+        "• 📌 <b>Pinned Catalog A-Z & Telegra.ph</b>: Daftar isi rapi yang selalu sinkron.\n"
+        "• 💾 <b>Disaster Recovery</b>: Auto-backup cloud file_id untuk pemulihan instan ke channel baru.\n\n"
         "💡 <b>CARA PENGGUNAAN:</b>\n"
         "1. Kirim atau forward file video film ke bot ini.\n"
         "2. Tunggu 1 detik hingga bot merapikan caption dan metadata.\n"
@@ -2297,8 +2297,15 @@ async def auto_delete_channel_service_messages(client: Client, msg: Message):
 
 
 async def on_bot_startup(client: Client):
-    """Background startup task: automatically hydrates the channel catalog and restores the pinned message."""
+    """Background startup task: automatically sets bot commands, hydrates the channel catalog and restores the pinned message."""
     try:
+        # Register all bot commands in Telegram UI menu immediately
+        try:
+            await client.set_bot_commands(BOT_COMMANDS_LIST)
+            logger.info("Bot commands successfully registered to Telegram menu on startup.")
+        except Exception as ce:
+            logger.warning(f"Could not register bot commands on startup: {ce}")
+
         await asyncio.sleep(3)
         clean_wm = (CHANNEL_WATERMARK or "@film_indonesia1").lstrip("@").strip().lower()
         if clean_wm:
