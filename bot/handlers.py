@@ -573,9 +573,15 @@ def parse_movie_from_channel_message(msg: Message) -> Optional[Dict[str, Any]]:
     }
 
 
-async def update_pinned_catalog(client: Client, channel_username: str, chat_id: Optional[int] = None) -> int:
+async def update_pinned_catalog(
+    client: Client,
+    channel_username: str,
+    chat_id: Optional[int] = None,
+    old_catalog_ids: Optional[List[int]] = None
+) -> int:
     """Update or create the pinned alphabetical A-Z catalog in the channel.
-    Automatically deduplicates movies, keeping only the latest post.
+    Guarantees that older duplicate catalog messages are deleted and unpinned,
+    leaving strictly ONE clean pinned catalog in the channel.
     """
     clean_channel = (channel_username or "").lstrip("@").strip()
     if not clean_channel:
@@ -611,43 +617,85 @@ async def update_pinned_catalog(client: Client, channel_username: str, chat_id: 
     catalog_kb = InlineKeyboardMarkup(buttons)
 
     pinned_key = f"pinned_catalog_{clean_channel}"
-    stored_msg_id = _engine.cache.get_setting(pinned_key, "")
+    stored_msg_id_str = _engine.cache.get_setting(pinned_key, "")
+    stored_msg_id = int(stored_msg_id_str) if stored_msg_id_str and stored_msg_id_str.isdigit() else None
 
+    # Track all known older catalog message IDs
+    all_old_ids = set()
+    if old_catalog_ids:
+        all_old_ids.update(old_catalog_ids)
     if stored_msg_id:
+        all_old_ids.add(stored_msg_id)
+
+    # Check Telegram channel pinned message directly
+    current_pin_id = None
+    try:
+        chat_info = await client.get_chat(channel_username)
+        if chat_info.pinned_message:
+            current_pin_id = chat_info.pinned_message.id
+            pin_text = getattr(chat_info.pinned_message, "text", "") or getattr(chat_info.pinned_message, "caption", "") or ""
+            if "KATALOG" in pin_text or "BUKA KATALOG" in pin_text:
+                all_old_ids.add(current_pin_id)
+    except Exception as ce:
+        logger.warning(f"Could not check chat pinned message: {ce}")
+
+    # Determine target message ID to reuse
+    target_msg_id = max(all_old_ids) if all_old_ids else None
+    edited_successfully = False
+
+    if target_msg_id:
         try:
-            msg_id_int = int(stored_msg_id)
             await client.edit_message_text(
                 chat_id=channel_username,
-                message_id=msg_id_int,
+                message_id=target_msg_id,
                 text=catalog_text,
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
                 reply_markup=catalog_kb
             )
-            logger.info(f"Updated existing pinned catalog in {channel_username} (msg {msg_id_int})")
-            return len(movies)
+            edited_successfully = True
+            logger.info(f"Edited active catalog in {channel_username} (msg {target_msg_id})")
         except Exception as e:
-            logger.warning(f"Could not edit pinned catalog msg {stored_msg_id}: {e}. Creating new pin...")
+            logger.warning(f"Could not edit catalog message {target_msg_id}: {e}")
 
+    if not edited_successfully:
+        try:
+            new_msg = await client.send_message(
+                chat_id=channel_username,
+                text=catalog_text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=catalog_kb
+            )
+            target_msg_id = new_msg.id
+            logger.info(f"Created new catalog message in {channel_username} (msg {target_msg_id})")
+        except Exception as e:
+            logger.error(f"Failed to send catalog message in {channel_username}: {e}")
+            return len(movies)
+
+    _engine.cache.set_setting(pinned_key, str(target_msg_id))
+
+    # DELETE all older duplicate catalog messages from channel completely!
+    stray_ids = [mid for mid in all_old_ids if mid != target_msg_id]
+    if stray_ids:
+        try:
+            await client.delete_messages(channel_username, stray_ids)
+            logger.info(f"Deleted {len(stray_ids)} older duplicate catalog messages: {stray_ids}")
+        except Exception as de:
+            logger.warning(f"Could not delete older catalog messages: {de}")
+
+    # Ensure strictly ONE pin: unpin all and pin target only
     try:
-        new_msg = await client.send_message(
-            chat_id=channel_username,
-            text=catalog_text,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-            reply_markup=catalog_kb
-        )
+        await client.unpin_all_chat_messages(channel_username)
         await client.pin_chat_message(
             chat_id=channel_username,
-            message_id=new_msg.id,
+            message_id=target_msg_id,
             disable_notification=True
         )
-        _engine.cache.set_setting(pinned_key, str(new_msg.id))
-        logger.info(f"Created & pinned new catalog message in {channel_username} (msg {new_msg.id})")
-        return len(movies)
-    except Exception as e:
-        logger.error(f"Failed to post/pin catalog in {channel_username}: {e}")
-        return len(movies)
+    except Exception as pe:
+        logger.warning(f"Pin management error in {channel_username}: {pe}")
+
+    return len(movies)
 
 
 @app.on_message(filters.command(["synckatalog", "scanchannel"]))
@@ -673,6 +721,7 @@ async def sync_catalog_cmd(client: Client, msg: Message):
         f"⏳ <b>Memulai Pemindaian Channel @{clean_wm}...</b>\n\n"
         f"• Membaca riwayat hingga {scan_limit} postingan...\n"
         "• Menyaring film duplikat (mengambil post paling terbaru)...\n"
+        "• Membersihkan pesan tersemat (pin) lama...\n"
         "• Memperbarui Pinned Catalog A-Z...",
         parse_mode=ParseMode.HTML
     )
@@ -687,6 +736,7 @@ async def sync_catalog_cmd(client: Client, msg: Message):
         stored_pin = _engine.cache.get_setting(f"pinned_catalog_{clean_wm}", "")
         max_id = int(stored_pin) if stored_pin and stored_pin.isdigit() else 500
 
+    found_catalog_msg_ids = []
     scanned_total = 0
     scanned_movies = 0
     start_id = max(1, max_id - scan_limit)
@@ -704,6 +754,12 @@ async def sync_catalog_cmd(client: Client, msg: Message):
                         if ch_msg and getattr(ch_msg, "id", None):
                             _engine.cache.delete_movie_posts([ch_msg.id])
                         continue
+
+                    msg_text = getattr(ch_msg, "text", "") or getattr(ch_msg, "caption", "") or ""
+                    if "KATALOG KOLEKSI FILM" in msg_text or "KATALOG & DAFTAR ISI" in msg_text:
+                        found_catalog_msg_ids.append(ch_msg.id)
+                        continue
+
                     scanned_total += 1
                     info = parse_movie_from_channel_message(ch_msg)
                     if info:
@@ -722,7 +778,7 @@ async def sync_catalog_cmd(client: Client, msg: Message):
                 logger.warning(f"Batch fetch error for ids {batch_ids[:2]}..: {be}")
             await asyncio.sleep(0.05)
 
-        unique_count = await update_pinned_catalog(client, wm, chat_id=chat_id)
+        unique_count = await update_pinned_catalog(client, wm, chat_id=chat_id, old_catalog_ids=found_catalog_msg_ids)
         duplicates_removed = max(0, scanned_movies - unique_count)
 
         await status_msg.edit_text(
@@ -731,8 +787,9 @@ async def sync_catalog_cmd(client: Client, msg: Message):
             f"📊 <b>Total Pesan Diperiksa:</b> {scanned_total}\n"
             f"🎬 <b>Total Film Ditemukan:</b> {scanned_movies}\n"
             f"🧹 <b>Film Duplikat Dibersihkan:</b> {duplicates_removed} (diambil post terbaru)\n"
+            f"🗑️ <b>Pin Lama Dihapus:</b> {len(found_catalog_msg_ids)} pesan lama dibersihkan\n"
             f"📚 <b>Koleksi Unik di Pinned Catalog:</b> {unique_count} film\n\n"
-            f"📌 <i>Pesan indeks katalog A-Z telah diperbarui dan di-pin di channel!</i>",
+            f"📌 <i>Pesan indeks katalog A-Z telah diperbarui dan di-pin bersih di channel!</i>",
             parse_mode=ParseMode.HTML
         )
     except Exception as e:
