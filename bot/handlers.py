@@ -682,6 +682,68 @@ def parse_movie_from_channel_message(msg: Message) -> Optional[Dict[str, Any]]:
     }
 
 
+async def auto_hydrate_channel_catalog(
+    client: Client,
+    channel_username: str,
+    scan_limit: int = 5000
+) -> int:
+    """Scans channel history in fast batches to populate the local database cache with all existing movies.
+    Ensures that when a bot restarts or redeploys, it never loses older movies from the catalog.
+    """
+    clean_channel = (channel_username or "").lstrip("@").strip().lower()
+    if not clean_channel:
+        return 0
+
+    max_id = 0
+    try:
+        probe = await client.send_message(channel_username, "🔄", disable_notification=True)
+        max_id = probe.id
+        await probe.delete()
+    except Exception as pe:
+        logger.warning(f"Could not probe max message id in {channel_username}: {pe}")
+        stored_pin = _engine.cache.get_setting(f"pinned_catalog_{clean_channel}", "")
+        max_id = int(stored_pin) if stored_pin and stored_pin.isdigit() else 2000
+
+    start_id = max(1, max_id - scan_limit)
+    batch_size = 100
+    scanned_movies = 0
+
+    for batch_start in range(start_id, max_id + 1, batch_size):
+        batch_ids = list(range(batch_start, min(batch_start + batch_size, max_id + 1)))
+        try:
+            msgs = await client.get_messages(channel_username, message_ids=batch_ids)
+            if not isinstance(msgs, list):
+                msgs = [msgs]
+            for ch_msg in msgs:
+                if not ch_msg or getattr(ch_msg, "empty", False):
+                    continue
+                if getattr(ch_msg, "service", None) or getattr(ch_msg, "pinned_message", None):
+                    continue
+                msg_text = getattr(ch_msg, "text", "") or getattr(ch_msg, "caption", "") or ""
+                if "KATALOG KOLEKSI FILM" in msg_text or "KATALOG & DAFTAR ISI" in msg_text:
+                    continue
+
+                info = parse_movie_from_channel_message(ch_msg)
+                if info:
+                    scanned_movies += 1
+                    _engine.cache.save_movie_post(
+                        title=info["title"],
+                        year=info["year"],
+                        rating=info["rating"],
+                        genre=info["genre"],
+                        quality=info["quality"],
+                        channel_username=clean_channel,
+                        message_id=info["message_id"],
+                        caption=info["caption"]
+                    )
+        except Exception as be:
+            logger.debug(f"Hydration batch fetch error: {be}")
+        await asyncio.sleep(0.02)
+
+    _engine.cache.set_setting(f"synced_{clean_channel}", "yes")
+    return scanned_movies
+
+
 async def update_pinned_catalog(
     client: Client,
     channel_username: str,
@@ -697,6 +759,21 @@ async def update_pinned_catalog(
         return 0
 
     movies = _engine.cache.get_deduplicated_catalog(clean_channel)
+
+    # AUTO-HYDRATION SAFEGUARD:
+    # If cache has fewer than 50 movies or has never been hydrated on this container instance,
+    # automatically scan channel history so we NEVER overwrite the catalog with just a few films!
+    has_synced = _engine.cache.get_setting(f"synced_{clean_channel.lower()}", "no")
+    if has_synced != "yes" or len(movies) < 50:
+        logger.info(f"Channel @{clean_channel} has only {len(movies)} movies in local DB (synced={has_synced}). Auto-hydrating...")
+        try:
+            await auto_hydrate_channel_catalog(client, clean_channel)
+            movies = _engine.cache.get_deduplicated_catalog(clean_channel)
+            _engine.cache.set_setting(f"synced_{clean_channel.lower()}", "yes")
+            logger.info(f"Auto-hydration completed for @{clean_channel}. Total movies: {len(movies)}")
+        except Exception as he:
+            logger.warning(f"Auto-hydration error in update_pinned_catalog: {he}")
+
     bot_user = getattr(client, "me", None)
     if not bot_user:
         try:
@@ -1424,3 +1501,20 @@ async def auto_delete_channel_service_messages(client: Client, msg: Message):
         logger.info(f"Auto-deleted service notification message {msg.id} in channel {msg.chat.id}")
     except Exception as e:
         logger.debug(f"Could not auto-delete service message {msg.id}: {e}")
+
+
+async def on_bot_startup(client: Client):
+    """Background startup task: automatically hydrates the channel catalog and restores the pinned message."""
+    try:
+        await asyncio.sleep(3)
+        clean_wm = (CHANNEL_WATERMARK or "@film_indonesia1").lstrip("@").strip().lower()
+        if clean_wm:
+            curr_movies = _engine.cache.get_deduplicated_catalog(clean_wm)
+            has_synced = _engine.cache.get_setting(f"synced_{clean_wm}", "no")
+            if has_synced != "yes" or len(curr_movies) < 50:
+                logger.info(f"Bot startup: Auto-hydrating channel catalog for @{clean_wm}...")
+                await auto_hydrate_channel_catalog(client, clean_wm)
+                await update_pinned_catalog(client, clean_wm)
+                logger.info(f"Bot startup: Catalog for @{clean_wm} successfully restored and pinned!")
+    except Exception as e:
+        logger.warning(f"Bot startup hydration error: {e}")

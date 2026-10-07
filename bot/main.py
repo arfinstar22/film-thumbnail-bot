@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import sys
@@ -5,9 +6,10 @@ import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+from pyrogram import idle
 from pyrogram.errors import FloodWait
 
-from .handlers import app
+from .handlers import app, on_bot_startup
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
@@ -30,11 +32,18 @@ def run_health_server():
     server.serve_forever()
 
 
+async def start_with_hydration():
+    await app.start()
+    logging.info("Bot thumbnail film berjalan & siap melayani!")
+    asyncio.create_task(on_bot_startup(app))
+    await idle()
+    await app.stop()
+
+
 def run_bot():
     while True:
         try:
-            logging.info("Bot thumbnail film berjalan & siap melayani!")
-            app.run()
+            app.run(start_with_hydration())
             break
         except FloodWait as e:
             wait_time = int(e.value)

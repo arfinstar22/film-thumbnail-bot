@@ -132,12 +132,12 @@ class MetadataCache:
         message_id: int,
         caption: str
     ):
-        clean_channel = (channel_username or "").lstrip("@").strip()
+        clean_channel = (channel_username or "").lstrip("@").strip().lower()
         clean_title, year, _ = normalize_movie_title_and_year(title, year)
         try:
             conn = self._conn()
             self._ensure_catalog_table(conn)
-            cur = conn.execute("SELECT 1 FROM movie_catalog WHERE channel_username = ? AND message_id = ?", (clean_channel, message_id))
+            cur = conn.execute("SELECT 1 FROM movie_catalog WHERE LOWER(channel_username) = ? AND message_id = ?", (clean_channel, message_id))
             if cur.fetchone():
                 return
 
@@ -171,14 +171,14 @@ class MetadataCache:
     def get_deduplicated_catalog(self, channel_username: str) -> List[Dict[str, Any]]:
         """Retrieve unique movies for a channel, automatically keeping only the latest post for duplicates."""
         raw_items = []
-        clean_channel = (channel_username or "").lstrip("@").strip()
+        clean_channel = (channel_username or "").lstrip("@").strip().lower()
         try:
             conn = self._conn()
             self._ensure_catalog_table(conn)
             cur = conn.execute("""
                 SELECT title, year, rating, genre, quality, channel_username, message_id, caption
                 FROM movie_catalog
-                WHERE channel_username = ?
+                WHERE LOWER(channel_username) = ?
                 ORDER BY message_id DESC
             """, (clean_channel,))
 
