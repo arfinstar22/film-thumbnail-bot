@@ -3345,15 +3345,22 @@ async def auto_approve_join_request(client: Client, req: ChatJoinRequest):
     try:
         chat_title = req.chat.title or "Channel Film"
         user_name = req.from_user.first_name or "Sobat Film"
+        bot_uname = (client.me.username if getattr(client, "me", None) else "") or _engine.cache.get_setting("bot_username", "") or "filmindbot"
+        req_link = f"https://t.me/{bot_uname}?start=request"
+
         welcome_text = (
-            f"👋 Halo <b>{user_name}</b>!\n\n"
-            f"✅ Permintaan bergabung Anda ke <b>{chat_title}</b> sudah disetujui otomatis.\n\n"
-            f"🍿 Selamat menonton! Anda bisa mencari koleksi film langsung melalui tombol di bawah:"
+            f"🎬 <b>Selamat Datang di {chat_title}!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Halo <b>{user_name}</b>, permintaan bergabung Anda telah disetujui otomatis. Selamat menikmati koleksi film terbaik kami! 🍿\n\n"
+            f"💬 <b>Mau request film apa hari ini?</b>\n"
+            f"Tekan tombol <b>Request Film</b> di bawah, ketik judulnya, dan bot akan otomatis memberi tahu kamu lewat DM saat film sudah tayang!"
         )
 
-        buttons = []
+        buttons = [
+            [InlineKeyboardButton("💬 Request Film Sekarang", url=req_link)]
+        ]
         if req.chat.username:
-            buttons.append([InlineKeyboardButton(f"🍿 Buka {chat_title}", url=f"https://t.me/{req.chat.username}")])
+            buttons.append([InlineKeyboardButton(f"🍿 Masuk ke Channel", url=f"https://t.me/{req.chat.username}")])
         buttons.append([InlineKeyboardButton("🔍 Cari Koleksi Film", switch_inline_query_current_chat="")])
 
         await client.send_message(
