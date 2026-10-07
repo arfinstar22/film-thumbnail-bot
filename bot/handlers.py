@@ -911,6 +911,76 @@ async def update_pinned_catalog(
     return len(movies)
 
 
+async def send_or_update_backup_document(
+    client: Client,
+    chat_id: int,
+    channel_username: str,
+    is_auto: bool = False
+) -> Optional[Message]:
+    """Generates an up-to-date backup JSON file and sends it to the user.
+    Automatically deletes the previous backup JSON document message from the chat
+    so the conversation stays clean and tidy with only the latest backup file.
+    """
+    if not chat_id or chat_id < 0:
+        return None
+
+    clean_wm = (channel_username or "").lstrip("@").strip().lower()
+    if not clean_wm:
+        return None
+
+    try:
+        movies = _engine.cache.get_deduplicated_catalog(clean_wm)
+        if not movies:
+            return None
+
+        json_str = _engine.cache.export_catalog_json(clean_wm)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as tf:
+            tf.write(json_str)
+            temp_path = tf.name
+
+        # Delete previously sent backup JSON message in this user's PM
+        old_msg_id = _engine.cache.get_setting(f"last_backup_msg_{chat_id}_{clean_wm}", "")
+        if old_msg_id and old_msg_id.isdigit():
+            try:
+                await client.delete_messages(chat_id, int(old_msg_id))
+            except Exception as de:
+                logger.debug(f"Could not delete old backup message {old_msg_id}: {de}")
+
+        doc_name = f"katalog_backup_{clean_wm}.json"
+        status_label = "🔄 <b>AUTO-UPDATE BACKUP FILM</b>" if is_auto else "💾 <b>BACKUP KATALOG KOLEKSI FILM</b>"
+        caption = (
+            f"{status_label}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📢 <b>Channel:</b> @{clean_wm}\n"
+            f"🎬 <b>Total Koleksi:</b> {len(movies)} judul film\n"
+            f"🔑 <b>Cloud File ID:</b> Tersimpan lengkap\n\n"
+            f"💡 <i>File backup ini selalu otomatis diperbarui tiap ada film baru. File lama otomatis dihapus agar chat tetap bersih.</i>\n\n"
+            f"🛡️ <b>Jika Channel Kena Banned / Pindah:</b>\n"
+            f"Reply file ini dengan: <code>/restorechannel @channel_baru</code>"
+        )
+
+        sent_doc = await client.send_document(
+            chat_id=chat_id,
+            document=temp_path,
+            file_name=doc_name,
+            caption=caption,
+            parse_mode=ParseMode.HTML
+        )
+
+        if sent_doc:
+            _engine.cache.set_setting(f"last_backup_msg_{chat_id}_{clean_wm}", str(sent_doc.id))
+
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
+
+        return sent_doc
+    except Exception as e:
+        logger.warning(f"Error in send_or_update_backup_document: {e}")
+        return None
+
+
 @app.on_message(filters.command(["synckatalog", "scanchannel"]))
 async def sync_catalog_cmd(client: Client, msg: Message):
     chat_id = msg.chat.id
@@ -1029,6 +1099,13 @@ async def sync_catalog_cmd(client: Client, msg: Message):
             f"📌 <i>Pesan indeks katalog A-Z telah diperbarui dan di-pin bersih di channel!</i>",
             parse_mode=ParseMode.HTML
         )
+
+        # Auto-update file backup JSON di bot chat & hapus pesan file lama
+        if chat_id and chat_id > 0:
+            try:
+                await send_or_update_backup_document(client, chat_id, wm, is_auto=True)
+            except Exception as be:
+                logger.warning(f"Gagal auto-update backup json pada sync: {be}")
     except Exception as e:
         logger.exception("Sync catalog error")
         await status_msg.edit_text(
@@ -1116,6 +1193,13 @@ async def publish_video_to_channel(
         except Exception as pce:
             logger.warning(f"Gagal memperbarui pinned catalog: {pce}")
 
+        # Auto-update file backup JSON di bot chat & hapus pesan file lama
+        if chat_id and chat_id > 0:
+            try:
+                await send_or_update_backup_document(client, chat_id, watermark, is_auto=True)
+            except Exception as be:
+                logger.warning(f"Gagal auto-update backup json: {be}")
+
     return sent_channel
 
 
@@ -1152,36 +1236,11 @@ async def backup_catalog_cmd(client: Client, msg: Message):
             )
             return
 
-        json_str = _engine.cache.export_catalog_json(clean_wm)
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as tf:
-            tf.write(json_str)
-            temp_path = tf.name
-
-        doc_name = f"katalog_backup_{clean_wm}.json"
-        caption = (
-            f"💾 <b>BACKUP KATALOG KOLEKSI FILM</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📢 <b>Channel:</b> @{clean_wm}\n"
-            f"🎬 <b>Total Film:</b> {len(movies)} judul\n"
-            f"🔑 <b>Cloud File ID:</b> Tersimpan aman\n\n"
-            f"💡 <b>PANDUAN RESTORE / PINDAH CHANNEL:</b>\n"
-            f"Jika channel Anda diblokir atau ingin pindah ke channel baru, balas (reply) file JSON ini dengan perintah:\n"
-            f"<code>/restorechannel @channel_baru</code>\n\n"
-            f"<i>Bot akan otomatis memposting ulang seluruh film ke channel baru dengan jeda anti-spam 3.5 detik.</i>"
-        )
-
-        await client.send_document(
-            chat_id=chat_id,
-            document=temp_path,
-            file_name=doc_name,
-            caption=caption,
-            parse_mode=ParseMode.HTML
-        )
-        await status_msg.delete()
-        try:
-            os.remove(temp_path)
-        except Exception:
-            pass
+        sent_doc = await send_or_update_backup_document(client, chat_id, clean_wm, is_auto=False)
+        if sent_doc:
+            await status_msg.delete()
+        else:
+            await status_msg.edit_text("❌ Gagal membuat file backup.", parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.exception("Backup export error")
         await status_msg.edit_text(f"❌ <b>Gagal membuat backup:</b> <code>{e}</code>", parse_mode=ParseMode.HTML)
