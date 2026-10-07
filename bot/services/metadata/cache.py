@@ -1,3 +1,4 @@
+import datetime
 import json
 import logging
 import os
@@ -816,3 +817,158 @@ class MetadataCache:
         val = "on" if enabled else "off"
         self.set_setting(f"protect_{chat_id}", val)
         self.set_setting("protect_content", val)
+
+    # ------------------ FORCE-SUBSCRIBE (FSUB) ------------------
+    def get_fsub_status(self) -> bool:
+        val = self.get_setting("fsub_status", "on")
+        return val.strip().lower() == "on"
+
+    def set_fsub_status(self, enabled: bool):
+        self.set_setting("fsub_status", "on" if enabled else "off")
+
+    # ------------------ SCHEDULED POSTS (PRIME TIME) ------------------
+    def _ensure_scheduled_table(self, conn):
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS scheduled_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
+                video_file_id TEXT,
+                caption_text TEXT,
+                metadata_json TEXT,
+                watermark TEXT,
+                scheduled_timestamp INTEGER,
+                title TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sched_status_time ON scheduled_posts (status, scheduled_timestamp)")
+
+    def add_scheduled_post(
+        self,
+        chat_id: int,
+        video_file_id: str,
+        caption_text: str,
+        metadata: dict,
+        watermark: str,
+        title: str,
+        scheduled_timestamp: Optional[int] = None
+    ) -> int:
+        conn = self._conn()
+        self._ensure_scheduled_table(conn)
+        meta = metadata or {}
+        clean_title = title or meta.get("title") or "Film"
+
+        if not scheduled_timestamp:
+            pending = self.get_pending_scheduled_posts()
+            slots = get_next_prime_time_slots(len(pending) + 1)
+            scheduled_timestamp = int(slots[-1].timestamp())
+
+        cur = conn.execute("""
+            INSERT INTO scheduled_posts (chat_id, video_file_id, caption_text, metadata_json, watermark, scheduled_timestamp, title, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+        """, (chat_id, video_file_id, caption_text, json.dumps(meta), watermark, int(scheduled_timestamp), clean_title))
+        conn.commit()
+        row_id = cur.lastrowid
+        self.reschedule_pending_posts()
+        return row_id
+
+    def get_pending_scheduled_posts(self) -> List[Dict[str, Any]]:
+        conn = self._conn()
+        self._ensure_scheduled_table(conn)
+        cur = conn.execute("""
+            SELECT id, chat_id, video_file_id, caption_text, metadata_json, watermark, scheduled_timestamp, title, created_at
+            FROM scheduled_posts
+            WHERE status = 'pending'
+            ORDER BY scheduled_timestamp ASC
+        """)
+        items = []
+        for row in cur.fetchall():
+            items.append({
+                "id": row[0],
+                "chat_id": row[1],
+                "video_file_id": row[2],
+                "caption_text": row[3],
+                "metadata": json.loads(row[4]) if row[4] else {},
+                "watermark": row[5],
+                "scheduled_timestamp": row[6],
+                "title": row[7],
+                "created_at": row[8]
+            })
+        return items
+
+    def get_due_scheduled_posts(self, current_timestamp: int) -> List[Dict[str, Any]]:
+        conn = self._conn()
+        self._ensure_scheduled_table(conn)
+        cur = conn.execute("""
+            SELECT id, chat_id, video_file_id, caption_text, metadata_json, watermark, scheduled_timestamp, title
+            FROM scheduled_posts
+            WHERE status = 'pending' AND scheduled_timestamp <= ?
+            ORDER BY scheduled_timestamp ASC
+        """, (current_timestamp,))
+        items = []
+        for row in cur.fetchall():
+            items.append({
+                "id": row[0],
+                "chat_id": row[1],
+                "video_file_id": row[2],
+                "caption_text": row[3],
+                "metadata": json.loads(row[4]) if row[4] else {},
+                "watermark": row[5],
+                "scheduled_timestamp": row[6],
+                "title": row[7]
+            })
+        return items
+
+    def mark_scheduled_post_done(self, post_id: int):
+        conn = self._conn()
+        self._ensure_scheduled_table(conn)
+        conn.execute("UPDATE scheduled_posts SET status = 'completed' WHERE id = ?", (post_id,))
+        conn.commit()
+
+    def clear_all_scheduled_posts(self) -> int:
+        conn = self._conn()
+        self._ensure_scheduled_table(conn)
+        cur = conn.execute("DELETE FROM scheduled_posts WHERE status = 'pending'")
+        count = cur.rowcount
+        conn.commit()
+        return count
+
+    def reschedule_pending_posts(self):
+        pending = self.get_pending_scheduled_posts()
+        if not pending:
+            return
+        slots = get_next_prime_time_slots(len(pending))
+        conn = self._conn()
+        for item, slot in zip(pending, slots):
+            conn.execute("UPDATE scheduled_posts SET scheduled_timestamp = ? WHERE id = ?", (int(slot.timestamp()), item["id"]))
+        conn.commit()
+
+
+WIB = datetime.timezone(datetime.timedelta(hours=7))
+
+
+def get_next_prime_time_slots(count: int, start_from: Optional[datetime.datetime] = None) -> List[datetime.datetime]:
+    now = start_from or datetime.datetime.now(WIB)
+    current_day = now.date()
+    step_minutes = 30 if count > 6 else 60
+
+    candidate_times = []
+    for day_offset in range(14):
+        target_date = current_day + datetime.timedelta(days=day_offset)
+        # Sore: 16:00 to 18:59
+        cur_t = datetime.datetime(target_date.year, target_date.month, target_date.day, 16, 0, tzinfo=WIB)
+        end_afternoon = datetime.datetime(target_date.year, target_date.month, target_date.day, 18, 59, tzinfo=WIB)
+        while cur_t <= end_afternoon:
+            candidate_times.append(cur_t)
+            cur_t += datetime.timedelta(minutes=step_minutes)
+
+        # Malam: 20:00 to 22:59
+        cur_t = datetime.datetime(target_date.year, target_date.month, target_date.day, 20, 0, tzinfo=WIB)
+        end_night = datetime.datetime(target_date.year, target_date.month, target_date.day, 22, 59, tzinfo=WIB)
+        while cur_t <= end_night:
+            candidate_times.append(cur_t)
+            cur_t += datetime.timedelta(minutes=step_minutes)
+
+    valid_slots = [t for t in candidate_times if t > (now + datetime.timedelta(minutes=1))]
+    return valid_slots[:count]

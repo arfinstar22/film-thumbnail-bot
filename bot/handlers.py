@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import json
 import logging
 import os
@@ -8,14 +9,14 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
-from typing import Union, Optional, Dict, Any, List
+from typing import Union, Optional, Dict, Any, List, Tuple
 
 from pyrogram import Client, filters
 from pyrogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand,
     InlineQuery, InlineQueryResultArticle, InputTextMessageContent, ChatJoinRequest
 )
-from pyrogram.enums import ParseMode, ChatType
+from pyrogram.enums import ParseMode, ChatType, ChatMemberStatus
 from pyrogram.errors import FloodWait, UserIsBlocked, InputUserDeactivated
 
 from .config import (
@@ -25,6 +26,7 @@ from .config import (
 from .services.video import photo_thumbnail
 from .services.metadata.engine import MetadataEngine
 from .services.metadata.catalog import format_pinned_catalog, publish_or_update_telegraph_catalog
+from .services.metadata.cache import WIB, get_next_prime_time_slots
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -40,6 +42,7 @@ _engine = MetadataEngine()
 _video_queue: asyncio.Queue = asyncio.Queue()
 _is_processing: bool = False
 _queue_worker_task: Optional[asyncio.Task] = None
+_scheduler_worker_task: Optional[asyncio.Task] = None
 
 
 def is_admin(user_id: int) -> bool:
@@ -68,6 +71,171 @@ def is_admin(user_id: int) -> bool:
 def check_admin(msg: Message) -> bool:
     uid = msg.from_user.id if msg.from_user else msg.chat.id
     return is_admin(uid)
+
+
+async def check_fsub_member(client: Client, user_id: int, chat_id_or_wm: Union[int, str, None] = None) -> bool:
+    """Checks whether the user has joined the required channel."""
+    if is_admin(user_id):
+        return True
+    if not _engine.cache.get_fsub_status():
+        return True
+
+    if isinstance(chat_id_or_wm, int) or (isinstance(chat_id_or_wm, str) and str(chat_id_or_wm).lstrip("-").isdigit()):
+        chan = _get_user_watermark(int(chat_id_or_wm))
+    elif isinstance(chat_id_or_wm, str) and chat_id_or_wm:
+        chan = chat_id_or_wm
+    else:
+        chan = _get_user_watermark(user_id)
+
+    if not chan or not chan.startswith("@") or len(chan) <= 1:
+        return True
+
+    clean_chan = ("@" + chan.lstrip("@")).strip()
+    try:
+        member = await client.get_chat_member(clean_chan, user_id)
+        if member and member.status in (ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED):
+            return True
+    except Exception as e:
+        err_str = str(e).lower()
+        if "user_not_participant" in err_str or "participant" in err_str:
+            return False
+        logger.warning(f"FSUB check error for {user_id} in {clean_chan}: {e}")
+        return True
+    return False
+
+
+def get_fsub_lock_content(chat_id_or_wm: Union[int, str, None], first_name: str) -> tuple:
+    if isinstance(chat_id_or_wm, int) or (isinstance(chat_id_or_wm, str) and str(chat_id_or_wm).lstrip("-").isdigit()):
+        wm = _get_user_watermark(int(chat_id_or_wm))
+    elif isinstance(chat_id_or_wm, str) and chat_id_or_wm:
+        wm = chat_id_or_wm
+    else:
+        wm = "@film_indonesia1"
+    clean_wm = wm.lstrip("@").strip() or "film_indonesia1"
+    channel_url = f"https://t.me/{clean_wm}"
+    text = (
+        f"🔒 <b>AKSES TERKUNCI!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Halo <b>{first_name}</b>, untuk dapat request film, mencari judul, atau menonton serial di bot ini, kamu <b>wajib bergabung</b> ke channel resmi kami terlebih dahulu:\n\n"
+        f"📢 <b>@{clean_wm}</b>\n\n"
+        f"<i>Silakan klik tombol di bawah untuk bergabung, lalu tekan tombol <b>🔄 Saya Sudah Gabung</b>:</i>"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"📢 Gabung @{clean_wm}", url=channel_url)],
+        [InlineKeyboardButton("🔄 Saya Sudah Gabung", callback_data="fsub_retry")]
+    ])
+    return text, kb
+
+
+def format_queue_dashboard(pending_posts: list, watermark: str) -> Tuple[str, InlineKeyboardMarkup]:
+    now = datetime.datetime.now(WIB)
+    now_str = now.strftime("%H:%M WIB")
+    wm = watermark or "@film_indonesia1"
+
+    if not pending_posts:
+        text = (
+            "⏰ <b>ANTREAN JADWAL TAYANG (PRIME-TIME QUEUE)</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"🕒 <i>Waktu Server:</i> <b>{now_str}</b>\n"
+            f"📢 <i>Channel Tujuan:</i> <b>{wm}</b>\n\n"
+            "📭 <b>Antrean Kosong!</b> Tidak ada film yang sedang dijadwalkan.\n\n"
+            "💡 <b>Cara Menjadwalkan Film:</b>\n"
+            "1. Kirim/forward file video film ke bot ini.\n"
+            "2. Pada pratinjau film, klik tombol <b>[ ⏰ Jadwal Prime-Time ]</b>.\n"
+            "3. Atau aktifkan mode otomatis lewat <code>/autopost schedule</code>.\n\n"
+            "<i>Jam tayang otomatis diatur pada jam sibuk: 16:00, 17:00, 18:00 sore & 20:00, 21:00, 22:00 malam WIB!</i>"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Refresh Antrean", callback_data="sched_refresh")]
+        ])
+        return text, kb
+
+    count = len(pending_posts)
+    step_info = "Tiap 30 Menit" if count > 6 else "Tiap 1 Jam"
+    lines = [
+        "⏰ <b>ANTREAN JADWAL TAYANG (PRIME-TIME QUEUE)</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"📊 <i>Total Film dalam Antrean:</i> <b>{count} Film</b> ({step_info})",
+        f"🕒 <i>Waktu Server Saat Ini:</i> <b>{now_str}</b>",
+        f"📢 <i>Channel Target:</i> <b>{wm}</b>\n",
+        "📋 <b>Daftar Lengkap Antrean Tayang:</b>"
+    ]
+
+    for idx, item in enumerate(pending_posts, 1):
+        sched_dt = datetime.datetime.fromtimestamp(item["scheduled_timestamp"], WIB)
+        if sched_dt.date() == now.date():
+            time_label = sched_dt.strftime("Hari ini, %H:%M WIB")
+        elif sched_dt.date() == (now + datetime.timedelta(days=1)).date():
+            time_label = sched_dt.strftime("Besok, %H:%M WIB")
+        else:
+            time_label = sched_dt.strftime("%d %b, %H:%M WIB")
+
+        title = item.get("title") or "Film"
+        lines.append(f"<b>#{idx}.</b> 🕒 <code>[{time_label}]</code> 🎬 <b>{title}</b>")
+
+    lines.append("\n<i>✨ Setiap film yang selesai diterbitkan otomatis akan langsung hilang dari antrean ini secara real-time!</i>")
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔄 Refresh Antrean", callback_data="sched_refresh"),
+            InlineKeyboardButton("⚡ Terbitkan Semua Sekarang", callback_data="sched_flush_all")
+        ],
+        [
+            InlineKeyboardButton("🗑 Kosongkan Antrean", callback_data="sched_clear_all")
+        ]
+    ])
+    return "\n".join(lines), kb
+
+
+async def scheduler_worker(client: Client):
+    """Background worker that periodically checks and publishes scheduled prime-time posts."""
+    logger.info("Prime-time scheduler background worker started.")
+    while True:
+        try:
+            now_ts = int(time.time())
+            due_posts = _engine.cache.get_due_scheduled_posts(now_ts)
+            for item in due_posts:
+                try:
+                    logger.info(f"Publishing scheduled post: {item['title']} to {item['watermark']}")
+                    await publish_video_to_channel(
+                        client=client,
+                        chat_id=item["chat_id"],
+                        video_file_id=item["video_file_id"],
+                        caption_text=item["caption_text"],
+                        metadata=item["metadata"],
+                        watermark=item["watermark"],
+                        update_pin=True
+                    )
+                    _engine.cache.mark_scheduled_post_done(item["id"])
+                    try:
+                        clean_t = datetime.datetime.fromtimestamp(item["scheduled_timestamp"], WIB).strftime("%H:%M")
+                        await client.send_message(
+                            chat_id=item["chat_id"],
+                            text=(
+                                f"⏰ <b>[JADWAL TAYANG TEPAT WAKTU]</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━\n"
+                                f"🎬 <b>{item['title']}</b> telah berhasil diterbitkan otomatis ke channel {item['watermark']} pada pukul <b>{clean_t} WIB</b>!\n\n"
+                                f"<i>Sisa antrean dapat dicek lewat /queue</i>"
+                            ),
+                            parse_mode=ParseMode.HTML
+                        )
+                    except Exception:
+                        pass
+                except Exception as pe:
+                    logger.error(f"Error publishing scheduled post {item['id']}: {pe}")
+                await asyncio.sleep(2.0)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Error in scheduler_worker: {e}")
+        await asyncio.sleep(25)
+
+
+def ensure_scheduler_worker(client: Client):
+    global _scheduler_worker_task
+    if _scheduler_worker_task is None or _scheduler_worker_task.done():
+        _scheduler_worker_task = asyncio.create_task(scheduler_worker(client))
+
 
 
 async def _apply_expandable_caption(chat_id: Union[int, str], message_id: int, caption: str, reply_markup=None):
@@ -228,10 +396,11 @@ def get_caption_kb(message_id: int, watermark: str):
             InlineKeyboardButton("📢 Buka Channel", url=channel_url)
         ],
         [
-            InlineKeyboardButton("✏️ Edit Caption", callback_data=f"edit:{message_id}"),
-            InlineKeyboardButton("📋 Salin Teks", callback_data=f"copy:{message_id}")
+            InlineKeyboardButton("⏰ Jadwal Prime-Time", callback_data=f"sched:{message_id}"),
+            InlineKeyboardButton("✏️ Edit Caption", callback_data=f"edit:{message_id}")
         ],
         [
+            InlineKeyboardButton("📋 Salin Teks", callback_data=f"copy:{message_id}"),
             InlineKeyboardButton("🔄 Format Ulang", callback_data=f"info:{message_id}")
         ]
     ])
@@ -242,12 +411,14 @@ BOT_COMMANDS_LIST = [
     BotCommand("start", "Panduan lengkap & status bot"),
     BotCommand("request", "Kirim permintaan judul film"),
     BotCommand("cari", "Cari film di database channel"),
+    BotCommand("queue", "Antrean & jadwal tayang prime-time"),
+    BotCommand("fsub", "Atur force-subscribe (wajib join)"),
     BotCommand("channels", "Kelola & ganti channel aktif"),
     BotCommand("usechannel", "Pilih channel aktif cepat"),
     BotCommand("requests", "Daftar permintaan film member"),
     BotCommand("editpost", "Edit caption & tombol post channel"),
     BotCommand("setvault", "Atur brankas channel backup"),
-    BotCommand("autopost", "Atur mode posting (Otomatis/Manual)"),
+    BotCommand("autopost", "Atur mode posting (Otomatis/Manual/Jadwal)"),
     BotCommand("stats", "Statistik & analitik koleksi film"),
     BotCommand("healthcheck", "Audit link mati & post terhapus"),
     BotCommand("rekomendasi", "Posting rekomendasi film ke channel"),
@@ -271,6 +442,7 @@ BOT_COMMANDS_LIST = [
 
 @app.on_message(filters.command("start"))
 async def start_cmd(client: Client, msg: Message):
+    ensure_scheduler_worker(client)
     try:
         await client.set_bot_commands(BOT_COMMANDS_LIST)
     except Exception:
@@ -286,6 +458,14 @@ async def start_cmd(client: Client, msg: Message):
     # Cache bot username if available
     if getattr(client, "me", None) and client.me.username:
         _engine.cache.set_setting("bot_username", client.me.username)
+
+    # Force-Subscribe check for non-admin members
+    if not is_admin(user_id):
+        is_sub = await check_fsub_member(client, user_id, msg.chat.id)
+        if not is_sub:
+            text, kb = get_fsub_lock_content(msg.chat.id, first_name)
+            await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
 
     # 1. Deep link: /start request (redirected from channel [ 💬 Request Film ] button)
     if len(msg.command) > 1 and msg.command[1].strip().lower() in ("request", "req"):
@@ -410,10 +590,19 @@ async def start_cmd(client: Client, msg: Message):
     req_status = f"<code>{req_link}</code>" if req_link and req_link != "off" else ("Mati (Off)" if req_link == "off" else "<i>Belum diatur</i>")
     syn_status = "Aktif (On)" if syn_val != "off" else "Mati (Off)"
     autojoin_status = "Aktif (On)" if autojoin_val != "off" else "Mati (Off)"
-    autopost_status = "⚡ Otomatis (Langsung Terbit)" if autopost_val == "on" else "✋ Manual (Pratinjau Dulu)"
+    if autopost_val == "schedule":
+        autopost_status = "⏰ Jadwal Prime-Time (16-18 & 20-22 WIB)"
+    elif autopost_val == "on":
+        autopost_status = "⚡ Otomatis Instan (Langsung Terbit)"
+    else:
+        autopost_status = "✋ Manual (Pratinjau Dulu)"
     protect_status = "🛡️ Aktif (On)" if protect_val else "🔓 Mati (Off)"
     hl_status = "Aktif (On)" if hl_val == "on" else "Mati (Off)"
     vault_status = f"<code>{curr_vault}</code>" if curr_vault else "<i>Belum diatur (Off)</i>"
+    fsub_val = _engine.cache.get_fsub_status()
+    fsub_status = "🔒 Wajib Join Channel" if fsub_val else "🔓 Bebas Akses"
+    sched_posts = _engine.cache.get_pending_scheduled_posts()
+    sched_status = f"{len(sched_posts)} Film Dijadwalkan" if sched_posts else "Kosong"
 
     text = (
         "🎬 <b>FILM CLEANER & PUBLISHER BOT (ADMIN DASHBOARD)</b>\n"
@@ -422,8 +611,14 @@ async def start_cmd(client: Client, msg: Message):
         "📌 <b>DAFTAR PERINTAH (COMMANDS):</b>\n\n"
         "🚀 <b>PENGATURAN & UPLOAD CHANNEL:</b>\n"
         "• <code>/autopost</code>\n"
-        "  Atur mode terbit: Otomatis langsung kirim vs Manual pratinjau dulu.\n"
+        "  Atur mode terbit: Jadwal Prime-Time / Otomatis Instan / Manual.\n"
         f"  <i>Status saat ini:</i> <b>{autopost_status}</b>\n\n"
+        "• <code>/queue</code> atau <code>/jadwal</code>\n"
+        "  Live dashboard antrean jadwal tayang prime-time.\n"
+        f"  <i>Status antrean:</i> <b>{sched_status}</b>\n\n"
+        "• <code>/fsub on / off</code>\n"
+        "  Kunci bot wajib join channel sebelum request/cari film.\n"
+        f"  <i>Status FSUB:</i> <b>{fsub_status}</b>\n\n"
         "• <code>/protect on / off</code>\n"
         "  Proteksi konten video channel (Telegram Anti-Forward & Anti-Download).\n"
         f"  <i>Status proteksi:</i> <b>{protect_status}</b>\n\n"
@@ -675,6 +870,13 @@ async def cb_btn_start_request(client: Client, query: CallbackQuery):
     await query.answer()
     user_id = query.from_user.id if query.from_user else query.message.chat.id
     first_name = query.from_user.first_name if query.from_user else "Sobat Film"
+    if not is_admin(user_id):
+        is_sub = await check_fsub_member(client, user_id, user_id)
+        if not is_sub:
+            text, kb = get_fsub_lock_content(user_id, first_name)
+            await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
     _user_states[user_id] = "waiting_movie_request"
     wm = _get_user_watermark(user_id)
     clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
@@ -755,6 +957,13 @@ async def request_movie_cmd(client: Client, msg: Message):
     first_name = msg.from_user.first_name if msg.from_user else "Sobat Film"
     wm = _get_user_watermark(chat_id)
     clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
+
+    if not is_admin(user_id):
+        is_sub = await check_fsub_member(client, user_id, chat_id)
+        if not is_sub:
+            text, kb = get_fsub_lock_content(chat_id, first_name)
+            await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
 
     args = msg.text.split(None, 1)
     if len(args) < 2 or not args[1].strip():
@@ -1349,6 +1558,15 @@ async def editpost_cmd(client: Client, msg: Message):
 
 @app.on_message(filters.command(["cari", "search"]))
 async def search_movie_cmd(client: Client, msg: Message):
+    user_id = msg.from_user.id if msg.from_user else msg.chat.id
+    first_name = msg.from_user.first_name if msg.from_user else "Sobat Film"
+    if not is_admin(user_id):
+        is_sub = await check_fsub_member(client, user_id, msg.chat.id)
+        if not is_sub:
+            text, kb = get_fsub_lock_content(msg.chat.id, first_name)
+            await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
     args = msg.text.split(maxsplit=1)
     if len(args) < 2 or not args[1].strip():
         bot_info = await client.get_me()
@@ -1619,15 +1837,20 @@ async def broadcast_cmd(client: Client, msg: Message):
 
 
 def get_autopost_kb(current_mode: str) -> InlineKeyboardMarkup:
-    is_auto = (current_mode == "on")
-    btn_auto_text = "✅ ⚡ Otomatis (Langsung Terbit)" if is_auto else "⚡ Otomatis (Langsung Terbit)"
-    btn_manual_text = "✅ ✋ Manual (Pratinjau Dulu)" if not is_auto else "✋ Manual (Pratinjau Dulu)"
+    is_sched = (current_mode == "schedule")
+    is_auto = (current_mode in ("on", "auto"))
+    is_manual = not (is_sched or is_auto)
+
+    btn_sched_text = "✅ ⏰ Jadwal Prime-Time" if is_sched else "⏰ Jadwal Prime-Time"
+    btn_auto_text = "✅ ⚡ Otomatis Instan" if is_auto else "⚡ Otomatis Instan"
+    btn_manual_text = "✅ ✋ Manual (Pratinjau Dulu)" if is_manual else "✋ Manual (Pratinjau Dulu)"
 
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(btn_auto_text, callback_data="autopost:on")
+            InlineKeyboardButton(btn_sched_text, callback_data="autopost:schedule")
         ],
         [
+            InlineKeyboardButton(btn_auto_text, callback_data="autopost:on"),
             InlineKeyboardButton(btn_manual_text, callback_data="autopost:off")
         ]
     ])
@@ -1644,14 +1867,25 @@ async def set_autopost_cmd(client: Client, msg: Message):
 
     if len(args) > 1:
         subcmd = args[1].strip().lower()
-        if subcmd in ["on", "auto", "otomatis", "1", "true"]:
+        if subcmd in ["schedule", "jadwal", "sched", "queue", "primetime", "prime"]:
+            _engine.cache.set_setting(f"autopost_{chat_id}", "schedule")
+            await msg.reply_text(
+                "⏰ <b>Mode Posting PRIME-TIME JADWAL Diaktifkan!</b>\n\n"
+                "Mulai sekarang, setiap video yang dikirim ke bot akan otomatis dimasukkan ke antrean prime-time:\n"
+                "• <b>Jam Tayang:</b> 16:00, 17:00, 18:00 WIB (Sore) & 20:00, 21:00, 22:00 WIB (Malam).\n"
+                "• Jika film > 6, jeda otomatis dibagi rata tiap 30 menit.\n"
+                "• Cek antrean live kapan saja dengan perintah <code>/queue</code>.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        elif subcmd in ["on", "auto", "otomatis", "1", "true"]:
             _engine.cache.set_setting(f"autopost_{chat_id}", "on")
             await msg.reply_text(
-                "✅ <b>Mode Auto-Post DIAKTIFKAN!</b>\n\n"
+                "✅ <b>Mode Auto-Post Instan DIAKTIFKAN!</b>\n\n"
                 "Mulai sekarang, setiap kali Anda kirim atau forward video film ke bot ini:\n"
                 "• Bot akan otomatis merapikan thumbnail & caption.\n"
                 "• <b>Langsung otomatis diterbitkan ke channel</b> tanpa perlu klik tombol lagi!\n\n"
-                "<i>Untuk kembali ke mode manual, ketik <code>/autopost off</code>.</i>",
+                "<i>Untuk mode jadwal, ketik <code>/autopost schedule</code>. Untuk manual, ketik <code>/autopost off</code>.</i>",
                 parse_mode=ParseMode.HTML
             )
             return
@@ -1661,14 +1895,19 @@ async def set_autopost_cmd(client: Client, msg: Message):
                 "✋ <b>Mode Posting Diubah ke MANUAL!</b>\n\n"
                 "Setiap kali Anda kirim/forward video ke bot:\n"
                 "• Bot hanya akan mengirimkan pratinjau hasil rapi di chat ini.\n"
-                "• Anda bisa memeriksa atau mengedit teks dulu sebelum menekan tombol <b>🚀 Posting ke Channel</b>.",
+                "• Anda bisa memeriksa atau mengedit teks dulu sebelum menekan tombol <b>🚀 Posting ke Channel</b> atau <b>⏰ Jadwal Prime-Time</b>.",
                 parse_mode=ParseMode.HTML
             )
             return
 
     curr = _engine.cache.get_setting(f"autopost_{chat_id}", "off")
     wm = _get_user_watermark(chat_id)
-    status_label = "⚡ Otomatis (Langsung Terbit ke Channel)" if curr == "on" else "✋ Manual (Pratinjau Dulu)"
+    if curr == "schedule":
+        status_label = "⏰ Jadwal Prime-Time (16-18 & 20-22 WIB)"
+    elif curr in ("on", "auto"):
+        status_label = "⚡ Otomatis Instan (Langsung Terbit ke Channel)"
+    else:
+        status_label = "✋ Manual (Pratinjau Dulu)"
 
     text = (
         "⚙️ <b>PENGATURAN MODE POSTING FILM:</b>\n"
@@ -1676,10 +1915,12 @@ async def set_autopost_cmd(client: Client, msg: Message):
         f"• Status Saat Ini: <b>{status_label}</b>\n"
         f"• Channel Tujuan: <b>{wm}</b>\n\n"
         "<b>Pilihan Mode:</b>\n"
-        "1. <b>⚡ Otomatis (Auto-Post)</b>:\n"
-        "   Cocok jika Anda ingin upload massal / forward cepat. Media langsung diterbitkan ke channel secara instan.\n\n"
-        "2. <b>✋ Manual</b>:\n"
-        "   Bot memberi pratinjau di sini dulu. Anda bisa memeriksa atau mengedit teks sebelum memposting.\n\n"
+        "1. <b>⏰ Jadwal Prime-Time</b>:\n"
+        "   Film otomatis disebar merata di jam pulang kerja & malam santai (16:00, 17:00, 18:00 & 20:00, 21:00, 22:00 WIB).\n\n"
+        "2. <b>⚡ Otomatis Instan</b>:\n"
+        "   Media langsung diterbitkan seketika saat di-upload.\n\n"
+        "3. <b>✋ Manual</b>:\n"
+        "   Bot memberi pratinjau dulu sebelum Anda tentukan mau langsung terbit atau dijadwalkan.\n\n"
         "👇 <b>Pilih mode posting di bawah:</b>"
     )
 
@@ -1690,7 +1931,7 @@ async def set_autopost_cmd(client: Client, msg: Message):
     )
 
 
-@app.on_callback_query(filters.regex(r"^autopost:(on|off)$"))
+@app.on_callback_query(filters.regex(r"^autopost:(on|off|schedule)$"))
 async def handle_autopost_callback(client: Client, call: CallbackQuery):
     user_id = call.from_user.id if call.from_user else call.message.chat.id
     if not is_admin(user_id):
@@ -1701,7 +1942,12 @@ async def handle_autopost_callback(client: Client, call: CallbackQuery):
     target_mode = call.matches[0].group(1)
 
     _engine.cache.set_setting(f"autopost_{chat_id}", target_mode)
-    status_label = "⚡ Otomatis (Langsung Terbit ke Channel)" if target_mode == "on" else "✋ Manual (Pratinjau Dulu)"
+    if target_mode == "schedule":
+        status_label = "⏰ Jadwal Prime-Time (16-18 & 20-22 WIB)"
+    elif target_mode == "on":
+        status_label = "⚡ Otomatis Instan (Langsung Terbit ke Channel)"
+    else:
+        status_label = "✋ Manual (Pratinjau Dulu)"
     wm = _get_user_watermark(chat_id)
 
     await call.answer(f"Mode posting diubah ke: {status_label}")
@@ -1712,9 +1958,11 @@ async def handle_autopost_callback(client: Client, call: CallbackQuery):
         f"• Status Saat Ini: <b>{status_label}</b>\n"
         f"• Channel Tujuan: <b>{wm}</b>\n\n"
         "<b>Pilihan Mode:</b>\n"
-        "1. <b>⚡ Otomatis (Auto-Post)</b>:\n"
-        "   Cocok jika Anda ingin upload massal / forward cepat. Media langsung diterbitkan ke channel secara instan.\n\n"
-        "2. <b>✋ Manual</b>:\n"
+        "1. <b>⏰ Jadwal Prime-Time</b>:\n"
+        "   Film otomatis disebar merata di jam pulang kerja & malam santai (16:00, 17:00, 18:00 & 20:00, 21:00, 22:00 WIB).\n\n"
+        "2. <b>⚡ Otomatis Instan</b>:\n"
+        "   Media langsung diterbitkan seketika saat di-upload.\n\n"
+        "3. <b>✋ Manual</b>:\n"
         "   Bot memberi pratinjau di sini dulu. Anda bisa memeriksa atau mengedit teks sebelum memposting.\n\n"
         "👇 <b>Pilih mode posting di bawah:</b>"
     )
@@ -1727,6 +1975,276 @@ async def handle_autopost_callback(client: Client, call: CallbackQuery):
         )
     except Exception:
         pass
+
+
+# ================= FORCE-SUBSCRIBE (FSUB) HANDLERS =================
+@app.on_message(filters.command(["fsub", "forcesub", "wajibjoin"]))
+async def fsub_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
+    chat_id = msg.chat.id
+    args = msg.text.split(maxsplit=1)
+    if len(args) > 1:
+        val = args[1].strip().lower()
+        if val in ("on", "aktif", "1", "enable", "true"):
+            _engine.cache.set_fsub_status(True)
+            await msg.reply_text(
+                "✅ <b>Force-Subscribe (FSUB) DIAKTIFKAN!</b>\n\n"
+                "Mulai sekarang, member yang belum subscribe channel Anda akan otomatis dikunci dan diwajibkan bergabung terlebih dahulu sebelum bisa request atau mencari film.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        elif val in ("off", "mati", "0", "disable", "false"):
+            _engine.cache.set_fsub_status(False)
+            await msg.reply_text(
+                "🔓 <b>Force-Subscribe (FSUB) DIMATIKAN!</b>\n\n"
+                "Semua pengguna (termasuk yang belum join channel) kini bebas mengakses fitur bot tanpa kewajiban bergabung channel.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+    curr_status = _engine.cache.get_fsub_status()
+    status_str = "🔒 Aktif (Wajib Join Channel)" if curr_status else "🔓 Mati (Bebas Akses)"
+    wm = _get_user_watermark(chat_id)
+
+    text = (
+        "📢 <b>PENGATURAN FORCE-SUBSCRIBE (FSUB):</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"• Status Saat Ini: <b>{status_str}</b>\n"
+        f"• Channel Target: <b>{wm}</b>\n\n"
+        "Fitur ini mewajibkan setiap user untuk bergabung ke channel Anda sebelum dapat:\n"
+        "• Melakukan Request Film\n"
+        "• Menggunakan fitur Pencarian Film (/cari)\n"
+        "• Menonton daftar episode serial\n\n"
+        "<i>Gunakan tombol di bawah untuk menyalakan/mematikan FSUB:</i>"
+    )
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Aktifkan FSUB" if not curr_status else "🔒 FSUB Sudah Aktif", callback_data="fsub:on"),
+            InlineKeyboardButton("🔓 Matikan FSUB" if curr_status else "✅ FSUB Sudah Mati", callback_data="fsub:off")
+        ]
+    ])
+    await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+@app.on_callback_query(filters.regex(r"^fsub:(on|off)$"))
+async def cb_fsub_toggle(client: Client, call: CallbackQuery):
+    user_id = call.from_user.id if call.from_user else call.message.chat.id
+    if not is_admin(user_id):
+        await call.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+    mode = call.matches[0].group(1) == "on"
+    _engine.cache.set_fsub_status(mode)
+    status_str = "🔒 Aktif (Wajib Join Channel)" if mode else "🔓 Mati (Bebas Akses)"
+    wm = _get_user_watermark(call.message.chat.id)
+    await call.answer(f"FSUB diubah: {status_str}")
+
+    text = (
+        "📢 <b>PENGATURAN FORCE-SUBSCRIBE (FSUB):</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"• Status Saat Ini: <b>{status_str}</b>\n"
+        f"• Channel Target: <b>{wm}</b>\n\n"
+        "Fitur ini mewajibkan setiap user untuk bergabung ke channel Anda sebelum dapat:\n"
+        "• Melakukan Request Film\n"
+        "• Menggunakan fitur Pencarian Film (/cari)\n"
+        "• Menonton daftar episode serial\n\n"
+        "<i>Gunakan tombol di bawah untuk menyalakan/mematikan FSUB:</i>"
+    )
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Aktifkan FSUB" if not mode else "🔒 FSUB Sudah Aktif", callback_data="fsub:on"),
+            InlineKeyboardButton("🔓 Matikan FSUB" if mode else "✅ FSUB Sudah Mati", callback_data="fsub:off")
+        ]
+    ])
+    try:
+        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    except Exception:
+        pass
+
+
+@app.on_callback_query(filters.regex(r"^fsub_retry$"))
+async def cb_fsub_retry(client: Client, call: CallbackQuery):
+    user_id = call.from_user.id if call.from_user else call.message.chat.id
+    first_name = call.from_user.first_name if call.from_user else "Sobat Film"
+    chat_id = call.message.chat.id
+
+    is_sub = await check_fsub_member(client, user_id, chat_id)
+    if not is_sub:
+        await call.answer("❌ Kamu belum terdeteksi bergabung di channel kami. Silakan klik tombol 'Gabung Channel' di atas dulu ya!", show_alert=True)
+        return
+
+    await call.answer("🎉 Terima kasih sudah bergabung! Akses bot kini telah terbuka.", show_alert=True)
+    wm = _get_user_watermark(chat_id)
+    clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
+    channel_url = f"https://t.me/{clean_wm}"
+
+    unlocked_text = (
+        f"🎉 <b>Akses Terbuka! Selamat Datang, {first_name}!</b>\n\n"
+        f"Terima kasih telah bergabung di channel resmi kami <b>@{clean_wm}</b> 🎬🍿\n\n"
+        f"🔍 <b>Sekarang kamu bisa bebas menikmati fitur bot:</b>\n"
+        f"• <b>Request Film:</b> Tekan tombol di bawah untuk mengajukan judul film favoritmu.\n"
+        f"• <b>Cari Film Cepat:</b> Ketik <code>/cari [judul film]</code> di sini.\n"
+        f"• <b>Katalog Lengkap:</b> Buka pinned message di channel kami.\n\n"
+        f"<i>Silakan pilih aksi yang ingin kamu lakukan:</i>"
+    )
+    unlocked_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Request Film Sekarang", callback_data="btn_start_request")],
+        [InlineKeyboardButton("🔍 Cari Film Instan", switch_inline_query_current_chat="")],
+        [InlineKeyboardButton("📌 Buka Katalog Channel", url=channel_url)]
+    ])
+    try:
+        await call.message.edit_text(unlocked_text, parse_mode=ParseMode.HTML, reply_markup=unlocked_kb)
+    except Exception:
+        await call.message.reply_text(unlocked_text, parse_mode=ParseMode.HTML, reply_markup=unlocked_kb)
+
+
+# ================= PRIME-TIME QUEUE HANDLERS =================
+@app.on_message(filters.command(["queue", "jadwal", "antrean"]))
+async def queue_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+    ensure_scheduler_worker(client)
+    chat_id = msg.chat.id
+    wm = _get_user_watermark(chat_id)
+    pending = _engine.cache.get_pending_scheduled_posts()
+    text, kb = format_queue_dashboard(pending, wm)
+    await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+@app.on_callback_query(filters.regex(r"^sched_refresh$"))
+async def cb_sched_refresh(client: Client, call: CallbackQuery):
+    user_id = call.from_user.id if call.from_user else call.message.chat.id
+    if not is_admin(user_id):
+        await call.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+    wm = _get_user_watermark(call.message.chat.id)
+    pending = _engine.cache.get_pending_scheduled_posts()
+    text, kb = format_queue_dashboard(pending, wm)
+    await call.answer("🔄 Antrean diperbarui!")
+    try:
+        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    except Exception:
+        pass
+
+
+@app.on_callback_query(filters.regex(r"^sched_clear_all$"))
+async def cb_sched_clear_all(client: Client, call: CallbackQuery):
+    user_id = call.from_user.id if call.from_user else call.message.chat.id
+    if not is_admin(user_id):
+        await call.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+    count = _engine.cache.clear_all_scheduled_posts()
+    await call.answer(f"🗑 {count} film dihapus dari antrean!", show_alert=True)
+    wm = _get_user_watermark(call.message.chat.id)
+    text, kb = format_queue_dashboard([], wm)
+    try:
+        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    except Exception:
+        pass
+
+
+@app.on_callback_query(filters.regex(r"^sched_flush_all$"))
+async def cb_sched_flush_all(client: Client, call: CallbackQuery):
+    user_id = call.from_user.id if call.from_user else call.message.chat.id
+    if not is_admin(user_id):
+        await call.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+
+    pending = _engine.cache.get_pending_scheduled_posts()
+    if not pending:
+        await call.answer("Antrean kosong, tidak ada film untuk diterbitkan.", show_alert=True)
+        return
+
+    await call.answer(f"⚡ Menerbitkan {len(pending)} film sekarang...", show_alert=False)
+    success = 0
+    for item in pending:
+        try:
+            await publish_video_to_channel(
+                client=client,
+                chat_id=item["chat_id"],
+                video_file_id=item["video_file_id"],
+                caption_text=item["caption_text"],
+                metadata=item["metadata"],
+                watermark=item["watermark"],
+                update_pin=True
+            )
+            _engine.cache.mark_scheduled_post_done(item["id"])
+            success += 1
+            await asyncio.sleep(2.0)
+        except Exception as pe:
+            logger.error(f"Error flushing scheduled post {item['id']}: {pe}")
+
+    wm = _get_user_watermark(call.message.chat.id)
+    rem = _engine.cache.get_pending_scheduled_posts()
+    text, kb = format_queue_dashboard(rem, wm)
+    try:
+        await call.message.edit_text(
+            f"✅ <b>Selesai!</b> {success} film berhasil diterbitkan ke channel.\n\n" + text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb
+        )
+    except Exception:
+        pass
+
+
+@app.on_callback_query(filters.regex(r"^sched:(\d+)$"))
+async def cb_sched_add_movie(client: Client, call: CallbackQuery):
+    user_id = call.from_user.id if call.from_user else call.message.chat.id
+    if not is_admin(user_id):
+        await call.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+
+    chat_id = call.message.chat.id
+    job = _jobs.get(chat_id)
+    if not job:
+        await call.answer("Job pratinjau sudah kadaluarsa. Silakan kirim ulang video.", show_alert=True)
+        return
+
+    wm = _get_user_watermark(chat_id)
+    if not wm.startswith("@") or len(wm) <= 1:
+        await call.answer("Channel belum diatur. Gunakan /setwatermark @namachannel", show_alert=True)
+        return
+
+    meta = job.get("metadata", {})
+    title_meta = meta.get("title") or job.get("filename") or "Film"
+    video_fid = job["sent_msg"].video.file_id if (job.get("sent_msg") and job["sent_msg"].video) else None
+    if not video_fid and call.message.video:
+        video_fid = call.message.video.file_id
+
+    if not video_fid:
+        await call.answer("❌ Video tidak ditemukan dalam job.", show_alert=True)
+        return
+
+    row_id = _engine.cache.add_scheduled_post(
+        chat_id=chat_id,
+        video_file_id=video_fid,
+        caption_text=job["caption_text"],
+        metadata=meta,
+        watermark=wm,
+        title=title_meta
+    )
+
+    pending = _engine.cache.get_pending_scheduled_posts()
+    this_item = next((p for p in pending if p["id"] == row_id), None)
+    sched_str = "Segera"
+    if this_item:
+        sched_dt = datetime.datetime.fromtimestamp(this_item["scheduled_timestamp"], WIB)
+        sched_str = sched_dt.strftime("%d %b %Y, %H:%M WIB")
+
+    await call.answer("✅ Film dimasukkan ke antrean Prime-Time!", show_alert=True)
+    await call.message.reply_text(
+        f"⏰ <b>Film Berhasil Dijadwalkan ke Prime-Time!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎬 <b>Judul:</b> {title_meta}\n"
+        f"📢 <b>Channel:</b> {wm}\n"
+        f"🕒 <b>Jadwal Tayang:</b> <b>{sched_str}</b>\n"
+        f"📊 <b>Posisi Antrean:</b> #{len(pending)}\n\n"
+        f"<i>Ketik <code>/queue</code> untuk melihat antrean lengkap.</i>",
+        parse_mode=ParseMode.HTML
+    )
 
 
 @app.on_message(filters.command(["stats", "statistik", "analitik"]))
@@ -3258,8 +3776,43 @@ async def _process_video_task(client: Client, msg: Message):
             )
 
         # Check Auto-Post setting
-        autopost_enabled = _engine.cache.get_setting(f"autopost_{chat_id}", "off") == "on"
-        if autopost_enabled:
+        autopost_mode = _engine.cache.get_setting(f"autopost_{chat_id}", "off")
+        if autopost_mode == "schedule":
+            if not wm.startswith("@") or len(wm) <= 1:
+                await msg.reply_text(
+                    "⚠️ <b>Jadwal Prime-Time aktif tetapi channel watermark belum diatur!</b>\n\n"
+                    "Gunakan <code>/setwatermark @namachannel</code> agar bot bisa menjadwalkan posting otomatis.",
+                    parse_mode=ParseMode.HTML
+                )
+            else:
+                sent_video_fid = sent.video.file_id if (sent and getattr(sent, "video", None)) else media.file_id
+                title_name = result.get("metadata", {}).get("title") or filename
+                row_id = _engine.cache.add_scheduled_post(
+                    chat_id=chat_id,
+                    video_file_id=sent_video_fid,
+                    caption_text=caption,
+                    metadata=result.get("metadata", {}),
+                    watermark=wm,
+                    title=title_name
+                )
+                pending = _engine.cache.get_pending_scheduled_posts()
+                this_item = next((p for p in pending if p["id"] == row_id), None)
+                sched_str = "Segera"
+                if this_item:
+                    sched_dt = datetime.datetime.fromtimestamp(this_item["scheduled_timestamp"], WIB)
+                    sched_str = sched_dt.strftime("%d %b %Y, %H:%M WIB")
+
+                await msg.reply_text(
+                    f"⏰ <b>Film Berhasil Dijadwalkan ke Prime-Time Queue!</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎬 <b>Judul:</b> {title_name}\n"
+                    f"📢 <b>Channel:</b> {wm}\n"
+                    f"🕒 <b>Jadwal Tayang:</b> <b>{sched_str}</b>\n"
+                    f"📊 <b>Posisi Antrean:</b> #{len(pending)}\n\n"
+                    f"<i>Ketik <code>/queue</code> untuk melihat antrean lengkap.</i>",
+                    parse_mode=ParseMode.HTML
+                )
+        elif autopost_mode in ("on", "auto"):
             if existing_movie:
                 await msg.reply_text(
                     f"✋ <b>Auto-Post Ditahan Sementara:</b>\n"
