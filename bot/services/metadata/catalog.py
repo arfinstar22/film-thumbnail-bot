@@ -52,48 +52,98 @@ def publish_or_update_telegraph_catalog(
         if "#" in groups:
             sorted_keys.append("#")
 
+        ribbon = " • ".join([f"[{k}]" for k in sorted_keys])
         nodes = [
-            {"tag": "h3", "children": [f"📚 KATALOG FILM @{clean_channel.upper()} (A - Z)"]},
-            {"tag": "p", "children": [
-                f"📢 Channel: @{clean_channel} • Total Koleksi: {len(movies)} Film\n",
-                "🔄 Diperbarui otomatis • Klik judul film untuk langsung tonton di Telegram!"
-            ]},
+            {"tag": "h3", "children": [f"🍿 KATALOG KOLEKSI FILM @{clean_channel.upper()} (A - Z)"]},
+            {
+                "tag": "blockquote",
+                "children": [
+                    f"📢 Channel Resmi: @{clean_channel}\n",
+                    f"🎬 Total Koleksi: {len(movies)} Judul Film\n",
+                    "⚡ Mode: Telegram Instant View (Buka cepat & ringan)\n",
+                    "💡 Ketuk judul film untuk langsung membuka dan menonton di Telegram."
+                ]
+            },
+            {
+                "tag": "p",
+                "children": [
+                    f"🔤 Indeks Abjad: {ribbon}"
+                ]
+            },
             {"tag": "hr"}
         ]
 
         for char in sorted_keys:
-            nodes.append({"tag": "h4", "children": [f"🔤 [ {char} ]"]})
+            nodes.append({
+                "tag": "h4",
+                "children": [f"📁 [ {char} ] — {len(groups[char])} Koleksi"]
+            })
             li_items = []
             for m in groups[char]:
-                title = m.get("title") or "Film"
-                year_str = f" ({m['year']})" if m.get("year") else ""
-                rating_str = f" • ⭐ {m['rating']}" if m.get("rating") else ""
-                genre_str = f" ({m['genre']})" if m.get("genre") else ""
+                title = (m.get("title") or "Film").strip()
+                year = m.get("year")
+                rating = m.get("rating")
+                genre = m.get("genre")
+                quality = m.get("quality")
                 msg_id = m.get("message_id")
                 post_url = f"https://t.me/{clean_channel}/{msg_id}"
+
+                title_str = f"{title} ({year})" if year else title
+                meta_parts = []
+                if rating:
+                    meta_parts.append(f"⭐ {rating}")
+                if quality:
+                    meta_parts.append(f"🎞️ {quality}")
+                if genre:
+                    meta_parts.append(f"🎭 {genre}")
+
+                meta_str = f" — {' • '.join(meta_parts)}" if meta_parts else ""
+
                 li_items.append({
                     "tag": "li",
                     "children": [
-                        {"tag": "a", "attrs": {"href": post_url}, "children": [f"{title}{year_str}"]},
-                        f"{rating_str}{genre_str}"
+                        {
+                            "tag": "b",
+                            "children": [
+                                {
+                                    "tag": "a",
+                                    "attrs": {"href": post_url},
+                                    "children": [f"🎬 {title_str}"]
+                                }
+                            ]
+                        },
+                        meta_str
                     ]
                 })
             nodes.append({"tag": "ul", "children": li_items})
+            nodes.append({"tag": "hr"})
 
-        nodes.append({"tag": "hr"})
-        bot_mention = f"@{bot_username}" if bot_username else "Bot Film"
-        nodes.append({"tag": "p", "children": [f"🔍 Cari koleksi film instan via Telegram: {bot_mention}"]})
+        bot_mention = f"@{bot_username}" if bot_username else f"@{clean_channel}"
+        nodes.append({
+            "tag": "blockquote",
+            "children": [
+                "🔍 PANDUAN PENCARIAN & NONTON:\n",
+                "• Cari Cepat: Gunakan fitur 'Find in page' (Ctrl+F) di browser / Telegram.\n",
+                f"• Cari Instan via Bot: {bot_mention}\n",
+                f"🍿 Selamat menonton & menikmati koleksi film di @{clean_channel}!"
+            ]
+        })
 
         path_key = f"telegraph_path_{clean_channel}"
         cached_path = cache.get_setting(path_key, "")
+
+        page_title = f"🍿 KATALOG FILM @{clean_channel.upper()}"
 
         if cached_path:
             # Edit existing page
             edit_data = urllib.parse.urlencode({
                 "access_token": token,
                 "path": cached_path,
-                "title": f"Katalog Film @{clean_channel}",
-                "content": json.dumps(nodes)
+                "title": page_title,
+                "author_name": f"@{clean_channel}",
+                "author_url": f"https://t.me/{clean_channel}",
+                "content": json.dumps(nodes),
+                "return_content": "false"
             }).encode("utf-8")
             try:
                 with urllib.request.urlopen(urllib.request.Request("https://api.telegra.ph/editPage", data=edit_data), timeout=10) as resp:
@@ -106,7 +156,9 @@ def publish_or_update_telegraph_catalog(
         # Create new page if not existing or edit failed
         create_data = urllib.parse.urlencode({
             "access_token": token,
-            "title": f"Katalog Film @{clean_channel}",
+            "title": page_title,
+            "author_name": f"@{clean_channel}",
+            "author_url": f"https://t.me/{clean_channel}",
             "content": json.dumps(nodes),
             "return_content": "false"
         }).encode("utf-8")
@@ -164,8 +216,13 @@ def format_pinned_catalog(
                 year_str = f" ({m['year']})" if m.get("year") else ""
                 msg_id = m["message_id"]
                 post_url = f"https://t.me/{clean_channel}/{msg_id}"
-                rating = f" • ⭐ {m['rating']}" if m.get("rating") else ""
-                body_lines.append(f"• <a href=\"{post_url}\">{title}{year_str}</a>{rating}")
+                meta_parts = []
+                if m.get("rating"):
+                    meta_parts.append(f"⭐ {m['rating']}")
+                if m.get("quality"):
+                    meta_parts.append(f"🎞️ {m['quality']}")
+                meta_str = f" • {' '.join(meta_parts)}" if meta_parts else ""
+                body_lines.append(f"• <a href=\"{post_url}\">{title}{year_str}</a>{meta_str}")
             body_lines.append("")
 
         body_text = "\n".join(body_lines).strip()
@@ -203,8 +260,13 @@ def format_pinned_catalog(
         year_str = f" ({m['year']})" if m.get("year") else ""
         msg_id = m["message_id"]
         post_url = f"https://t.me/{clean_channel}/{msg_id}"
-        rating = f" • ⭐ {m['rating']}" if m.get("rating") else ""
-        latest_lines.append(f"• <a href=\"{post_url}\">{title}{year_str}</a>{rating}")
+        meta_parts = []
+        if m.get("rating"):
+            meta_parts.append(f"⭐ {m['rating']}")
+        if m.get("quality"):
+            meta_parts.append(f"🎞️ {m['quality']}")
+        meta_str = f" • {' '.join(meta_parts)}" if meta_parts else ""
+        latest_lines.append(f"• <a href=\"{post_url}\">{title}{year_str}</a>{meta_str}")
 
     latest_section = "\n".join(latest_lines) + "\n\n"
 
