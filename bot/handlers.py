@@ -202,6 +202,7 @@ async def start_cmd(client: Client, msg: Message):
     try:
         await client.set_bot_commands([
             BotCommand("start", "Panduan & info bot"),
+            BotCommand("autopost", "Atur mode posting: Otomatis atau Manual"),
             BotCommand("cari", "Cari film di database channel"),
             BotCommand("synckatalog", "Scan channel & update Pinned Catalog A-Z"),
             BotCommand("setwatermark", "Atur channel tujuan (@namachannel)"),
@@ -218,10 +219,13 @@ async def start_cmd(client: Client, msg: Message):
     req_link = _get_user_request_link(msg.chat.id)
     syn_val = _engine.cache.get_setting(f"synopsis_{msg.chat.id}", "on")
     autojoin_val = _engine.cache.get_setting("global_autojoin", "on")
+    autopost_val = _engine.cache.get_setting(f"autopost_{msg.chat.id}", "off")
+
     div_status = "Logo Custom Film Indonesia" if divider == "default" else ("Mati (Off)" if divider == "off" else "Stiker Pilihan Anda")
     req_status = f"<code>{req_link}</code>" if req_link and req_link != "off" else ("Mati (Off)" if req_link == "off" else "<i>Belum diatur</i>")
     syn_status = "Aktif (On)" if syn_val != "off" else "Mati (Off)"
     autojoin_status = "Aktif (On)" if autojoin_val != "off" else "Mati (Off)"
+    autopost_status = "⚡ Otomatis (Langsung Terbit)" if autopost_val == "on" else "✋ Manual (Pratinjau Dulu)"
 
     text = (
         "🎬 <b>FILM CLEANER & PUBLISHER BOT</b>\n"
@@ -230,6 +234,9 @@ async def start_cmd(client: Client, msg: Message):
         "📌 <b>DAFTAR PERINTAH (COMMANDS):</b>\n\n"
         "• <code>/start</code>\n"
         "  Menampilkan menu bantuan dan daftar fitur ini.\n\n"
+        "• <code>/autopost</code>\n"
+        "  Mengatur mode upload ke channel: Otomatis langsung kirim vs Manual pratinjau dulu.\n"
+        f"  <i>Mode aktif saat ini:</i> <b>{autopost_status}</b>\n\n"
         "• <code>/cari &lt;judul film&gt;</code>\n"
         "  Mencari film di katalog channel dengan link tonton langsung.\n"
         "  ▫️ <i>Mode Inline:</i> Ketik <code>@bot &lt;judul&gt;</code> di chat mana pun!\n\n"
@@ -488,6 +495,108 @@ async def autojoin_cmd(client: Client, msg: Message):
     else:
         _engine.cache.set_setting("global_autojoin", "on")
         await msg.reply_text("✅ <b>Auto-approve join request diaktifkan!</b>", parse_mode=ParseMode.HTML)
+
+
+def get_autopost_kb(current_mode: str) -> InlineKeyboardMarkup:
+    is_auto = (current_mode == "on")
+    btn_auto_text = "✅ ⚡ Otomatis (Langsung Terbit)" if is_auto else "⚡ Otomatis (Langsung Terbit)"
+    btn_manual_text = "✅ ✋ Manual (Pratinjau Dulu)" if not is_auto else "✋ Manual (Pratinjau Dulu)"
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(btn_auto_text, callback_data="autopost:on")
+        ],
+        [
+            InlineKeyboardButton(btn_manual_text, callback_data="autopost:off")
+        ]
+    ])
+
+
+@app.on_message(filters.command(["autopost", "setautopost", "mode"]))
+async def set_autopost_cmd(client: Client, msg: Message):
+    chat_id = msg.chat.id
+    args = msg.text.split(maxsplit=1)
+
+    if len(args) > 1:
+        subcmd = args[1].strip().lower()
+        if subcmd in ["on", "auto", "otomatis", "1", "true"]:
+            _engine.cache.set_setting(f"autopost_{chat_id}", "on")
+            await msg.reply_text(
+                "✅ <b>Mode Auto-Post DIAKTIFKAN!</b>\n\n"
+                "Mulai sekarang, setiap kali Anda kirim atau forward video film ke bot ini:\n"
+                "• Bot akan otomatis merapikan thumbnail & caption.\n"
+                "• <b>Langsung otomatis diterbitkan ke channel</b> tanpa perlu klik tombol lagi!\n\n"
+                "<i>Untuk kembali ke mode manual, ketik <code>/autopost off</code>.</i>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        elif subcmd in ["off", "manual", "0", "false"]:
+            _engine.cache.set_setting(f"autopost_{chat_id}", "off")
+            await msg.reply_text(
+                "✋ <b>Mode Posting Diubah ke MANUAL!</b>\n\n"
+                "Setiap kali Anda kirim/forward video ke bot:\n"
+                "• Bot hanya akan mengirimkan pratinjau hasil rapi di chat ini.\n"
+                "• Anda bisa memeriksa atau mengedit teks dulu sebelum menekan tombol <b>🚀 Posting ke Channel</b>.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+    curr = _engine.cache.get_setting(f"autopost_{chat_id}", "off")
+    wm = _get_user_watermark(chat_id)
+    status_label = "⚡ Otomatis (Langsung Terbit ke Channel)" if curr == "on" else "✋ Manual (Pratinjau Dulu)"
+
+    text = (
+        "⚙️ <b>PENGATURAN MODE POSTING FILM:</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"• Status Saat Ini: <b>{status_label}</b>\n"
+        f"• Channel Tujuan: <b>{wm}</b>\n\n"
+        "<b>Pilihan Mode:</b>\n"
+        "1. <b>⚡ Otomatis (Auto-Post)</b>:\n"
+        "   Cocok jika Anda ingin upload massal / forward cepat. Media langsung diterbitkan ke channel secara instan.\n\n"
+        "2. <b>✋ Manual</b>:\n"
+        "   Bot memberi pratinjau di sini dulu. Anda bisa memeriksa atau mengedit teks sebelum memposting.\n\n"
+        "👇 <b>Pilih mode posting di bawah:</b>"
+    )
+
+    await msg.reply_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_autopost_kb(curr)
+    )
+
+
+@app.on_callback_query(filters.regex(r"^autopost:(on|off)$"))
+async def handle_autopost_callback(client: Client, call: CallbackQuery):
+    chat_id = call.message.chat.id
+    target_mode = call.matches[0].group(1)
+
+    _engine.cache.set_setting(f"autopost_{chat_id}", target_mode)
+    status_label = "⚡ Otomatis (Langsung Terbit ke Channel)" if target_mode == "on" else "✋ Manual (Pratinjau Dulu)"
+    wm = _get_user_watermark(chat_id)
+
+    await call.answer(f"Mode posting diubah ke: {status_label}")
+
+    text = (
+        "⚙️ <b>PENGATURAN MODE POSTING FILM:</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"• Status Saat Ini: <b>{status_label}</b>\n"
+        f"• Channel Tujuan: <b>{wm}</b>\n\n"
+        "<b>Pilihan Mode:</b>\n"
+        "1. <b>⚡ Otomatis (Auto-Post)</b>:\n"
+        "   Cocok jika Anda ingin upload massal / forward cepat. Media langsung diterbitkan ke channel secara instan.\n\n"
+        "2. <b>✋ Manual</b>:\n"
+        "   Bot memberi pratinjau di sini dulu. Anda bisa memeriksa atau mengedit teks sebelum memposting.\n\n"
+        "👇 <b>Pilih mode posting di bawah:</b>"
+    )
+
+    try:
+        await call.message.edit_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_autopost_kb(target_mode)
+        )
+    except Exception:
+        pass
 
 
 def parse_movie_from_channel_message(msg: Message) -> Optional[Dict[str, Any]]:
@@ -841,6 +950,84 @@ async def sync_catalog_cmd(client: Client, msg: Message):
         )
 
 
+async def publish_video_to_channel(
+    client: Client,
+    chat_id: int,
+    video_file_id: str,
+    caption_text: str,
+    metadata: dict,
+    watermark: str
+) -> Optional[Message]:
+    """Publishes a video post to the channel with buttons, divider sticker, cache update, and pinned catalog refresh."""
+    clean_wm = watermark.lstrip("@").strip()
+    channel_url = f"https://t.me/{clean_wm}"
+
+    meta = metadata or {}
+    title_meta = meta.get("title") or "Film Ini"
+    year_meta = meta.get("year")
+    title_display = f"{title_meta} ({year_meta})" if year_meta else title_meta
+    share_text = f"Nonton film {title_display} di {watermark}!"
+    share_url = f"https://t.me/share/url?url={urllib.parse.quote(channel_url)}&text={urllib.parse.quote(share_text)}"
+
+    trailer_query = f"Trailer {title_meta}" + (f" {year_meta}" if year_meta else "")
+    trailer_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(trailer_query)}"
+
+    row1 = [
+        InlineKeyboardButton(f"📢 Gabung {watermark}", url=channel_url),
+        InlineKeyboardButton("🎬 Tonton Trailer", url=trailer_url)
+    ]
+
+    req_link = _get_user_request_link(chat_id)
+    if req_link and req_link.lower() != "off":
+        row2 = [
+            InlineKeyboardButton("💬 Request Film", url=req_link),
+            InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
+        ]
+    else:
+        row2 = [
+            InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
+        ]
+
+    channel_kb = InlineKeyboardMarkup([row1, row2])
+
+    sent_channel = await client.send_video(
+        chat_id=watermark,
+        video=video_file_id,
+        caption=caption_text,
+        parse_mode=ParseMode.HTML,
+        supports_streaming=True,
+        reply_markup=channel_kb
+    )
+    if sent_channel:
+        await _apply_expandable_caption(watermark, sent_channel.id, caption_text, channel_kb)
+
+    # Kirim stiker pemisah otomatis di bawah film
+    await _send_channel_divider(client, chat_id, watermark)
+
+    # Simpan ke katalog pencarian film
+    try:
+        _engine.cache.save_movie_post(
+            title=title_meta,
+            year=year_meta,
+            rating=meta.get("rating"),
+            genre=meta.get("genre"),
+            quality=meta.get("resolution") or meta.get("quality"),
+            channel_username=clean_wm,
+            message_id=sent_channel.id,
+            caption=caption_text
+        )
+    except Exception as ce:
+        logger.warning(f"Gagal mencatat ke katalog film: {ce}")
+
+    # Update pinned catalog channel otomatis
+    try:
+        await update_pinned_catalog(client, watermark, chat_id=chat_id)
+    except Exception as pce:
+        logger.warning(f"Gagal memperbarui pinned catalog: {pce}")
+
+    return sent_channel
+
+
 @app.on_message(filters.video | filters.document)
 async def receive_video(client: Client, msg: Message):
     media = msg.video or msg.document
@@ -900,6 +1087,48 @@ async def receive_video(client: Client, msg: Message):
             "watermark": wm,
             "metadata": result.get("metadata", {})
         }
+
+        # Check Auto-Post setting
+        autopost_enabled = _engine.cache.get_setting(f"autopost_{chat_id}", "off") == "on"
+        if autopost_enabled:
+            if not wm.startswith("@") or len(wm) <= 1:
+                await msg.reply_text(
+                    "⚠️ <b>Auto-Post aktif tetapi channel watermark belum diatur!</b>\n\n"
+                    "Gunakan <code>/setwatermark @namachannel</code> agar bot bisa posting otomatis ke channel Anda.",
+                    parse_mode=ParseMode.HTML
+                )
+            else:
+                try:
+                    sent_video_fid = sent.video.file_id if (sent and getattr(sent, "video", None)) else media.file_id
+                    sent_channel = await publish_video_to_channel(
+                        client=client,
+                        chat_id=chat_id,
+                        video_file_id=sent_video_fid,
+                        caption_text=caption,
+                        metadata=result.get("metadata", {}),
+                        watermark=wm
+                    )
+                    clean_wm = wm.lstrip("@").strip()
+                    title_name = result.get("metadata", {}).get("title") or filename
+                    post_link = f"https://t.me/{clean_wm}/{sent_channel.id}" if sent_channel else f"https://t.me/{clean_wm}"
+                    await msg.reply_text(
+                        f"🚀 <b>Auto-Post: Berhasil Diposting ke Channel!</b>\n\n"
+                        f"🎬 <b>Film:</b> {title_name}\n"
+                        f"📢 <b>Channel:</b> {wm}\n\n"
+                        f"• Tombol interaktif lengkap otomatis dibuat.\n"
+                        f"• Pinned Catalog A-Z channel otomatis diperbarui.\n"
+                        f"• Stiker pembatas channel otomatis dikirim.\n\n"
+                        f"👉 <a href=\"{post_link}\">Lihat Postingan di {wm}</a>",
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True
+                    )
+                except Exception as ape:
+                    logger.exception("Auto-post error")
+                    await msg.reply_text(
+                        f"❌ <b>Gagal Auto-Post ke {wm}:</b>\n\n<code>{ape}</code>\n\n"
+                        f"<i>Pastikan bot sudah dijadikan Administrator di channel dengan izin kirim pesan!</i>",
+                        parse_mode=ParseMode.HTML
+                    )
     except Exception as e:
         logger.exception("Send video error")
         await msg.reply_text(f"❌ Gagal: {str(e)[:100]}")
@@ -940,79 +1169,34 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
 
     await call.answer("🚀 Mengirim ke channel...")
     try:
-        clean_wm = wm.lstrip("@").strip()
-        channel_url = f"https://t.me/{clean_wm}"
-
         meta = job.get("metadata", {})
         title_meta = meta.get("title") or "Film Ini"
-        year_meta = meta.get("year")
-        title_display = f"{title_meta} ({year_meta})" if year_meta else title_meta
-        share_text = f"Nonton film {title_display} di {wm}!"
-        share_url = f"https://t.me/share/url?url={urllib.parse.quote(channel_url)}&text={urllib.parse.quote(share_text)}"
+        video_fid = job["sent_msg"].video.file_id if (job.get("sent_msg") and job["sent_msg"].video) else None
+        if not video_fid:
+            await call.message.reply_text("❌ Video tidak ditemukan dalam job.")
+            return
 
-        trailer_query = f"Trailer {title_meta}" + (f" {year_meta}" if year_meta else "")
-        trailer_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(trailer_query)}"
-
-        row1 = [
-            InlineKeyboardButton(f"📢 Gabung {wm}", url=channel_url),
-            InlineKeyboardButton("🎬 Tonton Trailer", url=trailer_url)
-        ]
-
-        req_link = _get_user_request_link(chat_id)
-        if req_link and req_link.lower() != "off":
-            row2 = [
-                InlineKeyboardButton("💬 Request Film", url=req_link),
-                InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
-            ]
-        else:
-            row2 = [
-                InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
-            ]
-
-        channel_kb = InlineKeyboardMarkup([row1, row2])
-
-        sent_channel = await client.send_video(
-            chat_id=wm,
-            video=job["sent_msg"].video.file_id,
-            caption=job["caption_text"],
-            parse_mode=ParseMode.HTML,
-            supports_streaming=True,
-            reply_markup=channel_kb
+        sent_channel = await publish_video_to_channel(
+            client=client,
+            chat_id=chat_id,
+            video_file_id=video_fid,
+            caption_text=job["caption_text"],
+            metadata=meta,
+            watermark=wm
         )
-        if sent_channel:
-            await _apply_expandable_caption(wm, sent_channel.id, job["caption_text"], channel_kb)
 
-        # Kirim stiker pemisah otomatis di bawah film
-        await _send_channel_divider(client, chat_id, wm)
-
-        # Simpan ke katalog pencarian film
-        try:
-            _engine.cache.save_movie_post(
-                title=title_meta,
-                year=year_meta,
-                rating=meta.get("rating"),
-                genre=meta.get("genre"),
-                quality=meta.get("resolution") or meta.get("quality"),
-                channel_username=clean_wm,
-                message_id=sent_channel.id,
-                caption=job["caption_text"]
-            )
-        except Exception as ce:
-            logger.warning(f"Gagal mencatat ke katalog film: {ce}")
-
-        # Update pinned catalog channel otomatis
-        try:
-            await update_pinned_catalog(client, wm)
-        except Exception as pce:
-            logger.warning(f"Gagal memperbarui pinned catalog: {pce}")
+        clean_wm = wm.lstrip("@").strip()
+        post_link = f"https://t.me/{clean_wm}/{sent_channel.id}" if sent_channel else f"https://t.me/{clean_wm}"
 
         await call.message.reply_text(
             f"✅ <b>Berhasil Diposting ke {wm}!</b>\n\n"
             f"• Film sudah terbit lengkap dengan tombol [ Gabung ], [ Trailer ], [ Request ], dan [ Bagikan ]\n"
             f"• Film otomatis masuk ke katalog pencarian (<code>/cari {title_meta}</code>)\n"
             f"• Pinned Catalog A-Z di channel otomatis diperbarui!\n"
-            f"• Stiker pemisah otomatis terkirim di bawahnya sebagai pembatas!",
-            parse_mode=ParseMode.HTML
+            f"• Stiker pemisah otomatis terkirim di bawahnya sebagai pembatas!\n\n"
+            f"👉 <a href=\"{post_link}\">Buka Postingan di Channel</a>",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
         )
     except Exception as e:
         logger.exception("Post to channel error")
