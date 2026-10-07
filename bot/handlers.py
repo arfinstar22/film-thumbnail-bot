@@ -687,11 +687,28 @@ async def update_pinned_catalog(
     # Ensure strictly ONE pin: unpin all and pin target only
     try:
         await client.unpin_all_chat_messages(channel_username)
-        await client.pin_chat_message(
+        pinned_res = await client.pin_chat_message(
             chat_id=channel_username,
             message_id=target_msg_id,
             disable_notification=True
         )
+        if pinned_res and getattr(pinned_res, "id", None) and (getattr(pinned_res, "service", None) or getattr(pinned_res, "pinned_message", None)):
+            try:
+                await client.delete_messages(channel_username, [pinned_res.id])
+            except Exception:
+                pass
+
+        # Cleanup any service notification messages in channel history
+        try:
+            serv_ids = []
+            async for m in client.get_chat_history(channel_username, limit=10):
+                if m and m.id != target_msg_id and (getattr(m, "service", None) or getattr(m, "pinned_message", None)):
+                    serv_ids.append(m.id)
+            if serv_ids:
+                await client.delete_messages(channel_username, serv_ids)
+                logger.info(f"Cleaned {len(serv_ids)} service messages in {channel_username}: {serv_ids}")
+        except Exception:
+            pass
     except Exception as pe:
         logger.warning(f"Pin management error in {channel_username}: {pe}")
 
@@ -721,7 +738,7 @@ async def sync_catalog_cmd(client: Client, msg: Message):
         f"⏳ <b>Memulai Pemindaian Channel @{clean_wm}...</b>\n\n"
         f"• Membaca riwayat hingga {scan_limit} postingan...\n"
         "• Menyaring film duplikat (mengambil post paling terbaru)...\n"
-        "• Membersihkan pesan tersemat (pin) lama...\n"
+        "• Membersihkan pesan tersemat (pin) & notifikasi lama...\n"
         "• Memperbarui Pinned Catalog A-Z...",
         parse_mode=ParseMode.HTML
     )
@@ -737,6 +754,7 @@ async def sync_catalog_cmd(client: Client, msg: Message):
         max_id = int(stored_pin) if stored_pin and stored_pin.isdigit() else 500
 
     found_catalog_msg_ids = []
+    found_service_msg_ids = []
     scanned_total = 0
     scanned_movies = 0
     start_id = max(1, max_id - scan_limit)
@@ -753,6 +771,11 @@ async def sync_catalog_cmd(client: Client, msg: Message):
                     if not ch_msg or getattr(ch_msg, "empty", False):
                         if ch_msg and getattr(ch_msg, "id", None):
                             _engine.cache.delete_movie_posts([ch_msg.id])
+                        continue
+
+                    # Auto-detect service notification messages (e.g. "menyematkan...")
+                    if getattr(ch_msg, "service", None) or getattr(ch_msg, "pinned_message", None):
+                        found_service_msg_ids.append(ch_msg.id)
                         continue
 
                     msg_text = getattr(ch_msg, "text", "") or getattr(ch_msg, "caption", "") or ""
@@ -778,6 +801,23 @@ async def sync_catalog_cmd(client: Client, msg: Message):
                 logger.warning(f"Batch fetch error for ids {batch_ids[:2]}..: {be}")
             await asyncio.sleep(0.05)
 
+        # Also scan recent chat history to catch all lingering service messages
+        try:
+            async for m in client.get_chat_history(wm, limit=50):
+                if m and (getattr(m, "service", None) or getattr(m, "pinned_message", None)):
+                    found_service_msg_ids.append(m.id)
+        except Exception:
+            pass
+
+        # Delete any service notification messages found in channel
+        if found_service_msg_ids:
+            try:
+                unique_serv_ids = list(set(found_service_msg_ids))
+                await client.delete_messages(wm, unique_serv_ids)
+                logger.info(f"Cleaned {len(unique_serv_ids)} old service messages from channel {wm}")
+            except Exception as se:
+                logger.warning(f"Could not delete old service messages: {se}")
+
         unique_count = await update_pinned_catalog(client, wm, chat_id=chat_id, old_catalog_ids=found_catalog_msg_ids)
         duplicates_removed = max(0, scanned_movies - unique_count)
 
@@ -787,7 +827,7 @@ async def sync_catalog_cmd(client: Client, msg: Message):
             f"📊 <b>Total Pesan Diperiksa:</b> {scanned_total}\n"
             f"🎬 <b>Total Film Ditemukan:</b> {scanned_movies}\n"
             f"🧹 <b>Film Duplikat Dibersihkan:</b> {duplicates_removed} (diambil post terbaru)\n"
-            f"🗑️ <b>Pin Lama Dihapus:</b> {len(found_catalog_msg_ids)} pesan lama dibersihkan\n"
+            f"🗑️ <b>Pesan Lama Dihapus:</b> {len(found_catalog_msg_ids)} pin & {len(found_service_msg_ids)} notifikasi lama\n"
             f"📚 <b>Koleksi Unik di Pinned Catalog:</b> {unique_count} film\n\n"
             f"📌 <i>Pesan indeks katalog A-Z telah diperbarui dan di-pin bersih di channel!</i>",
             parse_mode=ParseMode.HTML
@@ -1190,3 +1230,13 @@ async def auto_sync_deleted_movies(client: Client, messages: List[Message]):
             await update_pinned_catalog(client, channel)
     except Exception as e:
         logger.error(f"Error handling deleted messages sync: {e}")
+
+
+@app.on_message(filters.channel & (filters.service | filters.pinned_message))
+async def auto_delete_channel_service_messages(client: Client, msg: Message):
+    """Automatically delete service notification messages (e.g. 'channel menyematkan...') in channel chat."""
+    try:
+        await msg.delete()
+        logger.info(f"Auto-deleted service notification message {msg.id} in channel {msg.chat.id}")
+    except Exception as e:
+        logger.debug(f"Could not auto-delete service message {msg.id}: {e}")
