@@ -443,3 +443,249 @@ class MetadataCache:
             "rated_count": len(ratings),
             "top_rated": top_rated
         }
+
+    # ------------------ MOVIE REQUEST SYSTEM ------------------
+    def _ensure_requests_table(self, conn):
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS movie_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                username TEXT,
+                movie_title TEXT,
+                clean_title TEXT,
+                channel_username TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                fulfilled_at TIMESTAMP
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_req_status_title ON movie_requests (status, clean_title)")
+
+    def add_movie_request(self, user_id: int, username: str, movie_title: str, channel_username: str) -> dict:
+        conn = self._conn()
+        self._ensure_requests_table(conn)
+        clean_t = re.sub(r'[^a-zA-Z0-9]', '', movie_title).lower()
+        clean_chan = (channel_username or "").lstrip("@").strip().lower()
+
+        # Check if already requested by same user and still pending
+        cur = conn.execute(
+            "SELECT id FROM movie_requests WHERE user_id = ? AND clean_title = ? AND status = 'pending'",
+            (user_id, clean_t)
+        )
+        if cur.fetchone():
+            return {"success": True, "is_new": False, "title": movie_title}
+
+        conn.execute(
+            """
+            INSERT INTO movie_requests (user_id, username, movie_title, clean_title, channel_username)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, username or "", movie_title.strip(), clean_t, clean_chan)
+        )
+        conn.commit()
+        return {"success": True, "is_new": True, "title": movie_title}
+
+    def get_pending_requests(self, channel_username: Optional[str] = None, limit: int = 50) -> List[dict]:
+        conn = self._conn()
+        self._ensure_requests_table(conn)
+        if channel_username:
+            clean_chan = channel_username.lstrip("@").strip().lower()
+            query = """
+                SELECT movie_title, COUNT(*) as count, GROUP_CONCAT(username) as requesters, MIN(created_at) as earliest
+                FROM movie_requests
+                WHERE status = 'pending' AND (channel_username = ? OR channel_username = '')
+                GROUP BY clean_title
+                ORDER BY count DESC, earliest ASC
+                LIMIT ?
+            """
+            cur = conn.execute(query, (clean_chan, limit))
+        else:
+            query = """
+                SELECT movie_title, COUNT(*) as count, GROUP_CONCAT(username) as requesters, MIN(created_at) as earliest
+                FROM movie_requests
+                WHERE status = 'pending'
+                GROUP BY clean_title
+                ORDER BY count DESC, earliest ASC
+                LIMIT ?
+            """
+            cur = conn.execute(query, (limit,))
+
+        results = []
+        for row in cur.fetchall():
+            results.append({
+                "title": row[0],
+                "count": row[1],
+                "requesters": [r for r in (row[2] or "").split(",") if r],
+                "created_at": row[3]
+            })
+        return results
+
+    def fulfill_movie_requests(self, movie_title: str, channel_username: Optional[str] = None) -> List[dict]:
+        conn = self._conn()
+        self._ensure_requests_table(conn)
+        clean_t = re.sub(r'[^a-zA-Z0-9]', '', movie_title).lower()
+        if len(clean_t) < 3:
+            return []
+
+        query = "SELECT id, user_id, username, movie_title FROM movie_requests WHERE status = 'pending'"
+        cur = conn.execute(query)
+        matched_ids = []
+        requesters = []
+
+        for row in cur.fetchall():
+            r_id, u_id, u_name, req_t = row
+            req_clean = re.sub(r'[^a-zA-Z0-9]', '', req_t).lower()
+            if req_clean and (req_clean == clean_t or req_clean in clean_t or clean_t in req_clean):
+                matched_ids.append(r_id)
+                requesters.append({
+                    "id": r_id,
+                    "user_id": u_id,
+                    "username": u_name,
+                    "requested_title": req_t
+                })
+
+        if matched_ids:
+            placeholders = ",".join("?" * len(matched_ids))
+            conn.execute(
+                f"UPDATE movie_requests SET status = 'fulfilled', fulfilled_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})",
+                matched_ids
+            )
+            conn.commit()
+
+        return requesters
+
+    def clear_old_requests(self) -> int:
+        conn = self._conn()
+        self._ensure_requests_table(conn)
+        cur = conn.execute("DELETE FROM movie_requests WHERE status = 'fulfilled'")
+        count = cur.rowcount
+        conn.commit()
+        return count
+
+    # ------------------ IN-PLACE POST UPDATE ------------------
+    def find_movie_by_msg_id(self, channel_username: str, message_id: int) -> Optional[dict]:
+        conn = self._conn()
+        self._ensure_catalog_table(conn)
+        clean_chan = channel_username.lstrip("@").strip().lower()
+        cur = conn.execute(
+            "SELECT id, title, year, rating, genre, quality, caption, file_id FROM movie_catalog WHERE channel_username = ? AND message_id = ?",
+            (clean_chan, message_id)
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "title": row[1],
+            "year": row[2],
+            "rating": row[3],
+            "genre": row[4],
+            "quality": row[5],
+            "caption": row[6],
+            "file_id": row[7]
+        }
+
+    def update_movie_post_metadata(
+        self,
+        channel_username: str,
+        message_id: int,
+        title: Optional[str] = None,
+        year: Optional[int] = None,
+        rating: Optional[str] = None,
+        genre: Optional[str] = None,
+        quality: Optional[str] = None,
+        caption: Optional[str] = None
+    ) -> bool:
+        conn = self._conn()
+        self._ensure_catalog_table(conn)
+        clean_chan = channel_username.lstrip("@").strip().lower()
+
+        cur = conn.execute(
+            "SELECT id, title, year, rating, genre, quality, caption FROM movie_catalog WHERE channel_username = ? AND message_id = ?",
+            (clean_chan, message_id)
+        )
+        row = cur.fetchone()
+        if not row:
+            return False
+
+        row_id, ex_title, ex_year, ex_rating, ex_genre, ex_quality, ex_caption = row
+        new_title = title if title is not None else ex_title
+        new_year = year if year is not None else ex_year
+        new_rating = rating if rating is not None else ex_rating
+        new_genre = genre if genre is not None else ex_genre
+        new_quality = quality if quality is not None else ex_quality
+        new_caption = caption if caption is not None else ex_caption
+
+        conn.execute(
+            """
+            UPDATE movie_catalog
+            SET title = ?, year = ?, rating = ?, genre = ?, quality = ?, caption = ?
+            WHERE id = ?
+            """,
+            (new_title, new_year, new_rating, new_genre, new_quality, new_caption, row_id)
+        )
+        conn.commit()
+        return True
+
+    # ------------------ MULTI-CHANNEL SWITCHER ------------------
+    def get_user_channels(self, chat_id: int, default_channel: str = "@film_indonesia1") -> List[str]:
+        raw = self.get_setting(f"channels_{chat_id}", "")
+        if raw:
+            try:
+                chans = json.loads(raw)
+                if isinstance(chans, list) and chans:
+                    return chans
+            except Exception:
+                pass
+        curr_wm = self.get_setting(f"watermark_{chat_id}", default_channel)
+        return [curr_wm] if curr_wm else [default_channel]
+
+    def add_user_channel(self, chat_id: int, channel: str) -> List[str]:
+        clean = ("@" + channel.lstrip("@")).strip().lower()
+        chans = self.get_user_channels(chat_id)
+        chans_lower = [c.lower() for c in chans]
+        if clean not in chans_lower:
+            chans.append(clean)
+            self.set_setting(f"channels_{chat_id}", json.dumps(chans))
+        return chans
+
+    def remove_user_channel(self, chat_id: int, channel: str) -> List[str]:
+        clean = ("@" + channel.lstrip("@")).strip().lower()
+        chans = self.get_user_channels(chat_id)
+        chans = [c for c in chans if c.lower() != clean]
+        if not chans:
+            chans = ["@film_indonesia1"]
+        self.set_setting(f"channels_{chat_id}", json.dumps(chans))
+        return chans
+
+    # ------------------ SECRET VAULT ------------------
+    def get_vault_channel(self, chat_id: int, default_val: str = "") -> str:
+        return self.get_setting(f"vault_channel_{chat_id}", default_val)
+
+    def set_vault_channel(self, chat_id: int, vault_channel: str):
+        self.set_setting(f"vault_channel_{chat_id}", vault_channel.strip())
+
+    # ------------------ ADMIN ACCESS CONTROL ------------------
+    def get_admin_ids(self) -> List[int]:
+        raw = self.get_setting("admin_user_ids", "")
+        if raw:
+            try:
+                ids = json.loads(raw)
+                if isinstance(ids, list):
+                    return [int(x) for x in ids if str(x).lstrip("-").isdigit()]
+            except Exception:
+                pass
+        return []
+
+    def add_admin_id(self, user_id: int) -> List[int]:
+        current = self.get_admin_ids()
+        if user_id not in current:
+            current.append(user_id)
+            self.set_setting("admin_user_ids", json.dumps(current))
+        return current
+
+    def remove_admin_id(self, user_id: int) -> List[int]:
+        current = self.get_admin_ids()
+        current = [u for u in current if u != user_id]
+        self.set_setting("admin_user_ids", json.dumps(current))
+        return current

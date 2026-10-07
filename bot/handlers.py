@@ -18,7 +18,10 @@ from pyrogram.types import (
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait
 
-from .config import BOT_TOKEN, API_ID, API_HASH, SESSION_STRING, CHANNEL_WATERMARK, DEFAULT_REQUEST_LINK
+from .config import (
+    BOT_TOKEN, API_ID, API_HASH, SESSION_STRING, CHANNEL_WATERMARK,
+    DEFAULT_REQUEST_LINK, ADMIN_USER_IDS, VAULT_CHANNEL
+)
 from .services.video import photo_thumbnail
 from .services.metadata.engine import MetadataEngine
 from .services.metadata.catalog import format_pinned_catalog, publish_or_update_telegraph_catalog
@@ -33,6 +36,37 @@ else:
 
 _jobs = {}
 _engine = MetadataEngine()
+_video_queue: asyncio.Queue = asyncio.Queue()
+_is_processing: bool = False
+_queue_worker_task: Optional[asyncio.Task] = None
+
+
+def is_admin(user_id: int) -> bool:
+    """Checks whether the given user_id has administrative privileges."""
+    if not user_id:
+        return False
+    # 1. Config env list
+    if user_id in ADMIN_USER_IDS:
+        return True
+    # 2. Database dynamic admin list
+    db_admins = _engine.cache.get_admin_ids()
+    if user_id in db_admins:
+        return True
+    # 3. Primary admin setup: if no admins exist anywhere, auto-register first user
+    primary = _engine.cache.get_setting("primary_admin_id", "")
+    if not primary and not ADMIN_USER_IDS and not db_admins:
+        _engine.cache.set_setting("primary_admin_id", str(user_id))
+        _engine.cache.add_admin_id(user_id)
+        logger.info(f"Registered initial primary admin: {user_id}")
+        return True
+    if primary and str(user_id) == primary:
+        return True
+    return False
+
+
+def check_admin(msg: Message) -> bool:
+    uid = msg.from_user.id if msg.from_user else msg.chat.id
+    return is_admin(uid)
 
 
 async def _apply_expandable_caption(chat_id: Union[int, str], message_id: int, caption: str, reply_markup=None):
@@ -200,21 +234,27 @@ def get_caption_kb(message_id: int, watermark: str):
 
 BOT_COMMANDS_LIST = [
     BotCommand("start", "Panduan lengkap & status bot"),
-    BotCommand("autopost", "Atur mode posting (Otomatis / Manual)"),
+    BotCommand("request", "Kirim permintaan judul film"),
+    BotCommand("cari", "Cari film di database channel"),
+    BotCommand("channels", "Kelola & ganti channel aktif"),
+    BotCommand("usechannel", "Pilih channel aktif cepat"),
+    BotCommand("requests", "Daftar permintaan film member"),
+    BotCommand("editpost", "Edit caption & tombol post channel"),
+    BotCommand("setvault", "Atur brankas channel backup"),
+    BotCommand("autopost", "Atur mode posting (Otomatis/Manual)"),
     BotCommand("stats", "Statistik & analitik koleksi film"),
     BotCommand("healthcheck", "Audit link mati & post terhapus"),
     BotCommand("rekomendasi", "Posting rekomendasi film ke channel"),
     BotCommand("sethighlight", "Atur rekomendasi harian otomatis"),
     BotCommand("retarget", "Update tombol post lama massal"),
-    BotCommand("cari", "Cari film di database channel"),
     BotCommand("synckatalog", "Scan channel & update Pinned Catalog"),
-    BotCommand("backup", "Ekspor backup database & file_id JSON"),
+    BotCommand("backup", "Ekspor backup database JSON"),
     BotCommand("restorechannel", "Restore/migrasi film ke channel baru"),
     BotCommand("setwatermark", "Atur channel tujuan (@namachannel)"),
     BotCommand("setrequest", "Atur link tombol Request Film"),
-    BotCommand("setdivider", "Atur stiker pemisah film di channel"),
-    BotCommand("setsynopsis", "Aktif/matikan sinopsis film otomatis"),
-    BotCommand("autojoin", "Aktif/matikan auto approve join request")
+    BotCommand("setdivider", "Atur stiker pemisah film"),
+    BotCommand("setsynopsis", "Aktif/matikan sinopsis otomatis"),
+    BotCommand("autojoin", "Aktif/matikan auto approve join")
 ]
 
 
@@ -225,6 +265,35 @@ async def start_cmd(client: Client, msg: Message):
     except Exception:
         pass
 
+    user_id = msg.from_user.id if msg.from_user else msg.chat.id
+    first_name = msg.from_user.first_name if msg.from_user else "Sobat Film"
+
+    # ================= MEMBER VIEW =================
+    if not is_admin(user_id):
+        wm = _get_user_watermark(msg.chat.id)
+        clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
+        channel_url = f"https://t.me/{clean_wm}"
+        bot_uname = (client.me.username if getattr(client, "me", None) else "") or "bot"
+
+        member_text = (
+            f"👋 <b>Halo, {first_name}!</b>\n\n"
+            f"Selamat datang di Bot Resmi <b>@{clean_wm}</b> 🎬🍿\n\n"
+            f"🔍 <b>Mau nonton film apa hari ini?</b>\n"
+            f"• <b>Pencarian Cepat:</b> Ketik <code>@{bot_uname} [judul film]</code> di chat mana pun!\n"
+            f"• <b>Pencarian Teks:</b> Ketik <code>/cari [judul film]</code> untuk mendapatkan link tonton.\n"
+            f"• <b>Request Film:</b> Ketik <code>/request [judul film]</code> jika film belum ada. "
+            f"Bot akan otomatis mengirimkan pesan kepadamu begitu film sudah tayang!\n\n"
+            f"<i>Tekan tombol di bawah untuk langsung mencari atau membuka katalog lengkap!</i>"
+        )
+        member_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔍 Cari Film Instan", switch_inline_query_current_chat="")],
+            [InlineKeyboardButton("📌 Buka Katalog Film A-Z", url=channel_url)],
+            [InlineKeyboardButton("💬 Cara Request Film", callback_data="member_req_info")]
+        ])
+        await msg.reply_text(member_text, parse_mode=ParseMode.HTML, reply_markup=member_kb)
+        return
+
+    # ================= ADMIN VIEW =================
     wm = _get_user_watermark(msg.chat.id)
     divider = _get_user_divider(msg.chat.id)
     req_link = _get_user_request_link(msg.chat.id)
@@ -234,6 +303,7 @@ async def start_cmd(client: Client, msg: Message):
 
     clean_wm = (wm or "").lstrip("@").strip().lower()
     hl_val = _engine.cache.get_setting(f"highlight_{clean_wm}", "off") if clean_wm else "off"
+    curr_vault = _engine.cache.get_vault_channel(msg.chat.id, VAULT_CHANNEL)
 
     div_status = "Logo Custom Film Indonesia" if divider == "default" else ("Mati (Off)" if divider == "off" else "Stiker Pilihan Anda")
     req_status = f"<code>{req_link}</code>" if req_link and req_link != "off" else ("Mati (Off)" if req_link == "off" else "<i>Belum diatur</i>")
@@ -241,9 +311,10 @@ async def start_cmd(client: Client, msg: Message):
     autojoin_status = "Aktif (On)" if autojoin_val != "off" else "Mati (Off)"
     autopost_status = "⚡ Otomatis (Langsung Terbit)" if autopost_val == "on" else "✋ Manual (Pratinjau Dulu)"
     hl_status = "Aktif (On)" if hl_val == "on" else "Mati (Off)"
+    vault_status = f"<code>{curr_vault}</code>" if curr_vault else "<i>Belum diatur (Off)</i>"
 
     text = (
-        "🎬 <b>FILM CLEANER & PUBLISHER BOT</b>\n"
+        "🎬 <b>FILM CLEANER & PUBLISHER BOT (ADMIN DASHBOARD)</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "Selamat datang! Bot ini otomatis membersihkan watermark lama, mengekstrak rating & genre resmi, merapikan sinopsis lipat, mendeteksi duplikat, dan menerbitkan film langsung ke channel Telegram Anda.\n\n"
         "📌 <b>DAFTAR PERINTAH (COMMANDS):</b>\n\n"
@@ -251,9 +322,14 @@ async def start_cmd(client: Client, msg: Message):
         "• <code>/autopost</code>\n"
         "  Atur mode terbit: Otomatis langsung kirim vs Manual pratinjau dulu.\n"
         f"  <i>Status saat ini:</i> <b>{autopost_status}</b>\n\n"
-        f"• <code>/setwatermark @namachannel</code>\n"
-        f"  Mengatur channel tujuan posting dan promosi watermark.\n"
-        f"  <i>Channel aktif:</i> <b>{wm}</b>\n\n"
+        f"• <code>/channels</code> & <code>/usechannel @channel</code>\n"
+        f"  Kelola & ganti target channel aktif dengan cepat.\n"
+        f"  <i>Channel aktif saat ini:</i> <b>{wm}</b>\n\n"
+        f"• <code>/setvault @channel_vault</code>\n"
+        f"  Atur channel private cadangan (Secret Vault) untuk auto-mirror arsip video.\n"
+        f"  <i>Vault aktif:</i> {vault_status}\n\n"
+        "• <code>/setwatermark @namachannel</code>\n"
+        "  Mengatur channel tujuan posting dan promosi watermark.\n\n"
         "• <code>/setrequest https://t.me/linkanda</code>\n"
         "  Mengatur link tujuan tombol <b>[ 💬 Request Film ]</b> di channel (ketik <code>/setrequest off</code> untuk mematikan).\n"
         f"  <i>Link request:</i> {req_status}\n\n"
@@ -270,6 +346,8 @@ async def start_cmd(client: Client, msg: Message):
         "• <code>/synckatalog</code>\n"
         "  Scan channel, bersihkan duplikat, dan update Pinned Catalog A-Z + Telegra.ph.\n\n"
         "🛡️ <b>PEMELIHARAAN & DISASTER RECOVERY:</b>\n"
+        "• <code>/editpost &lt;link_post&gt; [judul baru]</code>\n"
+        "  Edit caption, rating, sinopsis, atau tombol postingan lama di channel tanpa upload ulang.\n\n"
         "• <code>/stats</code>\n"
         "  Statistik analitik: Total film, sebaran genre, era tahun, dan resolusi.\n\n"
         "• <code>/healthcheck</code>\n"
@@ -280,7 +358,11 @@ async def start_cmd(client: Client, msg: Message):
         "  Ekspor file JSON cadangan lengkap dengan file_id (bot juga auto-update tiap ada film baru & auto-hapus file lama).\n\n"
         "• <code>/restorechannel @channel_baru</code>\n"
         "  Restore / migrasi semua film ke channel baru dengan jeda anti-spam 3.5s (reply file <code>katalog_backup.json</code>).\n\n"
-        "✨ <b>ENGAGEMENT & MEMBER:</b>\n"
+        "✨ <b>ENGAGEMENT & REQUEST MEMBER:</b>\n"
+        "• <code>/request &lt;judul&gt;</code>\n"
+        "  Kirim permintaan film. Bot otomatis kasih link jika sudah ada, atau catat dan kirim notifikasi DM saat film tayang!\n\n"
+        "• <code>/requests</code>\n"
+        "  Lihat daftar film yang paling banyak diminta oleh member.\n\n"
         "• <code>/rekomendasi</code>\n"
         "  Posting rekomendasi 1 film pilihan acak berating tinggi ke channel.\n\n"
         "• <code>/sethighlight on / off</code>\n"
@@ -290,18 +372,18 @@ async def start_cmd(client: Client, msg: Message):
         "  Otomatis setujui member yang minta join ke channel private.\n"
         f"  <i>Status auto-join:</i> <b>{autojoin_status}</b>\n\n"
         "⚡ <b>FITUR UTAMA:</b>\n"
-        "• 🧹 <b>Pembersih Cerdas</b>: Menghapus teks uploader lama & noise secara otomatis.\n"
+        "• 🛡️ <b>Queue Worker Antrean</b>: Forward 10-20 film diproses berurutan, aman dari Render OOM RAM 512MB.\n"
+        "• 🔒 <b>Admin Security Lock</b>: Akses posting & pengaturan terkunci aman hanya untuk admin.\n"
+        "• 🛡️ <b>Secret Vault</b>: Arsip otomatis video ke channel private cadangan (anti-banned Telegram).\n"
+        "• 💌 <b>Auto-DM Request</b>: Otomatis kirim pesan pribadi ke pemesan saat film sudah tayang.\n"
+        "• ✏️ <b>In-Place Post Editor</b>: Koreksi metadata postingan channel seketika tanpa re-upload.\n"
+        "• 🔀 <b>Multi-Channel Switcher</b>: Beralih target channel dalam 1 klik tombol.\n"
         "• ⚠️ <b>Deteksi Duplikat</b>: Mencegah upload ganda & menahan auto-post jika film sudah ada.\n"
-        "• ⭐ <b>Rating & Genre IMDb</b>: Deteksi otomatis rating dan genre film tanpa API key.\n"
-        "• 📖 <b>Sinopsis Lipat Wikipedia</b>: Ringkasan alur cerita akurat via kutipan lipat Telegram.\n"
-        "• 🚀 <b>1-Klik Posting Channel</b>: Terbit ke channel dengan tombol 2x2 simetris.\n"
-        "• 🎞️ <b>Stiker Pembatas</b>: Otomatis kirim stiker pemisah visual setelah setiap film.\n"
-        "• 📌 <b>Pinned Catalog A-Z & Telegra.ph</b>: Daftar isi rapi yang selalu sinkron.\n"
         "• 💾 <b>Disaster Recovery</b>: Auto-backup cloud file_id untuk pemulihan instan ke channel baru.\n\n"
         "💡 <b>CARA PENGGUNAAN:</b>\n"
         "1. Kirim atau forward file video film ke bot ini.\n"
-        "2. Tunggu 1 detik hingga bot merapikan caption dan metadata.\n"
-        "3. Tekan tombol <b>🚀 Posting ke Channel</b> untuk menerbitkannya ke channel Anda!"
+        "2. Bot otomatis memproses antrean dan merapikan caption.\n"
+        "3. Tekan tombol <b>🚀 Posting ke Channel</b> (atau gunakan /autopost on untuk otomatis terbit)!"
     )
 
     await msg.reply_text(text, parse_mode=ParseMode.HTML)
@@ -309,6 +391,10 @@ async def start_cmd(client: Client, msg: Message):
 
 @app.on_message(filters.command("setwatermark"))
 async def set_watermark_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
     args = msg.text.split(maxsplit=1)
     if len(args) < 2 or not args[1].strip():
         curr = _get_user_watermark(msg.chat.id)
@@ -325,6 +411,7 @@ async def set_watermark_cmd(client: Client, msg: Message):
         new_wm = f"@{new_wm}"
 
     _engine.cache.set_setting(f"watermark_{msg.chat.id}", new_wm)
+    _engine.cache.add_user_channel(msg.chat.id, new_wm)
     await msg.reply_text(
         f"✅ <b>Watermark Channel Diperbarui!</b>\n\n"
         f"• Watermark baru: <b>{new_wm}</b>\n"
@@ -336,6 +423,10 @@ async def set_watermark_cmd(client: Client, msg: Message):
 
 @app.on_message(filters.command("setdivider"))
 async def set_divider_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
     reply = msg.reply_to_message
     if reply and reply.sticker:
         new_fid = reply.sticker.file_id
@@ -382,6 +473,10 @@ async def set_divider_cmd(client: Client, msg: Message):
 
 @app.on_message(filters.command("setrequest"))
 async def set_request_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
     args = msg.text.split(maxsplit=1)
     if len(args) < 2 or not args[1].strip():
         curr = _get_user_request_link(msg.chat.id)
@@ -420,6 +515,10 @@ async def set_request_cmd(client: Client, msg: Message):
 
 @app.on_message(filters.command("setsynopsis"))
 async def set_synopsis_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
     args = msg.text.split(maxsplit=1)
     if len(args) < 2 or not args[1].strip():
         curr = _engine.cache.get_setting(f"synopsis_{msg.chat.id}", "on")
@@ -441,6 +540,454 @@ async def set_synopsis_cmd(client: Client, msg: Message):
     else:
         _engine.cache.set_setting(f"synopsis_{msg.chat.id}", "on")
         await msg.reply_text("✅ <b>Sinopsis lipat otomatis diaktifkan!</b>", parse_mode=ParseMode.HTML)
+
+
+# ================= MOVIE REQUEST SYSTEM =================
+@app.on_callback_query(filters.regex(r"^member_req_info$"))
+async def cb_member_req_info(client: Client, query: CallbackQuery):
+    await query.answer()
+    await query.message.reply_text(
+        "💬 <b>Cara Melakukan Request Film:</b>\n\n"
+        "Cukup ketik perintah <code>/request</code> diikuti judul film favoritmu.\n\n"
+        "<b>Contoh:</b>\n"
+        "• <code>/request Pengabdi Setan</code>\n"
+        "• <code>/request Mencuri Raden Saleh</code>\n\n"
+        "<i>Permintaanmu akan langsung tercatat di daftar antrean admin. Begitu film diunggah, bot akan otomatis mengirimkan notifikasi kepadamu! 🎉</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+
+@app.on_message(filters.command(["request", "req"]))
+async def request_movie_cmd(client: Client, msg: Message):
+    chat_id = msg.chat.id
+    user_id = msg.from_user.id if msg.from_user else chat_id
+    username = msg.from_user.username or msg.from_user.first_name if msg.from_user else "Member"
+    wm = _get_user_watermark(chat_id)
+    clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
+
+    args = msg.text.split(None, 1)
+    if len(args) < 2 or not args[1].strip():
+        await msg.reply_text(
+            "💬 <b>Cara Request Film:</b>\n\n"
+            "Ketik perintah diikuti judul film yang kamu cari:\n"
+            "Contoh: <code>/request Mencuri Raden Saleh</code>\n\n"
+            "<i>Jika film sudah ada di channel, bot akan langsung memberikan link tontonnya. "
+            "Jika belum, bot akan mencatatnya dan otomatis mengirimkan pesan kepadamu saat film sudah diunggah oleh admin!</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    query = args[1].strip()
+
+    # 1. Cek apakah film sudah tersedia di channel
+    existing = _engine.cache.find_existing_movie(query, channel_username=clean_wm)
+    if not existing:
+        search_res = _engine.cache.search_catalog(query, limit=1)
+        if search_res:
+            existing = search_res[0]
+
+    if existing:
+        ex_title = existing.get("title") or query
+        ex_year = existing.get("year")
+        ex_disp = f"{ex_title} ({ex_year})" if ex_year else ex_title
+        ex_msg_id = existing.get("message_id")
+        ex_link = f"https://t.me/{clean_wm}/{ex_msg_id}" if ex_msg_id else f"https://t.me/{clean_wm}"
+        await msg.reply_text(
+            f"🎉 <b>Film yang Kamu Cari Sudah Tersedia!</b>\n\n"
+            f"🎬 <b>{ex_disp}</b>\n"
+            f"📢 Channel: @{clean_wm}\n\n"
+            f"👉 <a href=\"{ex_link}\">Klik di sini untuk langsung menonton di channel</a>\n\n"
+            f"<i>Selamat menonton! 🍿</i>",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
+        return
+
+    # 2. Catat request ke database
+    res = _engine.cache.add_movie_request(user_id, username, query, clean_wm)
+    if res.get("is_new"):
+        await msg.reply_text(
+            f"✅ <b>Permintaan Film Berhasil Dicatat!</b>\n\n"
+            f"🎬 <b>Judul:</b> {query}\n"
+            f"📢 <b>Target Channel:</b> @{clean_wm}\n\n"
+            f"<i>Bot telah memasukkan permintaanmu ke daftar tunggu admin. Kamu akan otomatis menerima pesan notifikasi di sini begitu film ini diunggah! 🔔</i>",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        await msg.reply_text(
+            f"ℹ️ <b>Permintaan Sudah Terdaftar Sebelumnya:</b>\n\n"
+            f"Kamu sudah pernah me-request film <b>{query}</b>. "
+            f"Permintaanmu masih aktif dan bot akan tetap mengirimkan notifikasi saat film sudah diunggah. Mohon ditunggu ya! 🙏",
+            parse_mode=ParseMode.HTML
+        )
+
+
+@app.on_message(filters.command(["requests", "listrequest", "requestlist"]))
+async def list_requests_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
+    chat_id = msg.chat.id
+    wm = _get_user_watermark(chat_id)
+    clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
+
+    reqs = _engine.cache.get_pending_requests(clean_wm, limit=25)
+    if not reqs:
+        await msg.reply_text(
+            f"📋 <b>Daftar Permintaan Film (@{clean_wm}):</b>\n\n"
+            f"<i>Saat ini belum ada permintaan film yang tertunda dari member.</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    lines = [
+        f"📋 <b>DAFTAR PERMINTAAN FILM MEMBER</b>",
+        f"📢 Channel: @{clean_wm}",
+        f"━━━━━━━━━━━━━━━━━━━━"
+    ]
+    for idx, r in enumerate(reqs, 1):
+        t = r["title"]
+        c = r["count"]
+        cnt_str = f"({c}x diminta)" if c > 1 else ""
+        lines.append(f"{idx}. <b>{t}</b> {cnt_str}")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("<i>💡 Saat Anda mengunggah film dengan judul di atas, bot akan otomatis mengirimkan notifikasi DM ke penonton yang me-request!</i>")
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑️ Bersihkan Riwayat Selesai", callback_data="clear_requests")]
+    ])
+    await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+@app.on_callback_query(filters.regex(r"^clear_requests$"))
+async def cb_clear_requests(client: Client, query: CallbackQuery):
+    user_id = query.from_user.id if query.from_user else query.message.chat.id
+    if not is_admin(user_id):
+        await query.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+
+    cnt = _engine.cache.clear_old_requests()
+    await query.answer(f"✅ {cnt} riwayat request dibersihkan!", show_alert=True)
+    await query.message.edit_reply_markup(reply_markup=None)
+
+
+# ================= SECRET VAULT (MIRROR ARSIP) =================
+@app.on_message(filters.command(["setvault", "vault"]))
+async def set_vault_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
+    chat_id = msg.chat.id
+    args = msg.text.split(None, 1)
+
+    curr_vault = _engine.cache.get_vault_channel(chat_id, VAULT_CHANNEL)
+
+    if len(args) < 2 or not args[1].strip():
+        status_v = f"<code>{curr_vault}</code>" if curr_vault else "<i>Belum diatur (Off)</i>"
+        await msg.reply_text(
+            f"🛡️ <b>PENGATURAN SECRET VAULT (BRANKAS CADANGAN)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Status saat ini: {status_v}\n\n"
+            f"Secret Vault adalah channel Telegram private cadangan tempat bot otomatis menyalin diam-diam (*silent mirror*) setiap film yang Anda upload.\n\n"
+            f"<b>Keuntungan:</b>\n"
+            f"Jika channel publik Anda sewaktu-waktu terkena banned/takedown, seluruh koleksi film di Vault 100% aman dan tidak tersentuh report publik. Anda tinggal /restorechannel dari Vault ke channel baru!\n\n"
+            f"<b>Cara Mengatur:</b>\n"
+            f"1. Buat channel private baru.\n"
+            f"2. Masukkan bot ini sebagai <b>Administrator</b> di channel tersebut.\n"
+            f"3. Ketik: <code>/setvault @username_channel</code> (atau ID <code>-100xxxxxxx</code>)\n"
+            f"4. Ketik <code>/setvault off</code> untuk menonaktifkan.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    target = args[1].strip()
+    if target.lower() == "off":
+        _engine.cache.set_vault_channel(chat_id, "")
+        await msg.reply_text("✅ <b>Secret Vault Berhasil Dinonaktifkan.</b>", parse_mode=ParseMode.HTML)
+        return
+
+    status_msg = await msg.reply_text(f"⏳ <i>Memverifikasi akses bot ke channel brankas {target}...</i>", parse_mode=ParseMode.HTML)
+    try:
+        chat_info = await client.get_chat(target)
+        _engine.cache.set_vault_channel(chat_id, target)
+        await status_msg.edit_text(
+            f"🎉 <b>SECRET VAULT BERHASIL DIHUBUNGKAN!</b>\n\n"
+            f"🛡️ <b>Channel Brankas:</b> {chat_info.title} (<code>{target}</code>)\n"
+            f"✅ <b>Status:</b> Aktif\n\n"
+            f"<i>Setiap kali Anda memposting film ke channel utama, bot akan otomatis mengirimkan salinan arsip ke channel brankas ini!</i>",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.warning(f"Error connecting vault {target}: {e}")
+        await status_msg.edit_text(
+            f"❌ <b>Gagal Menghubungkan Channel Brankas:</b>\n\n<code>{e}</code>\n\n"
+            f"<i>Pastikan bot sudah ditambahkan ke channel tersebut dan dijadikan <b>Administrator</b>!</i>",
+            parse_mode=ParseMode.HTML
+        )
+
+
+# ================= MULTI-CHANNEL SWITCHER =================
+@app.on_message(filters.command(["channels", "channellist"]))
+async def channels_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
+    chat_id = msg.chat.id
+    current_active = _get_user_watermark(chat_id)
+    clean_active = (current_active or "@film_indonesia1").lstrip("@").strip().lower()
+    chans = _engine.cache.get_user_channels(chat_id, default_channel=current_active)
+
+    buttons = []
+    for c in chans:
+        c_clean = c.lstrip("@").strip().lower()
+        is_curr = (c_clean == clean_active)
+        mark = "🟢" if is_curr else "⚪"
+        tag = f"{mark} @{c_clean}" + (" (Aktif)" if is_curr else "")
+        buttons.append([InlineKeyboardButton(tag, callback_data=f"switch_chan:{c_clean}")])
+
+    buttons.append([
+        InlineKeyboardButton("➕ Tambah Channel Baru", callback_data="add_chan_guide")
+    ])
+
+    text = (
+        "🔀 <b>MULTI-CHANNEL SWITCHER</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"Channel yang saat ini aktif: <b>@{clean_active}</b>\n\n"
+        "Pilih salah satu tombol di bawah untuk berganti target channel secara instan. "
+        "Semua upload, auto-post, dupe check, dan katalog akan otomatis mengarah ke channel yang Anda pilih.\n"
+    )
+    await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+@app.on_message(filters.command(["usechannel", "switchchannel"]))
+async def usechannel_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
+    chat_id = msg.chat.id
+    args = msg.text.split(None, 1)
+    if len(args) < 2 or not args[1].strip():
+        await msg.reply_text(
+            "ℹ️ <b>Cara Mengganti Channel Cepat:</b>\n\n"
+            "Ketik: <code>/usechannel @namachannel</code>\n"
+            "Contoh: <code>/usechannel @film_barat_subindo</code>\n\n"
+            "<i>Ketik <code>/channels</code> untuk melihat menu daftar semua channel yang Anda kelola.</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    target = ("@" + args[1].lstrip("@")).strip()
+
+    try:
+        chat_info = await client.get_chat(target)
+        _engine.cache.set_setting(f"watermark_{chat_id}", target)
+        _engine.cache.add_user_channel(chat_id, target)
+        await msg.reply_text(
+            f"✅ <b>Channel Aktif Berhasil Diganti!</b>\n\n"
+            f"📢 <b>Channel Sekarang:</b> {chat_info.title} (<code>{target}</code>)\n"
+            f"Semua upload, auto-post, backup, dan pencarian sekarang diarahkan ke channel ini.",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.warning(f"Error checking channel {target}: {e}")
+        await msg.reply_text(
+            f"❌ <b>Bot Tidak Bisa Mengakses Channel {target}:</b>\n\n<code>{e}</code>\n\n"
+            f"<i>Pastikan bot sudah dijadikan Administrator di channel {target} terlebih dahulu!</i>",
+            parse_mode=ParseMode.HTML
+        )
+
+
+@app.on_callback_query(filters.regex(r"^switch_chan:(.+)$"))
+async def cb_switch_channel(client: Client, query: CallbackQuery):
+    user_id = query.from_user.id if query.from_user else query.message.chat.id
+    if not is_admin(user_id):
+        await query.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+
+    chat_id = query.message.chat.id
+    clean_target = query.matches[0].group(1).strip().lower()
+    target_wm = f"@{clean_target}"
+
+    _engine.cache.set_setting(f"watermark_{chat_id}", target_wm)
+    _engine.cache.add_user_channel(chat_id, target_wm)
+
+    await query.answer(f"Aktif: @{clean_target}", show_alert=False)
+
+    chans = _engine.cache.get_user_channels(chat_id, default_channel=target_wm)
+    buttons = []
+    for c in chans:
+        c_clean = c.lstrip("@").strip().lower()
+        is_curr = (c_clean == clean_target)
+        mark = "🟢" if is_curr else "⚪"
+        tag = f"{mark} @{c_clean}" + (" (Aktif)" if is_curr else "")
+        buttons.append([InlineKeyboardButton(tag, callback_data=f"switch_chan:{c_clean}")])
+
+    buttons.append([
+        InlineKeyboardButton("➕ Tambah Channel Baru", callback_data="add_chan_guide")
+    ])
+
+    text = (
+        "🔀 <b>MULTI-CHANNEL SWITCHER</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"Channel yang saat ini aktif: <b>@{clean_target}</b>\n\n"
+        "Pilih salah satu tombol di bawah untuk berganti target channel secara instan. "
+        "Semua upload, auto-post, dupe check, dan katalog akan otomatis mengarah ke channel yang Anda pilih.\n"
+    )
+    try:
+        await query.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
+    except Exception:
+        pass
+
+
+@app.on_callback_query(filters.regex(r"^add_chan_guide$"))
+async def cb_add_chan_guide(client: Client, query: CallbackQuery):
+    user_id = query.from_user.id if query.from_user else query.message.chat.id
+    if not is_admin(user_id):
+        await query.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+
+    await query.answer()
+    await query.message.reply_text(
+        "➕ <b>Cara Menambah Channel Baru:</b>\n\n"
+        "1. Tambahkan bot ini ke channel baru Anda sebagai <b>Administrator</b>.\n"
+        "2. Ketik perintah: <code>/usechannel @namachannelbaru</code>\n"
+        "3. Channel baru akan otomatis tersimpan di daftar tombol <code>/channels</code>!",
+        parse_mode=ParseMode.HTML
+    )
+
+
+# ================= IN-PLACE POST EDITOR =================
+@app.on_message(filters.command(["editpost", "fixpost", "editcaption"]))
+async def editpost_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
+    chat_id = msg.chat.id
+    wm = _get_user_watermark(chat_id)
+    clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
+
+    args = msg.text.split(None, 2)
+    target_msg_id = None
+    target_channel = clean_wm
+    custom_title = None
+
+    if msg.reply_to_message and getattr(msg.reply_to_message, "forward_from_chat", None):
+        target_msg_id = msg.reply_to_message.forward_from_message_id
+        if msg.reply_to_message.forward_from_chat.username:
+            target_channel = msg.reply_to_message.forward_from_chat.username.lower()
+        if len(args) > 1:
+            custom_title = msg.text.split(None, 1)[1].strip()
+    elif len(args) > 1:
+        first_arg = args[1].strip()
+        link_m = re.match(r"(?:https?://)?t\.me/([^/]+)/(\d+)", first_arg)
+        if link_m:
+            target_channel = link_m.group(1).lower()
+            target_msg_id = int(link_m.group(2))
+            if len(args) > 2:
+                custom_title = args[2].strip()
+        elif first_arg.isdigit():
+            target_msg_id = int(first_arg)
+            if len(args) > 2:
+                custom_title = args[2].strip()
+
+    if not target_msg_id:
+        await msg.reply_text(
+            "ℹ️ <b>Cara Menggunakan /editpost:</b>\n\n"
+            "1. <b>Balas (Reply)</b> postingan channel yang di-forward ke sini dengan:\n"
+            "   <code>/editpost [Judul Baru] (Tahun)</code>\n\n"
+            "2. <b>Atau ketik langsung link postingannya:</b>\n"
+            "   <code>/editpost https://t.me/namachannel/123 [Judul Baru]</code>\n\n"
+            "<i>Bot akan mengedit caption & tombol postingan lama di channel tanpa upload ulang!</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    status_msg = await msg.reply_text(
+        f"⏳ <b>Memproses Edit Postingan #{target_msg_id} di @{target_channel}...</b>",
+        parse_mode=ParseMode.HTML
+    )
+
+    existing = _engine.cache.find_movie_by_msg_id(target_channel, target_msg_id)
+    title_to_fetch = custom_title or (existing.get("title") if existing else f"Post #{target_msg_id}")
+
+    syn_enabled = _engine.cache.get_setting(f"synopsis_{chat_id}", "on") != "off"
+    result = await _engine.process(title_to_fetch, watermark=f"@{target_channel}", enable_synopsis=syn_enabled)
+    new_caption = result["caption"]
+    meta = result.get("metadata", {})
+    new_title = meta.get("title") or title_to_fetch
+    new_year = meta.get("year")
+    new_rating = meta.get("rating")
+    new_genre = meta.get("genre")
+    new_res = meta.get("quality") or meta.get("resolution")
+
+    title_disp = f"{new_title} ({new_year})" if new_year else new_title
+    channel_url = f"https://t.me/{target_channel}"
+    share_text = f"Nonton film {title_disp} di @{target_channel}!"
+    share_url = f"https://t.me/share/url?url={urllib.parse.quote(channel_url)}&text={urllib.parse.quote(share_text)}"
+    trailer_query = f"Trailer {new_title}" + (f" {new_year}" if new_year else "")
+    trailer_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(trailer_query)}"
+
+    row1 = [
+        InlineKeyboardButton(f"📢 Gabung @{target_channel}", url=channel_url),
+        InlineKeyboardButton("🎬 Tonton Trailer", url=trailer_url)
+    ]
+    req_link = _get_user_request_link(chat_id)
+    if req_link and req_link.lower() != "off":
+        row2 = [
+            InlineKeyboardButton("💬 Request Film", url=req_link),
+            InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
+        ]
+    else:
+        row2 = [
+            InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
+        ]
+    new_kb = InlineKeyboardMarkup([row1, row2])
+
+    try:
+        await client.edit_message_caption(
+            chat_id=f"@{target_channel}",
+            message_id=target_msg_id,
+            caption=new_caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=new_kb
+        )
+        await _apply_expandable_caption(f"@{target_channel}", target_msg_id, new_caption, new_kb)
+
+        _engine.cache.update_movie_post_metadata(
+            channel_username=target_channel,
+            message_id=target_msg_id,
+            title=new_title,
+            year=new_year,
+            rating=new_rating,
+            genre=new_genre,
+            quality=new_res,
+            caption=new_caption
+        )
+
+        await status_msg.edit_text(
+            f"✅ <b>Postingan Berhasil Diperbarui!</b>\n\n"
+            f"📢 <b>Channel:</b> @{target_channel}\n"
+            f"🎬 <b>Judul:</b> {title_disp}\n"
+            f"⭐ <b>Rating:</b> {new_rating or 'N/A'}\n"
+            f"🎭 <b>Genre:</b> {new_genre or 'N/A'}\n"
+            f"👉 <a href='https://t.me/{target_channel}/{target_msg_id}'>Lihat Postingan di Channel</a>",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
+    except Exception as ee:
+        logger.exception("Edit post error")
+        await status_msg.edit_text(
+            f"❌ <b>Gagal Mengedit Postingan:</b>\n\n<code>{ee}</code>\n\n"
+            f"<i>Pastikan bot adalah Admin di @{target_channel} dengan izin Edit Messages!</i>",
+            parse_mode=ParseMode.HTML
+        )
+
 
 
 @app.on_message(filters.command(["cari", "search"]))
@@ -502,6 +1049,10 @@ async def search_movie_cmd(client: Client, msg: Message):
 
 @app.on_message(filters.command("autojoin"))
 async def autojoin_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
     args = msg.text.split(maxsplit=1)
     if len(args) < 2 or not args[1].strip():
         curr = _engine.cache.get_setting("global_autojoin", "on")
@@ -542,6 +1093,10 @@ def get_autopost_kb(current_mode: str) -> InlineKeyboardMarkup:
 
 @app.on_message(filters.command(["autopost", "setautopost", "mode"]))
 async def set_autopost_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
     chat_id = msg.chat.id
     args = msg.text.split(maxsplit=1)
 
@@ -595,6 +1150,11 @@ async def set_autopost_cmd(client: Client, msg: Message):
 
 @app.on_callback_query(filters.regex(r"^autopost:(on|off)$"))
 async def handle_autopost_callback(client: Client, call: CallbackQuery):
+    user_id = call.from_user.id if call.from_user else call.message.chat.id
+    if not is_admin(user_id):
+        await call.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+
     chat_id = call.message.chat.id
     target_mode = call.matches[0].group(1)
 
@@ -629,6 +1189,10 @@ async def handle_autopost_callback(client: Client, call: CallbackQuery):
 
 @app.on_message(filters.command(["stats", "statistik", "analitik"]))
 async def stats_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
     chat_id = msg.chat.id
     args = msg.text.split()[1:] if msg.text else []
     target_wm = args[0] if args else _get_user_watermark(chat_id)
@@ -687,6 +1251,10 @@ async def stats_cmd(client: Client, msg: Message):
 
 @app.on_message(filters.command(["healthcheck", "auditkatalog", "audit"]))
 async def healthcheck_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
     chat_id = msg.chat.id
     args = msg.text.split()[1:] if msg.text else []
     target_wm = args[0] if args else _get_user_watermark(chat_id)
@@ -756,6 +1324,10 @@ async def healthcheck_cmd(client: Client, msg: Message):
 
 @app.on_message(filters.command(["retarget", "updateposts", "updatebuttons"]))
 async def retarget_posts_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
     chat_id = msg.chat.id
     wm = _get_user_watermark(chat_id)
     clean_wm = (wm or "").lstrip("@").strip().lower()
@@ -935,6 +1507,10 @@ async def send_channel_recommendation(client: Client, channel_username: str, cha
 
 @app.on_message(filters.command(["rekomendasi", "highlight", "filmhariini"]))
 async def rekomendasi_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
     chat_id = msg.chat.id
     args = msg.text.split()[1:] if msg.text else []
     target_wm = args[0] if args else _get_user_watermark(chat_id)
@@ -963,6 +1539,10 @@ async def rekomendasi_cmd(client: Client, msg: Message):
 
 @app.on_message(filters.command(["sethighlight", "autohighlight"]))
 async def set_highlight_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
     chat_id = msg.chat.id
     wm = _get_user_watermark(chat_id)
     clean_wm = (wm or "").lstrip("@").strip().lower()
@@ -1388,6 +1968,10 @@ async def send_or_update_backup_document(
 
 @app.on_message(filters.command(["synckatalog", "scanchannel"]))
 async def sync_catalog_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
     chat_id = msg.chat.id
     wm = _get_user_watermark(chat_id)
     clean_wm = (wm or "").lstrip("@").strip()
@@ -1575,6 +2159,53 @@ async def publish_video_to_channel(
     # Kirim stiker pemisah otomatis di bawah film
     await _send_channel_divider(client, chat_id, watermark)
 
+    # 1. SECRET VAULT: Silent mirror video to private backup archive channel
+    vault_target = _engine.cache.get_vault_channel(chat_id, VAULT_CHANNEL)
+    if vault_target:
+        try:
+            clean_vault = vault_target if str(vault_target).startswith("-100") else ("@" + vault_target.lstrip("@"))
+            await client.send_video(
+                chat_id=clean_vault,
+                video=video_file_id,
+                caption=(
+                    f"🛡️ <b>[BRANKAS ARSIP]</b>\n"
+                    f"🎬 <b>{title_display}</b>\n"
+                    f"📢 Channel Asal: {watermark}\n"
+                    f"🔗 Post Asli: https://t.me/{clean_wm}/{sent_channel.id}"
+                ),
+                parse_mode=ParseMode.HTML,
+                supports_streaming=True
+            )
+            logger.info(f"Mirrored movie {title_display} to vault: {clean_vault}")
+        except Exception as ve:
+            logger.warning(f"Failed to mirror to vault {vault_target}: {ve}")
+
+    # 2. SMART REQUEST: Notify members who requested this film
+    try:
+        fulfilled_reqs = _engine.cache.fulfill_movie_requests(title_meta, clean_wm)
+        for req in fulfilled_reqs:
+            req_uid = req.get("user_id")
+            if req_uid and req_uid != chat_id:
+                try:
+                    await client.send_message(
+                        chat_id=req_uid,
+                        text=(
+                            f"🎉 <b>KABAR GEMBIRA DARI @{clean_wm}!</b>\n\n"
+                            f"Film yang pernah kamu request:\n"
+                            f"🎬 <b>{title_display}</b>\n\n"
+                            f"Sekarang <b>sudah resmi tayang</b> di channel! 🍿\n"
+                            f"👉 <a href=\"https://t.me/{clean_wm}/{sent_channel.id}\">Klik di sini untuk langsung menonton</a>\n\n"
+                            f"<i>Selamat menonton & jangan lupa bagikan ke teman-temanmu!</i>"
+                        ),
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True
+                    )
+                    logger.info(f"Sent fulfilled notification for {title_display} to user {req_uid}")
+                except Exception as ne:
+                    logger.debug(f"Could not send request fulfilled DM to {req_uid}: {ne}")
+    except Exception as re_err:
+        logger.warning(f"Error checking request fulfillment: {re_err}")
+
     # Simpan ke katalog pencarian film beserta file_id cloud Telegram
     try:
         _engine.cache.save_movie_post(
@@ -1610,6 +2241,10 @@ async def publish_video_to_channel(
 
 @app.on_message(filters.command(["backup", "backupkatalog"]))
 async def backup_catalog_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
     chat_id = msg.chat.id
     args = msg.text.split()[1:] if msg.text else []
     if args:
@@ -1653,6 +2288,10 @@ async def backup_catalog_cmd(client: Client, msg: Message):
 
 @app.on_message(filters.command(["restorechannel", "migrasichannel", "restore"]))
 async def restore_channel_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
     chat_id = msg.chat.id
     args = msg.text.split()[1:] if msg.text else []
 
@@ -1869,8 +2508,7 @@ async def restore_channel_cmd(client: Client, msg: Message):
     )
 
 
-@app.on_message(filters.video | filters.document)
-async def receive_video(client: Client, msg: Message):
+async def _process_video_task(client: Client, msg: Message):
     media = msg.video or msg.document
     if not media:
         return
@@ -2006,6 +2644,58 @@ async def receive_video(client: Client, msg: Message):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+async def video_queue_worker(client: Client):
+    global _is_processing
+    logger.info("Video queue worker started")
+    while True:
+        try:
+            item = await _video_queue.get()
+            _is_processing = True
+            cl, m = item
+            await _process_video_task(cl, m)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.exception(f"Error in video_queue_worker: {e}")
+        finally:
+            _is_processing = False
+            _video_queue.task_done()
+
+
+@app.on_message(filters.video | filters.document)
+async def receive_video(client: Client, msg: Message):
+    media = msg.video or msg.document
+    if not media:
+        return
+
+    user_id = msg.from_user.id if msg.from_user else msg.chat.id
+    if not is_admin(user_id):
+        await msg.reply_text(
+            "⛔ <b>Akses Ditolak:</b>\n"
+            "Hanya Administrator yang dapat memproses dan mengunggah film ke channel.\n"
+            "Gunakan <code>/request [judul film]</code> jika Anda ingin me-request film favorit Anda!",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    global _queue_worker_task
+    if _queue_worker_task is None or _queue_worker_task.done():
+        _queue_worker_task = asyncio.create_task(video_queue_worker(client))
+
+    qsize = _video_queue.qsize()
+    if _is_processing or qsize > 0:
+        pos = qsize + 1
+        fn = extract_filename(media, msg)
+        await msg.reply_text(
+            f"⏳ <b>Video Ditambahkan ke Antrean (#{pos})</b>\n\n"
+            f"🎬 <b>File:</b> <code>{fn}</code>\n"
+            f"<i>Film akan diproses otomatis satu per satu secara berurutan agar server aman dari lonjakan memori (RAM).</i>",
+            parse_mode=ParseMode.HTML
+        )
+
+    await _video_queue.put((client, msg))
+
+
 @app.on_callback_query(filters.regex(r"^copy:"))
 async def handle_copy_callback(client: Client, call: CallbackQuery):
     chat_id = call.message.chat.id
@@ -2026,6 +2716,11 @@ async def handle_copy_callback(client: Client, call: CallbackQuery):
 
 @app.on_callback_query(filters.regex(r"^post:"))
 async def handle_post_callback(client: Client, call: CallbackQuery):
+    user_id = call.from_user.id if call.from_user else call.message.chat.id
+    if not is_admin(user_id):
+        await call.answer("⛔ Hanya Administrator yang dapat memposting ke channel!", show_alert=True)
+        return
+
     chat_id = call.message.chat.id
     job = _jobs.get(chat_id)
     if not job:
@@ -2319,5 +3014,10 @@ async def on_bot_startup(client: Client):
 
         # Start background daily highlight worker
         asyncio.create_task(_daily_highlight_worker(client))
+
+        # Start background video upload queue worker
+        global _queue_worker_task
+        if _queue_worker_task is None or _queue_worker_task.done():
+            _queue_worker_task = asyncio.create_task(video_queue_worker(client))
     except Exception as e:
         logger.warning(f"Bot startup hydration error: {e}")
