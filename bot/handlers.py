@@ -1217,7 +1217,8 @@ async def editpost_cmd(client: Client, msg: Message):
         InlineKeyboardButton(f"📢 Gabung @{target_channel}", url=channel_url),
         InlineKeyboardButton("🎬 Tonton Trailer", url=trailer_url)
     ]
-    req_link = _get_user_request_link(chat_id)
+    bot_uname = (client.me.username if getattr(client, "me", None) else "") or _engine.cache.get_setting("bot_username", "")
+    req_link = _get_user_request_link(chat_id, bot_username=bot_uname)
     if req_link and req_link.lower() != "off":
         row2 = [
             InlineKeyboardButton("💬 Request Film", url=req_link),
@@ -1630,7 +1631,9 @@ async def retarget_posts_cmd(client: Client, msg: Message):
 
         total_posts = len(movies)
         updated_count = 0
-        req_link = _get_user_request_link(chat_id)
+        bot_user = getattr(client, "me", None)
+        bot_uname = bot_user.username if bot_user else ""
+        req_link = _get_user_request_link(chat_id, bot_username=bot_uname)
         channel_url = f"https://t.me/{clean_wm}"
 
         await status_msg.edit_text(
@@ -1698,12 +1701,19 @@ async def retarget_posts_cmd(client: Client, msg: Message):
 
             await asyncio.sleep(1.2)
 
+        # Update Pinned Catalog in channel so its Request Film button is also refreshed
+        try:
+            await update_pinned_catalog(client, clean_wm, chat_id=chat_id)
+        except Exception as pe:
+            logger.warning(f"Could not refresh pinned catalog during retarget: {pe}")
+
         await status_msg.edit_text(
             f"🎉 <b>PEMBARUAN TOMBOL MASSAL SELESAI!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📢 <b>Channel:</b> @{clean_wm}\n"
-            f"✅ <b>Postingan Diperbarui:</b> {updated_count} film\n\n"
-            f"<i>Semua tombol di channel sekarang sudah memakai link watermark & link request terbaru!</i>",
+            f"✅ <b>Postingan Diperbarui:</b> {updated_count} film\n"
+            f"📌 <b>Pinned Catalog:</b> Tombol request ikut diperbarui!\n\n"
+            f"<i>Semua tombol di channel sekarang sudah memakai link bot request terbaru!</i>",
             parse_mode=ParseMode.HTML
         )
     except Exception as e:
@@ -2070,7 +2080,7 @@ async def update_pinned_catalog(
     buttons.append([
         InlineKeyboardButton("🔍 Cari Koleksi Film", switch_inline_query_current_chat="")
     ])
-    req_link = _get_user_request_link(chat_id) if chat_id else (_engine.cache.get_setting("global_request_link", "") or DEFAULT_REQUEST_LINK)
+    req_link = _get_user_request_link(chat_id or 0, bot_username=bot_username)
     if req_link and req_link != "off":
         buttons.append([
             InlineKeyboardButton("💬 Request Film", url=req_link)
@@ -2412,7 +2422,8 @@ async def publish_video_to_channel(
         InlineKeyboardButton("🎬 Tonton Trailer", url=trailer_url)
     ]
 
-    req_link = _get_user_request_link(chat_id)
+    bot_uname = (client.me.username if getattr(client, "me", None) else "") or _engine.cache.get_setting("bot_username", "")
+    req_link = _get_user_request_link(chat_id, bot_username=bot_uname)
     if req_link and req_link.lower() != "off":
         row2 = [
             InlineKeyboardButton("💬 Request Film", url=req_link),
