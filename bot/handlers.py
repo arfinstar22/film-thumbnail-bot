@@ -536,6 +536,19 @@ def parse_movie_from_channel_message(msg: Message) -> Optional[Dict[str, Any]]:
         if m_qual:
             quality = m_qual.group(1).strip()
 
+        if not title:
+            lines = [l.strip() for l in plain.split("\n") if l.strip() and not l.startswith("━")]
+            if lines:
+                first_line = lines[0]
+                if not re.search(r"(channel|official|gabung|join|link)", first_line, re.I):
+                    parsed_line = _engine.parser.parse(first_line)
+                    if parsed_line.get("title"):
+                        title = parsed_line["title"]
+                        if not year and parsed_line.get("year"):
+                            year = parsed_line["year"]
+                        if not quality and parsed_line.get("resolution"):
+                            quality = parsed_line["resolution"]
+
     if not title:
         file_name = getattr(media, "file_name", "") or ""
         if file_name:
@@ -634,33 +647,66 @@ async def sync_catalog_cmd(client: Client, msg: Message):
         await msg.reply_text("❌ Channel watermark belum diatur. Gunakan <code>/setwatermark @namachannel</code> terlebih dahulu.")
         return
 
+    # Check optional scan limit (default 1000 messages)
+    args = msg.text.split(maxsplit=1)
+    scan_limit = 1000
+    if len(args) > 1:
+        arg_val = args[1].strip().lower()
+        if arg_val == "all":
+            scan_limit = 10000
+        elif arg_val.isdigit():
+            scan_limit = min(10000, max(50, int(arg_val)))
+
     status_msg = await msg.reply_text(
         f"⏳ <b>Memulai Pemindaian Channel @{clean_wm}...</b>\n\n"
-        "• Membaca riwayat postingan film di channel...\n"
+        f"• Membaca riwayat hingga {scan_limit} postingan...\n"
         "• Menyaring film duplikat (mengambil post paling terbaru)...\n"
         "• Memperbarui Pinned Catalog A-Z...",
         parse_mode=ParseMode.HTML
     )
 
+    try:
+        # Determine highest message ID in channel via silent probe message
+        probe = await client.send_message(wm, "🔄 Sinkronisasi katalog...", disable_notification=True)
+        max_id = probe.id
+        await probe.delete()
+    except Exception as pe:
+        logger.warning(f"Could not probe max message id in {wm}: {pe}")
+        stored_pin = _engine.cache.get_setting(f"pinned_catalog_{clean_wm}", "")
+        max_id = int(stored_pin) if stored_pin and stored_pin.isdigit() else 500
+
     scanned_total = 0
     scanned_movies = 0
+    start_id = max(1, max_id - scan_limit)
+    batch_size = 100
 
     try:
-        async for ch_msg in client.get_chat_history(wm, limit=1000):
-            scanned_total += 1
-            info = parse_movie_from_channel_message(ch_msg)
-            if info:
-                scanned_movies += 1
-                _engine.cache.save_movie_post(
-                    title=info["title"],
-                    year=info["year"],
-                    rating=info["rating"],
-                    genre=info["genre"],
-                    quality=info["quality"],
-                    channel_username=clean_wm,
-                    message_id=info["message_id"],
-                    caption=info["caption"]
-                )
+        for batch_start in range(start_id, max_id, batch_size):
+            batch_ids = list(range(batch_start, min(batch_start + batch_size, max_id)))
+            try:
+                msgs = await client.get_messages(wm, message_ids=batch_ids)
+                if not isinstance(msgs, list):
+                    msgs = [msgs]
+                for ch_msg in msgs:
+                    if not ch_msg or getattr(ch_msg, "empty", False):
+                        continue
+                    scanned_total += 1
+                    info = parse_movie_from_channel_message(ch_msg)
+                    if info:
+                        scanned_movies += 1
+                        _engine.cache.save_movie_post(
+                            title=info["title"],
+                            year=info["year"],
+                            rating=info["rating"],
+                            genre=info["genre"],
+                            quality=info["quality"],
+                            channel_username=clean_wm,
+                            message_id=info["message_id"],
+                            caption=info["caption"]
+                        )
+            except Exception as be:
+                logger.warning(f"Batch fetch error for ids {batch_ids[:2]}..: {be}")
+            await asyncio.sleep(0.05)
 
         unique_count = await update_pinned_catalog(client, wm, chat_id=chat_id)
         duplicates_removed = max(0, scanned_movies - unique_count)
@@ -668,7 +714,7 @@ async def sync_catalog_cmd(client: Client, msg: Message):
         await status_msg.edit_text(
             f"✅ <b>Sinkronisasi & Pinned Catalog Selesai!</b>\n\n"
             f"📢 <b>Channel:</b> @{clean_wm}\n"
-            f"📊 <b>Total Postingan Dipindai:</b> {scanned_total}\n"
+            f"📊 <b>Total Pesan Diperiksa:</b> {scanned_total}\n"
             f"🎬 <b>Total Film Ditemukan:</b> {scanned_movies}\n"
             f"🧹 <b>Film Duplikat Dibersihkan:</b> {duplicates_removed} (diambil post terbaru)\n"
             f"📚 <b>Koleksi Unik di Pinned Catalog:</b> {unique_count} film\n\n"
