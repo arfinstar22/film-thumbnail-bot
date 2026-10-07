@@ -204,6 +204,11 @@ async def start_cmd(client: Client, msg: Message):
         await client.set_bot_commands([
             BotCommand("start", "Panduan & info bot"),
             BotCommand("autopost", "Atur mode posting: Otomatis atau Manual"),
+            BotCommand("stats", "Statistik & analitik koleksi film"),
+            BotCommand("healthcheck", "Audit link mati & post terhapus"),
+            BotCommand("rekomendasi", "Posting rekomendasi film ke channel"),
+            BotCommand("sethighlight", "Atur rekomendasi harian otomatis"),
+            BotCommand("retarget", "Update tombol & watermark post lama massal"),
             BotCommand("cari", "Cari film di database channel"),
             BotCommand("synckatalog", "Scan channel & update Pinned Catalog A-Z"),
             BotCommand("backup", "Backup katalog & file_id film ke file JSON"),
@@ -224,22 +229,37 @@ async def start_cmd(client: Client, msg: Message):
     autojoin_val = _engine.cache.get_setting("global_autojoin", "on")
     autopost_val = _engine.cache.get_setting(f"autopost_{msg.chat.id}", "off")
 
+    clean_wm = (wm or "").lstrip("@").strip().lower()
+    hl_val = _engine.cache.get_setting(f"highlight_{clean_wm}", "off") if clean_wm else "off"
+
     div_status = "Logo Custom Film Indonesia" if divider == "default" else ("Mati (Off)" if divider == "off" else "Stiker Pilihan Anda")
     req_status = f"<code>{req_link}</code>" if req_link and req_link != "off" else ("Mati (Off)" if req_link == "off" else "<i>Belum diatur</i>")
     syn_status = "Aktif (On)" if syn_val != "off" else "Mati (Off)"
     autojoin_status = "Aktif (On)" if autojoin_val != "off" else "Mati (Off)"
     autopost_status = "⚡ Otomatis (Langsung Terbit)" if autopost_val == "on" else "✋ Manual (Pratinjau Dulu)"
+    hl_status = "Aktif (On)" if hl_val == "on" else "Mati (Off)"
 
     text = (
         "🎬 <b>FILM CLEANER & PUBLISHER BOT</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "Selamat datang! Bot ini otomatis membersihkan watermark lama, mengekstrak rating & genre resmi, merapikan sinopsis lipat, dan menerbitkan langsung ke channel Telegram Anda.\n\n"
+        "Selamat datang! Bot ini otomatis membersihkan watermark lama, mengekstrak rating & genre resmi, merapikan sinopsis lipat, mendeteksi duplikat, dan menerbitkan langsung ke channel Telegram Anda.\n\n"
         "📌 <b>DAFTAR PERINTAH (COMMANDS):</b>\n\n"
         "• <code>/start</code>\n"
         "  Menampilkan menu bantuan dan daftar fitur ini.\n\n"
         "• <code>/autopost</code>\n"
         "  Mengatur mode upload ke channel: Otomatis langsung kirim vs Manual pratinjau dulu.\n"
         f"  <i>Mode aktif saat ini:</i> <b>{autopost_status}</b>\n\n"
+        "• <code>/stats</code>\n"
+        "  Statistik analitik channel: Total film, sebaran genre teratas, era tahun, dan distribusi resolusi.\n\n"
+        "• <code>/healthcheck</code>\n"
+        "  Audit kesehatan channel: Mendeteksi & membersihkan postingan yang terhapus / takedown agar Pinned Catalog bebas dari link mati.\n\n"
+        "• <code>/rekomendasi</code>\n"
+        "  Posting rekomendasi film acak pilihan ke channel dengan tombol lompat langsung ke video.\n\n"
+        "• <code>/sethighlight on / off</code>\n"
+        "  Mengatur pengiriman rekomendasi film harian otomatis ke channel.\n"
+        f"  <i>Status harian:</i> <b>{hl_status}</b>\n\n"
+        "• <code>/retarget</code>\n"
+        "  Update tombol massal: Memperbarui tombol [ Gabung ], [ Trailer ], [ Request ], dan [ Bagikan ] pada semua postingan lama di channel tanpa re-upload video.\n\n"
         "• <code>/cari &lt;judul film&gt;</code>\n"
         "  Mencari film di katalog channel dengan link tonton langsung.\n"
         "  ▫️ <i>Mode Inline:</i> Ketik <code>@bot &lt;judul&gt;</code> di chat mana pun!\n\n"
@@ -605,6 +625,391 @@ async def handle_autopost_callback(client: Client, call: CallbackQuery):
         )
     except Exception:
         pass
+
+
+@app.on_message(filters.command(["stats", "statistik", "analitik"]))
+async def stats_cmd(client: Client, msg: Message):
+    chat_id = msg.chat.id
+    args = msg.text.split()[1:] if msg.text else []
+    target_wm = args[0] if args else _get_user_watermark(chat_id)
+    clean_wm = (target_wm or "").lstrip("@").strip().lower()
+
+    if not clean_wm:
+        await msg.reply_text("❌ Channel belum diatur. Gunakan <code>/stats @namachannel</code>.", parse_mode=ParseMode.HTML)
+        return
+
+    stats = _engine.cache.get_catalog_stats(clean_wm)
+    if not stats or stats.get("total", 0) == 0:
+        await msg.reply_text(
+            f"ℹ️ <b>Katalog @{clean_wm} masih kosong.</b>\n"
+            f"Ketik <code>/synckatalog</code> terlebih dahulu untuk membaca film dari channel.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    genres_text = "\n".join(f"  • {g}: <b>{c} film</b>" for g, c in stats["top_genres"]) if stats.get("top_genres") else "  <i>Belum terdata</i>"
+    qualities_text = "\n".join(f"  • {q}: <b>{c} film</b>" for q, c in stats["qualities"]) if stats.get("qualities") else "  <i>Belum terdata</i>"
+    decades_text = "\n".join(f"  • {d}: <b>{c} film</b>" for d, c in stats["decades"]) if stats.get("decades") else "  <i>Belum terdata</i>"
+
+    top_text = ""
+    if stats.get("top_rated"):
+        top_lines = []
+        for i, m in enumerate(stats["top_rated"], 1):
+            t_name = m.get("title") or "Film"
+            t_year = f" ({m.get('year')})" if m.get("year") else ""
+            t_rate = m.get("rating") or "?"
+            t_link = f"https://t.me/{clean_wm}/{m.get('message_id')}" if m.get("message_id") else f"https://t.me/{clean_wm}"
+            top_lines.append(f"  {i}. <a href=\"{t_link}\">{t_name}{t_year}</a> - ⭐ <b>{t_rate}</b>")
+        top_text = "\n".join(top_lines)
+    else:
+        top_text = "  <i>Belum ada data rating</i>"
+
+    text = (
+        f"📊 <b>STATISTIK KOLEKSI FILM CHANNEL</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📢 <b>Channel:</b> @{clean_wm}\n"
+        f"🎬 <b>Total Koleksi:</b> <b>{stats['total']}</b> judul film unik\n"
+        f"🛡️ <b>Kesiapan Restore:</b> <b>{stats['with_file_id']}/{stats['total']}</b> film ({stats['backup_ready_pct']}%)\n"
+        f"⭐ <b>Rata-rata Rating:</b> ⭐ <b>{stats['avg_rating']}</b> / 10 ({stats['rated_count']} film terdata)\n\n"
+        f"🎭 <b>TOP 5 GENRE TERBANYAK:</b>\n"
+        f"{genres_text}\n\n"
+        f"🎞️ <b>DISTRIBUSI KUALITAS:</b>\n"
+        f"{qualities_text}\n\n"
+        f"🗓️ <b>ERA & TAHUN RILIS:</b>\n"
+        f"{decades_text}\n\n"
+        f"🏆 <b>FILM DENGAN RATING TERTINGGI:</b>\n"
+        f"{top_text}\n\n"
+        f"📌 <i>Data dihitung otomatis dari database katalog film channel Anda.</i>"
+    )
+
+    await msg.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+
+@app.on_message(filters.command(["healthcheck", "auditkatalog", "audit"]))
+async def healthcheck_cmd(client: Client, msg: Message):
+    chat_id = msg.chat.id
+    args = msg.text.split()[1:] if msg.text else []
+    target_wm = args[0] if args else _get_user_watermark(chat_id)
+    clean_wm = (target_wm or "").lstrip("@").strip().lower()
+
+    if not clean_wm:
+        await msg.reply_text("❌ Channel belum diatur. Gunakan <code>/healthcheck @namachannel</code>.", parse_mode=ParseMode.HTML)
+        return
+
+    status_msg = await msg.reply_text(
+        f"🩺 <b>Memulai Audit Kesehatan Channel @{clean_wm}...</b>\n\n"
+        f"<i>Memeriksa apakah postingan film masih ada atau sudah terhapus/takedown di Telegram...</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+    try:
+        movies = _engine.cache.get_deduplicated_catalog(clean_wm)
+        if not movies:
+            await auto_hydrate_channel_catalog(client, clean_wm)
+            movies = _engine.cache.get_deduplicated_catalog(clean_wm)
+
+        if not movies:
+            await status_msg.edit_text(f"ℹ️ Katalog @{clean_wm} kosong.", parse_mode=ParseMode.HTML)
+            return
+
+        total_checked = len(movies)
+        dead_ids = []
+        batch_size = 100
+        msg_ids = [m["message_id"] for m in movies if m.get("message_id")]
+
+        for i in range(0, len(msg_ids), batch_size):
+            batch = msg_ids[i:i + batch_size]
+            try:
+                fetched = await client.get_messages(clean_wm, message_ids=batch)
+                if not isinstance(fetched, list):
+                    fetched = [fetched]
+                for ch_m in fetched:
+                    if not ch_m or getattr(ch_m, "empty", False):
+                        if ch_m and getattr(ch_m, "id", None):
+                            dead_ids.append(ch_m.id)
+            except Exception as be:
+                logger.warning(f"Healthcheck batch error: {be}")
+            await asyncio.sleep(0.05)
+
+        dead_count = len(dead_ids)
+        if dead_count > 0:
+            _engine.cache.delete_movie_posts(dead_ids)
+            await update_pinned_catalog(client, f"@{clean_wm}", chat_id=chat_id)
+            if chat_id and chat_id > 0:
+                await send_or_update_backup_document(client, chat_id, clean_wm, is_auto=True)
+
+        healthy_count = total_checked - dead_count
+        await status_msg.edit_text(
+            f"✅ <b>AUDIT KESEHATAN CHANNEL SELESAI</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📢 <b>Channel:</b> @{clean_wm}\n"
+            f"📊 <b>Total Film Diperiksa:</b> {total_checked} postingan\n"
+            f"💚 <b>Postingan Sehat & Aktif:</b> {healthy_count} film\n"
+            f"🗑️ <b>Post Terhapus / Link Mati:</b> {dead_count} postingan dibersihkan\n\n"
+            f"📌 <i>Pinned Catalog A-Z dan file backup telah otomatis disinkronkan sehingga bebas dari link mati!</i>",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.exception("Healthcheck error")
+        await status_msg.edit_text(f"❌ <b>Gagal menjalankan audit:</b> <code>{e}</code>", parse_mode=ParseMode.HTML)
+
+
+@app.on_message(filters.command(["retarget", "updateposts", "updatebuttons"]))
+async def retarget_posts_cmd(client: Client, msg: Message):
+    chat_id = msg.chat.id
+    wm = _get_user_watermark(chat_id)
+    clean_wm = (wm or "").lstrip("@").strip().lower()
+
+    if not clean_wm:
+        await msg.reply_text("❌ Channel belum diatur. Gunakan <code>/setwatermark @namachannel</code>.", parse_mode=ParseMode.HTML)
+        return
+
+    status_msg = await msg.reply_text(
+        f"⏳ <b>Menyiapkan Pembaruan Tombol Massal di @{clean_wm}...</b>\n\n"
+        f"<i>Bot akan memperbarui tombol [ Gabung ], [ Trailer ], [ Request ], dan [ Bagikan ] pada semua postingan lama di channel agar sinkron dengan pengaturan saat ini.</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+    try:
+        movies = _engine.cache.get_deduplicated_catalog(clean_wm)
+        if not movies:
+            await status_msg.edit_text(f"ℹ️ Tidak ada film di katalog @{clean_wm}.", parse_mode=ParseMode.HTML)
+            return
+
+        total_posts = len(movies)
+        updated_count = 0
+        req_link = _get_user_request_link(chat_id)
+        channel_url = f"https://t.me/{clean_wm}"
+
+        await status_msg.edit_text(
+            f"🚀 <b>Mulai Memperbarui Tombol {total_posts} Film di @{clean_wm}...</b>\n"
+            f"⏱️ <i>Jeda anti-spam 1.2 detik per edit agar aman dari limit Telegram.</i>",
+            parse_mode=ParseMode.HTML
+        )
+
+        for idx, m in enumerate(movies, 1):
+            m_id = m.get("message_id")
+            if not m_id:
+                continue
+
+            t_title = m.get("title") or "Film"
+            t_year = m.get("year")
+            t_disp = f"{t_title} ({t_year})" if t_year else t_title
+
+            share_text = f"Nonton film {t_disp} di @{clean_wm}!"
+            share_url = f"https://t.me/share/url?url={urllib.parse.quote(channel_url)}&text={urllib.parse.quote(share_text)}"
+            trailer_query = f"Trailer {t_title}" + (f" {t_year}" if t_year else "")
+            trailer_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(trailer_query)}"
+
+            row1 = [
+                InlineKeyboardButton(f"📢 Gabung @{clean_wm}", url=channel_url),
+                InlineKeyboardButton("🎬 Tonton Trailer", url=trailer_url)
+            ]
+            if req_link and req_link.lower() != "off":
+                row2 = [
+                    InlineKeyboardButton("💬 Request Film", url=req_link),
+                    InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
+                ]
+            else:
+                row2 = [
+                    InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
+                ]
+            new_kb = InlineKeyboardMarkup([row1, row2])
+
+            for attempt in range(3):
+                try:
+                    await client.edit_message_reply_markup(
+                        chat_id=f"@{clean_wm}",
+                        message_id=m_id,
+                        reply_markup=new_kb
+                    )
+                    updated_count += 1
+                    break
+                except FloodWait as fw:
+                    await asyncio.sleep(fw.value + 2)
+                except Exception as ee:
+                    logger.debug(f"Skip edit markup for msg {m_id}: {ee}")
+                    break
+
+            if idx % 10 == 0 or idx == total_posts:
+                try:
+                    pct = int((idx / total_posts) * 100)
+                    await status_msg.edit_text(
+                        f"⏳ <b>Memperbarui Tombol Postingan di @{clean_wm}...</b>\n\n"
+                        f"📊 <b>Progres:</b> {idx}/{total_posts} film ({pct}%)\n"
+                        f"✅ <b>Berhasil:</b> {updated_count} postingan\n"
+                        f"⏱️ <i>Jeda anti-spam aktif...</i>",
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception:
+                    pass
+
+            await asyncio.sleep(1.2)
+
+        await status_msg.edit_text(
+            f"🎉 <b>PEMBARUAN TOMBOL MASSAL SELESAI!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📢 <b>Channel:</b> @{clean_wm}\n"
+            f"✅ <b>Postingan Diperbarui:</b> {updated_count} film\n\n"
+            f"<i>Semua tombol di channel sekarang sudah memakai link watermark & link request terbaru!</i>",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.exception("Retarget error")
+        await status_msg.edit_text(f"❌ <b>Gagal memperbarui tombol:</b> <code>{e}</code>", parse_mode=ParseMode.HTML)
+
+
+async def send_channel_recommendation(client: Client, channel_username: str, chat_id: Optional[int] = None) -> Optional[Message]:
+    import random
+    clean_wm = (channel_username or "").lstrip("@").strip().lower()
+    if not clean_wm:
+        return None
+
+    movies = _engine.cache.get_deduplicated_catalog(clean_wm)
+    if not movies:
+        return None
+
+    rated_movies = []
+    for m in movies:
+        r_str = m.get("rating") or ""
+        m_num = re.search(r"([\d\.]+)", str(r_str))
+        if m_num:
+            try:
+                if float(m_num.group(1)) >= 6.5:
+                    rated_movies.append(m)
+            except ValueError:
+                pass
+
+    chosen = random.choice(rated_movies) if rated_movies else random.choice(movies)
+
+    c_title = chosen.get("title") or "Film"
+    c_year = chosen.get("year")
+    c_disp = f"{c_title} ({c_year})" if c_year else c_title
+    c_rate = chosen.get("rating") or "Belum dinilai"
+    c_genre = chosen.get("genre") or "Umum"
+    c_qual = chosen.get("quality") or "1080p FHD"
+    c_msg_id = chosen.get("message_id")
+    watch_url = f"https://t.me/{clean_wm}/{c_msg_id}" if c_msg_id else f"https://t.me/{clean_wm}"
+
+    caption = chosen.get("caption") or ""
+    synopsis_excerpt = ""
+    m_syn = re.search(r"<blockquote[^>]*>(.*?)</blockquote>", caption, flags=re.S)
+    if m_syn:
+        synopsis_excerpt = re.sub(r"<[^>]+>", "", m_syn.group(1)).strip()
+        if len(synopsis_excerpt) > 200:
+            synopsis_excerpt = synopsis_excerpt[:197] + "..."
+
+    highlight_text = (
+        f"🍿 <b>REKOMENDASI FILM HARI INI</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎬 <b>{c_disp}</b>\n"
+        f"⭐ <b>Rating:</b> ⭐ <b>{c_rate}</b>\n"
+        f"🎭 <b>Genre:</b> {c_genre}\n"
+        f"🎞️ <b>Kualitas:</b> {c_qual}\n"
+    )
+    if synopsis_excerpt:
+        highlight_text += f"\n<blockquote expandable>{synopsis_excerpt}</blockquote>\n"
+    highlight_text += f"\n🍿 <i>Mau nonton sekarang? Langsung klik tombol di bawah untuk menuju ke videonya!</i>"
+
+    hl_kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🎬 Tonton Film Ini Sekarang", url=watch_url)
+        ],
+        [
+            InlineKeyboardButton("🔍 Cari Koleksi Film Lainnya", switch_inline_query_current_chat="")
+        ]
+    ])
+
+    sent_hl = await client.send_message(
+        chat_id=f"@{clean_wm}",
+        text=highlight_text,
+        reply_markup=hl_kb,
+        parse_mode=ParseMode.HTML
+    )
+    if sent_hl:
+        await _apply_expandable_caption(f"@{clean_wm}", sent_hl.id, highlight_text, hl_kb)
+        await _send_channel_divider(client, chat_id or 0, f"@{clean_wm}")
+
+    return sent_hl
+
+
+@app.on_message(filters.command(["rekomendasi", "highlight", "filmhariini"]))
+async def rekomendasi_cmd(client: Client, msg: Message):
+    chat_id = msg.chat.id
+    args = msg.text.split()[1:] if msg.text else []
+    target_wm = args[0] if args else _get_user_watermark(chat_id)
+    clean_wm = (target_wm or "").lstrip("@").strip().lower()
+
+    if not clean_wm:
+        await msg.reply_text("❌ Channel belum diatur. Gunakan <code>/rekomendasi @namachannel</code>.", parse_mode=ParseMode.HTML)
+        return
+
+    try:
+        sent_hl = await send_channel_recommendation(client, clean_wm, chat_id=chat_id)
+        if sent_hl:
+            post_link = f"https://t.me/{clean_wm}/{sent_hl.id}"
+            await msg.reply_text(
+                f"✅ <b>Rekomendasi Film Berhasil Diposting ke @{clean_wm}!</b>\n\n"
+                f"👉 <a href=\"{post_link}\">Lihat Postingan Rekomendasi di Channel</a>",
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True
+            )
+        else:
+            await msg.reply_text(f"ℹ️ Tidak ada film di katalog @{clean_wm} untuk direkomendasikan.", parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.exception("Rekomendasi error")
+        await msg.reply_text(f"❌ Gagal memposting rekomendasi: <code>{e}</code>", parse_mode=ParseMode.HTML)
+
+
+@app.on_message(filters.command(["sethighlight", "autohighlight"]))
+async def set_highlight_cmd(client: Client, msg: Message):
+    chat_id = msg.chat.id
+    wm = _get_user_watermark(chat_id)
+    clean_wm = (wm or "").lstrip("@").strip().lower()
+    args = msg.text.split(maxsplit=1)
+
+    if len(args) > 1:
+        subcmd = args[1].strip().lower()
+        if subcmd in ["on", "1", "aktif"]:
+            _engine.cache.set_setting(f"highlight_{clean_wm}", "on")
+            await msg.reply_text("✅ <b>Rekomendasi Film Otomatis Diaktifkan!</b>\n\nBot akan otomatis memilih dan memposting 1 film pilihan ke channel setiap hari.", parse_mode=ParseMode.HTML)
+            return
+        elif subcmd in ["off", "0", "mati"]:
+            _engine.cache.set_setting(f"highlight_{clean_wm}", "off")
+            await msg.reply_text("⏹️ <b>Rekomendasi Film Otomatis Dinonaktifkan.</b>", parse_mode=ParseMode.HTML)
+            return
+
+    curr = _engine.cache.get_setting(f"highlight_{clean_wm}", "off")
+    st_text = "Aktif (On)" if curr == "on" else "Mati (Off)"
+    await msg.reply_text(
+        f"⚙️ <b>PENGATURAN REKOMENDASI FILM HARIAN</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"• Status saat ini: <b>{st_text}</b>\n"
+        f"• Channel target: <b>@{clean_wm}</b>\n\n"
+        f"<b>Perintah:</b>\n"
+        f"• <code>/sethighlight on</code> (Aktifkan posting harian otomatis)\n"
+        f"• <code>/sethighlight off</code> (Matikan posting harian otomatis)\n"
+        f"• <code>/rekomendasi</code> (Kirim postingan rekomendasi sekarang)",
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def _daily_highlight_worker(client: Client):
+    """Background worker: automatically posts daily film highlight if enabled."""
+    while True:
+        try:
+            await asyncio.sleep(4 * 3600)  # Check every 4 hours
+            clean_wm = (CHANNEL_WATERMARK or "@film_indonesia1").lstrip("@").strip().lower()
+            if clean_wm:
+                is_on = _engine.cache.get_setting(f"highlight_{clean_wm}", "off") == "on"
+                if is_on:
+                    last_str = _engine.cache.get_setting(f"last_highlight_ts_{clean_wm}", "0")
+                    now_ts = int(time.time())
+                    if now_ts - int(last_str) >= 86400:
+                        await send_channel_recommendation(client, clean_wm)
+                        _engine.cache.set_setting(f"last_highlight_ts_{clean_wm}", str(now_ts))
+        except Exception as e:
+            logger.debug(f"Daily highlight worker: {e}")
 
 
 def parse_movie_from_channel_message(msg: Message) -> Optional[Dict[str, Any]]:
@@ -1524,10 +1929,39 @@ async def receive_video(client: Client, msg: Message):
             "metadata": result.get("metadata", {})
         }
 
+        # DUPE ALERT: Check if movie already exists in channel catalog
+        meta = result.get("metadata", {})
+        meta_title = meta.get("title") or filename
+        meta_year = meta.get("year")
+        clean_wm = (wm or "").lstrip("@").strip().lower()
+
+        existing_movie = _engine.cache.find_existing_movie(meta_title, meta_year, clean_wm) if clean_wm else None
+        if existing_movie:
+            ex_msg_id = existing_movie.get("message_id")
+            ex_title = existing_movie.get("title") or meta_title
+            ex_year = existing_movie.get("year")
+            ex_disp = f"{ex_title} ({ex_year})" if ex_year else ex_title
+            ex_link = f"https://t.me/{clean_wm}/{ex_msg_id}" if ex_msg_id else f"https://t.me/{clean_wm}"
+            await msg.reply_text(
+                f"⚠️ <b>PERINGATAN DUPLIKAT TERDETEKSI:</b>\n\n"
+                f"Film <b>{ex_disp}</b> tampaknya sudah pernah ada di channel @{clean_wm} sebelumnya!\n"
+                f"👉 <a href=\"{ex_link}\">Klik di sini untuk melihat postingan lama</a>\n\n"
+                f"<i>Catatan: Tombol posting tetap tersedia di atas jika Anda ingin mengunggah versi baru.</i>",
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True
+            )
+
         # Check Auto-Post setting
         autopost_enabled = _engine.cache.get_setting(f"autopost_{chat_id}", "off") == "on"
         if autopost_enabled:
-            if not wm.startswith("@") or len(wm) <= 1:
+            if existing_movie:
+                await msg.reply_text(
+                    f"✋ <b>Auto-Post Ditahan Sementara:</b>\n"
+                    f"Karena film terdeteksi sudah ada di channel, auto-post tidak dijalankan otomatis agar channel tidak banjir file duplikat.\n"
+                    f"Tekan tombol <b>🚀 Posting ke Channel</b> di atas jika Anda memang ingin mempostingnya.",
+                    parse_mode=ParseMode.HTML
+                )
+            elif not wm.startswith("@") or len(wm) <= 1:
                 await msg.reply_text(
                     "⚠️ <b>Auto-Post aktif tetapi channel watermark belum diatur!</b>\n\n"
                     "Gunakan <code>/setwatermark @namachannel</code> agar bot bisa posting otomatis ke channel Anda.",
@@ -1875,5 +2309,8 @@ async def on_bot_startup(client: Client):
                 await auto_hydrate_channel_catalog(client, clean_wm)
                 await update_pinned_catalog(client, clean_wm)
                 logger.info(f"Bot startup: Catalog for @{clean_wm} successfully restored and pinned!")
+
+        # Start background daily highlight worker
+        asyncio.create_task(_daily_highlight_worker(client))
     except Exception as e:
         logger.warning(f"Bot startup hydration error: {e}")

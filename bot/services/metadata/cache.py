@@ -340,3 +340,106 @@ class MetadataCache:
         except Exception as e:
             logger.error(f"Import catalog JSON error: {e}")
             return 0
+
+    def find_existing_movie(
+        self,
+        title: str,
+        year: Optional[int],
+        channel_username: str
+    ) -> Optional[Dict[str, Any]]:
+        """Check if a movie already exists in the channel catalog to prevent duplicate uploads."""
+        norm_t, norm_y, norm_k = normalize_movie_title_and_year(title, year)
+        if not norm_k:
+            return None
+
+        movies = self.get_deduplicated_catalog(channel_username)
+        for m in movies:
+            mt, my, mk = normalize_movie_title_and_year(m.get("title", ""), m.get("year"))
+            if mk == norm_k:
+                return m
+            if mt.lower() == norm_t.lower() and (not norm_y or not my or norm_y == my):
+                return m
+        return None
+
+    def get_catalog_stats(self, channel_username: str) -> Dict[str, Any]:
+        """Compute comprehensive statistics about the channel movie collection."""
+        from collections import Counter
+        movies = self.get_deduplicated_catalog(channel_username)
+        if not movies:
+            return {"total": 0}
+
+        total = len(movies)
+        with_file_id = sum(1 for m in movies if m.get("file_id"))
+
+        genre_counter = Counter()
+        quality_counter = Counter()
+        decade_counter = Counter()
+        ratings = []
+
+        for m in movies:
+            # Genres
+            g_str = m.get("genre") or ""
+            if g_str:
+                for g in re.split(r"[,/•]", g_str):
+                    clean_g = g.strip().title()
+                    if clean_g and clean_g.lower() not in ["n/a", "none", "-"]:
+                        genre_counter[clean_g] += 1
+
+            # Quality
+            q_str = (m.get("quality") or "").upper().strip()
+            if "1080" in q_str:
+                quality_counter["1080p FHD"] += 1
+            elif "720" in q_str:
+                quality_counter["720p HD"] += 1
+            elif "480" in q_str:
+                quality_counter["480p SD"] += 1
+            elif "4K" in q_str or "2160" in q_str:
+                quality_counter["4K UHD"] += 1
+            elif q_str:
+                quality_counter[q_str] += 1
+            else:
+                quality_counter["Lainnya / Standar"] += 1
+
+            # Decade
+            y = m.get("year")
+            if y and isinstance(y, int) and 1900 <= y <= 2035:
+                if y >= 2020:
+                    decade_counter["2020-an (Terbaru)"] += 1
+                elif y >= 2010:
+                    decade_counter["2010-an"] += 1
+                elif y >= 2000:
+                    decade_counter["2000-an"] += 1
+                elif y >= 1990:
+                    decade_counter["1990-an"] += 1
+                else:
+                    decade_counter["Klasik (Sebelum 1990)"] += 1
+            else:
+                decade_counter["Tahun Belum Terdata"] += 1
+
+            # Rating
+            r_str = m.get("rating") or ""
+            if r_str:
+                m_num = re.search(r"([\d\.]+)", str(r_str))
+                if m_num:
+                    try:
+                        val = float(m_num.group(1))
+                        if 1.0 <= val <= 10.0:
+                            ratings.append((val, m))
+                    except ValueError:
+                        pass
+
+        avg_rating = sum(r[0] for r in ratings) / len(ratings) if ratings else 0.0
+        ratings.sort(key=lambda x: x[0], reverse=True)
+        top_rated = [r[1] for r in ratings[:3]]
+
+        return {
+            "total": total,
+            "with_file_id": with_file_id,
+            "backup_ready_pct": int((with_file_id / total) * 100) if total > 0 else 0,
+            "top_genres": genre_counter.most_common(5),
+            "qualities": quality_counter.most_common(4),
+            "decades": decade_counter.most_common(5),
+            "avg_rating": round(avg_rating, 1),
+            "rated_count": len(ratings),
+            "top_rated": top_rated
+        }
