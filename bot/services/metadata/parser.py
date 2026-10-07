@@ -29,16 +29,20 @@ class FilenameParser:
 
         meta_token_indices = set()
 
-        # 1. Season & Episode (e.g., S01E02)
-        tv_match = re.search(r"\bS(\d{1,2})E(\d{1,2})\b", norm, re.IGNORECASE)
+        # 1. Season & Episode (e.g., S01E02, S1 Ep 2, Ep 05, Eps 12, Episode 3)
+        tv_match = re.search(r"\b(?:S(\d{1,2}))?[\s\.\-_]*(?:E|EP|EPS|EPISODE)[\s\.\-_]*(\d{1,4})\b", norm, re.IGNORECASE)
         if tv_match:
-            metadata["season"] = int(tv_match.group(1))
-            metadata["episode"] = int(tv_match.group(2))
-            metadata["confidence"]["season"] = 1.0
+            s_val = int(tv_match.group(1)) if tv_match.group(1) else 1
+            e_val = int(tv_match.group(2))
+            metadata["season"] = s_val
+            metadata["episode"] = e_val
+            metadata["confidence"]["season"] = 1.0 if tv_match.group(1) else 0.8
             metadata["confidence"]["episode"] = 1.0
             for idx, t in enumerate(tokens):
-                if re.match(r"^S\d{1,2}E\d{1,2}$", t, re.IGNORECASE):
+                if re.search(r"^(?:S\d{1,2})?(?:E|EP|EPS|EPISODE)\d{1,4}$", t, re.IGNORECASE) or t.lower() in ("ep", "eps", "episode", f"s{s_val}", f"s0{s_val}"):
                     meta_token_indices.add(idx)
+                    if idx + 1 < len(tokens) and tokens[idx + 1].isdigit():
+                        meta_token_indices.add(idx + 1)
 
         # 2. Tech specs mapping: platform, resolution, source, videoCodec, audioCodec
         tech_specs = [

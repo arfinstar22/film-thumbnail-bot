@@ -99,7 +99,7 @@ class MetadataCache:
     def set_setting(self, key: str, value: str):
         try:
             self._conn().execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
-            self._conn().execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+            self._conn().execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (str(key), str(value)))
             self._conn().commit()
         except Exception as e:
             logger.error(f"Set setting error: {e}")
@@ -117,6 +117,8 @@ class MetadataCache:
                 message_id INTEGER,
                 caption TEXT,
                 file_id TEXT,
+                season INTEGER,
+                episode INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -124,7 +126,16 @@ class MetadataCache:
             conn.execute("ALTER TABLE movie_catalog ADD COLUMN file_id TEXT")
         except Exception:
             pass
+        try:
+            conn.execute("ALTER TABLE movie_catalog ADD COLUMN season INTEGER")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE movie_catalog ADD COLUMN episode INTEGER")
+        except Exception:
+            pass
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cat_chan_msg ON movie_catalog (channel_username, message_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cat_series ON movie_catalog (channel_username, title, season, episode)")
 
     def save_movie_post(
         self,
@@ -136,25 +147,39 @@ class MetadataCache:
         channel_username: str,
         message_id: int,
         caption: str,
-        file_id: Optional[str] = None
+        file_id: Optional[str] = None,
+        season: Optional[int] = None,
+        episode: Optional[int] = None
     ):
         clean_channel = (channel_username or "").lstrip("@").strip().lower()
         clean_title, year, _ = normalize_movie_title_and_year(title, year)
         try:
             conn = self._conn()
             self._ensure_catalog_table(conn)
-            cur = conn.execute("SELECT id, file_id FROM movie_catalog WHERE LOWER(channel_username) = ? AND message_id = ?", (clean_channel, message_id))
+            cur = conn.execute("SELECT id, file_id, season, episode FROM movie_catalog WHERE LOWER(channel_username) = ? AND message_id = ?", (clean_channel, message_id))
             row = cur.fetchone()
             if row:
+                updates = []
+                params = []
                 if file_id and not row[1]:
-                    conn.execute("UPDATE movie_catalog SET file_id = ? WHERE id = ?", (file_id, row[0]))
+                    updates.append("file_id = ?")
+                    params.append(file_id)
+                if season is not None and row[2] is None:
+                    updates.append("season = ?")
+                    params.append(season)
+                if episode is not None and row[3] is None:
+                    updates.append("episode = ?")
+                    params.append(episode)
+                if updates:
+                    params.append(row[0])
+                    conn.execute(f"UPDATE movie_catalog SET {', '.join(updates)} WHERE id = ?", params)
                     conn.commit()
                 return
 
             conn.execute("""
-                INSERT INTO movie_catalog (title, year, rating, genre, quality, channel_username, message_id, caption, file_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (clean_title, year, rating, genre, quality, clean_channel, message_id, caption, file_id))
+                INSERT INTO movie_catalog (title, year, rating, genre, quality, channel_username, message_id, caption, file_id, season, episode)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (clean_title, year, rating, genre, quality, clean_channel, message_id, caption, file_id, season, episode))
             conn.commit()
         except Exception as e:
             logger.error(f"Save movie catalog error: {e}")
@@ -689,3 +714,105 @@ class MetadataCache:
         current = [u for u in current if u != user_id]
         self.set_setting("admin_user_ids", json.dumps(current))
         return current
+
+    # ------------------ SERIES & EPISODE NAVIGATION ------------------
+    def get_series_episodes(
+        self,
+        channel_username: str,
+        title: str,
+        season: Optional[int] = None
+    ) -> Dict[int, int]:
+        """Returns a dict mapping episode_number -> message_id for a series in a channel."""
+        clean_chan = (channel_username or "").lstrip("@").strip().lower()
+        norm_t, _, norm_k = normalize_movie_title_and_year(title)
+        episodes: Dict[int, int] = {}
+        try:
+            conn = self._conn()
+            self._ensure_catalog_table(conn)
+            if season is not None:
+                cur = conn.execute("""
+                    SELECT episode, message_id, title
+                    FROM movie_catalog
+                    WHERE LOWER(channel_username) = ? AND episode IS NOT NULL AND (season = ? OR season IS NULL)
+                    ORDER BY episode ASC
+                """, (clean_chan, season))
+            else:
+                cur = conn.execute("""
+                    SELECT episode, message_id, title
+                    FROM movie_catalog
+                    WHERE LOWER(channel_username) = ? AND episode IS NOT NULL
+                    ORDER BY episode ASC
+                """, (clean_chan,))
+            for ep, msg_id, row_t in cur.fetchall():
+                if ep is None:
+                    continue
+                rt, _, rk = normalize_movie_title_and_year(row_t)
+                if rk == norm_k or rt.lower() == norm_t.lower() or (norm_k and norm_k in rk) or (rk and rk in norm_k):
+                    episodes[int(ep)] = int(msg_id)
+        except Exception as e:
+            logger.error(f"Get series episodes error: {e}")
+        return episodes
+
+    # ------------------ BOT USERS & BROADCAST ------------------
+    def _ensure_users_table(self, conn):
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_active ON bot_users (last_active)")
+
+    def register_bot_user(self, user_id: int, username: str = "", first_name: str = ""):
+        if not user_id or not isinstance(user_id, int) or user_id <= 0:
+            return
+        try:
+            conn = self._conn()
+            self._ensure_users_table(conn)
+            clean_uname = str(username or "").lstrip("@") if isinstance(username, str) else ""
+            clean_fname = str(first_name or "") if isinstance(first_name, str) else ""
+            conn.execute("""
+                INSERT INTO bot_users (user_id, username, first_name, last_active)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username = CASE WHEN excluded.username != '' THEN excluded.username ELSE bot_users.username END,
+                    first_name = CASE WHEN excluded.first_name != '' THEN excluded.first_name ELSE bot_users.first_name END,
+                    last_active = CURRENT_TIMESTAMP
+            """, (user_id, clean_uname, clean_fname))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Register bot user error: {e}")
+
+    def get_all_bot_user_ids(self) -> List[int]:
+        user_ids = set()
+        try:
+            conn = self._conn()
+            self._ensure_users_table(conn)
+            self._ensure_requests_table(conn)
+            cur = conn.execute("SELECT user_id FROM bot_users WHERE user_id > 0")
+            for row in cur.fetchall():
+                if row[0]:
+                    user_ids.add(int(row[0]))
+            cur2 = conn.execute("SELECT DISTINCT user_id FROM movie_requests WHERE user_id > 0")
+            for row in cur2.fetchall():
+                if row[0]:
+                    user_ids.add(int(row[0]))
+        except Exception as e:
+            logger.error(f"Get all bot users error: {e}")
+        return sorted(list(user_ids))
+
+    def get_bot_users_count(self) -> int:
+        return len(self.get_all_bot_user_ids())
+
+    # ------------------ CONTENT PROTECTION ------------------
+    def get_protect_content(self, chat_id: int) -> bool:
+        val = self.get_setting(f"protect_{chat_id}", self.get_setting("protect_content", "off"))
+        return val.strip().lower() == "on"
+
+    def set_protect_content(self, chat_id: int, enabled: bool):
+        val = "on" if enabled else "off"
+        self.set_setting(f"protect_{chat_id}", val)
+        self.set_setting("protect_content", val)

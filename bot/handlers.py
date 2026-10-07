@@ -16,7 +16,7 @@ from pyrogram.types import (
     InlineQuery, InlineQueryResultArticle, InputTextMessageContent, ChatJoinRequest
 )
 from pyrogram.enums import ParseMode, ChatType
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, UserIsBlocked, InputUserDeactivated
 
 from .config import (
     BOT_TOKEN, API_ID, API_HASH, SESSION_STRING, CHANNEL_WATERMARK,
@@ -263,7 +263,9 @@ BOT_COMMANDS_LIST = [
     BotCommand("autojoin", "Aktif/matikan auto approve join"),
     BotCommand("addadmin", "Tambah admin baru ke bot"),
     BotCommand("deladmin", "Hapus admin dari bot"),
-    BotCommand("admins", "Daftar admin bot yang aktif")
+    BotCommand("admins", "Daftar admin bot yang aktif"),
+    BotCommand("protect", "Aktif/matikan proteksi konten (Anti-Forward/Save)"),
+    BotCommand("broadcast", "Kirim pengumuman ke seluruh member bot")
 ]
 
 
@@ -276,6 +278,10 @@ async def start_cmd(client: Client, msg: Message):
 
     user_id = msg.from_user.id if msg.from_user else msg.chat.id
     first_name = msg.from_user.first_name if msg.from_user else "Sobat Film"
+    username = msg.from_user.username if msg.from_user else ""
+
+    # Register bot user for broadcast/member list
+    _engine.cache.register_bot_user(user_id, username, first_name)
 
     # Cache bot username if available
     if getattr(client, "me", None) and client.me.username:
@@ -300,6 +306,65 @@ async def start_cmd(client: Client, msg: Message):
             [InlineKeyboardButton("❌ Batal", callback_data="cancel_movie_request")]
         ])
         await msg.reply_text(prompt_text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    # 2. Deep link: /start series_<slug> (redirected from channel [ 📑 List Episode ] button)
+    if len(msg.command) > 1 and msg.command[1].startswith("series_"):
+        slug = msg.command[1][7:].strip()
+        search_query = slug.replace("_", " ").strip()
+        wm = _get_user_watermark(msg.chat.id)
+        clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
+        channel_url = f"https://t.me/{clean_wm}"
+
+        episodes_map = _engine.cache.get_series_episodes(clean_wm, search_query)
+        if not episodes_map:
+            results = _engine.cache.search_catalog(search_query, limit=15)
+            if results:
+                lines = [
+                    f"📺 <b>Daftar Tayangan: {search_query.title()}</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Berikut postingan terkait di channel @{clean_wm}:\n"
+                ]
+                btns = []
+                for item in results:
+                    t = item.get("title") or search_query
+                    mid = item.get("message_id")
+                    if mid:
+                        lines.append(f"• 🎬 <b>{t}</b> 👉 <a href=\"https://t.me/{clean_wm}/{mid}\">Tonton Sekarang</a>")
+                        btns.append([InlineKeyboardButton(f"🎬 {t[:30]}", url=f"https://t.me/{clean_wm}/{mid}")])
+                btns.append([InlineKeyboardButton(f"📢 Buka Channel @{clean_wm}", url=channel_url)])
+                await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(btns[:8]))
+                return
+            else:
+                await msg.reply_text(
+                    f"⚠️ <b>Belum ada episode tersimpan untuk:</b> {search_query.title()}\n\n"
+                    f"Silakan cek langsung di channel kami @{clean_wm}.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"📢 Buka Channel", url=channel_url)]])
+                )
+                return
+
+        sorted_eps = sorted(episodes_map.keys())
+        lines = [
+            f"📺 <b>Daftar Episode: {search_query.title()}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Total tersedia: <b>{len(sorted_eps)} episode</b> di @{clean_wm}\n"
+            f"Pilih episode untuk langsung menonton:\n"
+        ]
+        grid_btns = []
+        row = []
+        for ep in sorted_eps:
+            mid = episodes_map[ep]
+            lines.append(f"• <b>Episode {ep:02d}:</b> 👉 <a href=\"https://t.me/{clean_wm}/{mid}\">Tonton di Channel</a>")
+            row.append(InlineKeyboardButton(f"🎬 Eps {ep}", url=f"https://t.me/{clean_wm}/{mid}"))
+            if len(row) == 3:
+                grid_btns.append(row)
+                row = []
+        if row:
+            grid_btns.append(row)
+
+        grid_btns.append([InlineKeyboardButton(f"📢 Buka Channel @{clean_wm}", url=channel_url)])
+        await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(grid_btns))
         return
 
     # ================= MEMBER VIEW =================
@@ -334,6 +399,8 @@ async def start_cmd(client: Client, msg: Message):
     syn_val = _engine.cache.get_setting(f"synopsis_{msg.chat.id}", "on")
     autojoin_val = _engine.cache.get_setting("global_autojoin", "on")
     autopost_val = _engine.cache.get_setting(f"autopost_{msg.chat.id}", "off")
+    protect_val = _engine.cache.get_protect_content(msg.chat.id)
+    user_count = _engine.cache.get_bot_users_count()
 
     clean_wm = (wm or "").lstrip("@").strip().lower()
     hl_val = _engine.cache.get_setting(f"highlight_{clean_wm}", "off") if clean_wm else "off"
@@ -344,6 +411,7 @@ async def start_cmd(client: Client, msg: Message):
     syn_status = "Aktif (On)" if syn_val != "off" else "Mati (Off)"
     autojoin_status = "Aktif (On)" if autojoin_val != "off" else "Mati (Off)"
     autopost_status = "⚡ Otomatis (Langsung Terbit)" if autopost_val == "on" else "✋ Manual (Pratinjau Dulu)"
+    protect_status = "🛡️ Aktif (On)" if protect_val else "🔓 Mati (Off)"
     hl_status = "Aktif (On)" if hl_val == "on" else "Mati (Off)"
     vault_status = f"<code>{curr_vault}</code>" if curr_vault else "<i>Belum diatur (Off)</i>"
 
@@ -356,6 +424,9 @@ async def start_cmd(client: Client, msg: Message):
         "• <code>/autopost</code>\n"
         "  Atur mode terbit: Otomatis langsung kirim vs Manual pratinjau dulu.\n"
         f"  <i>Status saat ini:</i> <b>{autopost_status}</b>\n\n"
+        "• <code>/protect on / off</code>\n"
+        "  Proteksi konten video channel (Telegram Anti-Forward & Anti-Download).\n"
+        f"  <i>Status proteksi:</i> <b>{protect_status}</b>\n\n"
         f"• <code>/channels</code> & <code>/usechannel @channel</code>\n"
         f"  Kelola & ganti target channel aktif dengan cepat.\n"
         f"  <i>Channel aktif saat ini:</i> <b>{wm}</b>\n\n"
@@ -393,6 +464,8 @@ async def start_cmd(client: Client, msg: Message):
         "• <code>/restorechannel @channel_baru</code>\n"
         "  Restore / migrasi semua film ke channel baru dengan jeda anti-spam 3.5s (reply file <code>katalog_backup.json</code>).\n\n"
         "✨ <b>ENGAGEMENT & REQUEST MEMBER:</b>\n"
+        f"• <code>/broadcast &lt;pesan&gt;</code> (atau reply media)\n"
+        f"  Kirim pesan siaran pengumuman ke seluruh member bot ({user_count} member terdaftar).\n\n"
         "• <code>/request &lt;judul&gt;</code>\n"
         "  Kirim permintaan film. Bot otomatis kasih link jika sudah ada, atau catat dan kirim notifikasi DM saat film tayang!\n\n"
         "• <code>/requests</code>\n"
@@ -413,6 +486,9 @@ async def start_cmd(client: Client, msg: Message):
         "• <code>/admins</code>\n"
         "  Lihat daftar semua admin bot yang sedang aktif.\n\n"
         "⚡ <b>FITUR UTAMA:</b>\n"
+        "• 📺 <b>Auto-Navigation Serial / Drakor</b>: Tombol [◀️ Eps N-1] [📑 List] [Eps N+1 ▶️] dua arah otomatis.\n"
+        "• 🛡️ <b>Content Protection</b>: Kunci video dari forward & download dengan proteksi resmi Telegram.\n"
+        "• 📢 <b>Member Broadcast</b>: Kirim pengumuman / promosi ke seluruh member bot dengan proteksi anti-flood.\n"
         "• 🛡️ <b>Queue Worker Antrean</b>: Forward 10-20 film diproses berurutan, aman dari Render OOM RAM 512MB.\n"
         "• 🔒 <b>Admin Security Lock</b>: Akses posting & pengaturan terkunci aman hanya untuk admin.\n"
         "• 🛡️ <b>Secret Vault</b>: Arsip otomatis video ke channel private cadangan (anti-banned Telegram).\n"
@@ -1355,6 +1431,191 @@ async def autojoin_cmd(client: Client, msg: Message):
     else:
         _engine.cache.set_setting("global_autojoin", "on")
         await msg.reply_text("✅ <b>Auto-approve join request diaktifkan!</b>", parse_mode=ParseMode.HTML)
+
+
+@app.on_message(filters.command(["protect", "proteksi"]))
+async def protect_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
+    args = msg.text.split(maxsplit=1)
+    if len(args) < 2 or not args[1].strip():
+        is_prot = _engine.cache.get_protect_content(msg.chat.id)
+        status_text = "🛡️ <b>AKTIF (Terkunci)</b>" if is_prot else "🔓 <b>NONAKTIF (Bebas Download/Forward)</b>"
+        prompt = (
+            f"🛡️ <b>Pengaturan Proteksi Konten Channel</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Status saat ini: {status_text}\n\n"
+            f"<b>Fitur Proteksi Telegram (Anti-Maling Konten):</b>\n"
+            f"• 🚫 <b>Anti-Forward:</b> Member tidak bisa meneruskan video ke chat/channel lain.\n"
+            f"• 🚫 <b>Anti-Download:</b> Video hanya bisa ditonton streaming langsung di Telegram, tidak bisa disimpan ke galeri/memori HP.\n"
+            f"• 🚫 <b>Anti-Screenshot:</b> Tangkapan layar otomatis diblokir oleh aplikasi Telegram.\n\n"
+            f"<i>Gunakan tombol di bawah atau ketik:</i>\n"
+            f"• <code>/protect on</code> (Aktifkan proteksi)\n"
+            f"• <code>/protect off</code> (Matikan proteksi)"
+        )
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🛡️ Aktifkan (ON)", callback_data="protect:on"),
+                InlineKeyboardButton("🔓 Matikan (OFF)", callback_data="protect:off")
+            ]
+        ])
+        await msg.reply_text(prompt, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    sub = args[1].strip().lower()
+    if sub in ("on", "aktif", "enable", "1", "ya"):
+        _engine.cache.set_protect_content(msg.chat.id, True)
+        await msg.reply_text(
+            "🛡️ <b>Proteksi Konten DIKUNCI (ON)!</b>\n\n"
+            "Semua postingan video film baru di channel sekarang dilindungi oleh proteksi resmi Telegram (Anti-Forward & Anti-Download).",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        _engine.cache.set_protect_content(msg.chat.id, False)
+        await msg.reply_text(
+            "🔓 <b>Proteksi Konten DIBUKA (OFF).</b>\n\n"
+            "Member bebas mengunduh dan membagikan / forward video film ke tempat lain.",
+            parse_mode=ParseMode.HTML
+        )
+
+
+@app.on_callback_query(filters.regex(r"^protect:(on|off)$"))
+async def handle_protect_callback(client: Client, call: CallbackQuery):
+    user_id = call.from_user.id if call.from_user else call.message.chat.id
+    if not is_admin(user_id):
+        await call.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+
+    chat_id = call.message.chat.id
+    target_mode = call.matches[0].group(1)
+    is_prot = (target_mode == "on")
+    _engine.cache.set_protect_content(chat_id, is_prot)
+
+    status_text = "🛡️ <b>AKTIF (Terkunci)</b>" if is_prot else "🔓 <b>NONAKTIF (Bebas Download/Forward)</b>"
+    await call.answer(f"Proteksi diubah ke: {'ON' if is_prot else 'OFF'}")
+
+    prompt = (
+        f"🛡️ <b>Pengaturan Proteksi Konten Channel</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Status saat ini: {status_text}\n\n"
+        f"<b>Fitur Proteksi Telegram (Anti-Maling Konten):</b>\n"
+        f"• 🚫 <b>Anti-Forward:</b> Member tidak bisa meneruskan video ke chat/channel lain.\n"
+        f"• 🚫 <b>Anti-Download:</b> Video hanya bisa ditonton streaming langsung di Telegram, tidak bisa disimpan ke galeri/memori HP.\n"
+        f"• 🚫 <b>Anti-Screenshot:</b> Tangkapan layar otomatis diblokir oleh aplikasi Telegram.\n\n"
+        f"<i>Gunakan tombol di bawah atau ketik:</i>\n"
+        f"• <code>/protect on</code> (Aktifkan proteksi)\n"
+        f"• <code>/protect off</code> (Matikan proteksi)"
+    )
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🛡️ Aktifkan (ON)", callback_data="protect:on"),
+            InlineKeyboardButton("🔓 Matikan (OFF)", callback_data="protect:off")
+        ]
+    ])
+    try:
+        await call.message.edit_text(prompt, parse_mode=ParseMode.HTML, reply_markup=kb)
+    except Exception:
+        pass
+
+
+@app.on_message(filters.command(["broadcast", "siaran"]))
+async def broadcast_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
+    args = msg.text.split(maxsplit=1)
+    broadcast_text = args[1].strip() if len(args) > 1 else ""
+    is_reply = bool(msg.reply_to_message)
+
+    user_count = _engine.cache.get_bot_users_count()
+
+    if not broadcast_text and not is_reply:
+        await msg.reply_text(
+            f"📢 <b>Fitur Broadcast Pengumuman</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👥 Total Member Terdaftar: <b>{user_count}</b> user\n\n"
+            f"<b>Cara Penggunaan:</b>\n"
+            f"1. <b>Kirim Pesan Teks Langsung:</b>\n"
+            f"   <code>/broadcast Halo semuanya! Malam ini ada penayangan film terbaru di channel, tonton sekarang!</code>\n\n"
+            f"2. <b>Atau Reply Pesan Media:</b>\n"
+            f"   Kirim foto / poster / video / teks ke bot ini, lalu <b>Reply</b> pesan tersebut dan ketik <code>/broadcast</code>.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    target_users = _engine.cache.get_all_bot_user_ids()
+    if not target_users:
+        await msg.reply_text("⚠️ Belum ada member yang terdaftar di database bot.", parse_mode=ParseMode.HTML)
+        return
+
+    status_msg = await msg.reply_text(
+        f"⏳ <b>Memulai broadcast ke {len(target_users)} member...</b>",
+        parse_mode=ParseMode.HTML
+    )
+
+    start_time = time.time()
+    success_count = 0
+    blocked_count = 0
+    failed_count = 0
+
+    for idx, uid in enumerate(target_users, 1):
+        try:
+            if is_reply:
+                await msg.reply_to_message.copy(chat_id=uid)
+            else:
+                await client.send_message(
+                    chat_id=uid,
+                    text=broadcast_text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True
+                )
+            success_count += 1
+        except FloodWait as fw:
+            await asyncio.sleep(fw.value)
+            try:
+                if is_reply:
+                    await msg.reply_to_message.copy(chat_id=uid)
+                else:
+                    await client.send_message(chat_id=uid, text=broadcast_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+                success_count += 1
+            except Exception:
+                failed_count += 1
+        except (UserIsBlocked, InputUserDeactivated):
+            blocked_count += 1
+        except Exception:
+            failed_count += 1
+
+        # Anti-flood small sleep
+        await asyncio.sleep(0.15)
+
+        # Update progress every 25 users
+        if idx % 25 == 0 or idx == len(target_users):
+            try:
+                await status_msg.edit_text(
+                    f"📡 <b>Proses Broadcast Berjalan...</b>\n"
+                    f"Progress: <code>{idx}/{len(target_users)}</code> ({int(idx / len(target_users) * 100)}%)\n"
+                    f"✅ Terkirim: <b>{success_count}</b>\n"
+                    f"🚫 Diblokir: <b>{blocked_count}</b>\n"
+                    f"⚠️ Gagal: <b>{failed_count}</b>",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
+
+    elapsed = round(time.time() - start_time, 1)
+    await status_msg.edit_text(
+        f"📢 <b>Broadcast Selesai!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 Total Target: <b>{len(target_users)}</b> member\n"
+        f"✅ Berhasil Terkirim: <b>{success_count}</b>\n"
+        f"🚫 Diblokir / Akun Hapus: <b>{blocked_count}</b>\n"
+        f"⚠️ Gagal Lainnya: <b>{failed_count}</b>\n"
+        f"⏱️ Waktu Eksekusi: <b>{elapsed} detik</b>",
+        parse_mode=ParseMode.HTML
+    )
 
 
 def get_autopost_kb(current_mode: str) -> InlineKeyboardMarkup:
@@ -2394,6 +2655,63 @@ async def sync_catalog_cmd(client: Client, msg: Message):
         )
 
 
+async def _update_previous_episode_post(
+    client: Client,
+    watermark: str,
+    clean_wm: str,
+    title_meta: str,
+    season: int,
+    prev_ep: int,
+    prev_mid: int,
+    next_ep: int,
+    next_mid: int,
+    existing_eps: dict,
+    chat_id: int
+):
+    """Updates the previous episode's reply markup in-place to point forward to the newly published episode."""
+    nav_row = []
+    # If prev_ep - 1 exists, add left button
+    if (prev_ep - 1) in existing_eps:
+        p_mid = existing_eps[prev_ep - 1]
+        nav_row.append(InlineKeyboardButton(f"◀️ Eps {prev_ep - 1}", url=f"https://t.me/{clean_wm}/{p_mid}"))
+
+    bot_uname = (client.me.username if getattr(client, "me", None) else "") or _engine.cache.get_setting("bot_username", "")
+    clean_slug = re.sub(r'[^a-zA-Z0-9]', '_', title_meta).strip('_')[:32]
+    list_url = f"https://t.me/{bot_uname}?start=series_{clean_slug}" if bot_uname else f"https://t.me/{clean_wm}?q={urllib.parse.quote(title_meta)}"
+    nav_row.append(InlineKeyboardButton("📑 List Episode", url=list_url))
+
+    # Right button: forward to newly posted episode!
+    nav_row.append(InlineKeyboardButton(f"Eps {next_ep} ▶️", url=f"https://t.me/{clean_wm}/{next_mid}"))
+
+    channel_url = f"https://t.me/{clean_wm}"
+    trailer_query = f"Trailer {title_meta}"
+    trailer_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(trailer_query)}"
+    row1 = [
+        InlineKeyboardButton(f"📢 Gabung {watermark}", url=channel_url),
+        InlineKeyboardButton("🎬 Tonton Trailer", url=trailer_url)
+    ]
+    req_link = _get_user_request_link(chat_id, bot_username=bot_uname)
+    share_text = f"Nonton film {title_meta} di {watermark}!"
+    share_url = f"https://t.me/share/url?url={urllib.parse.quote(channel_url)}&text={urllib.parse.quote(share_text)}"
+    if req_link and req_link.lower() != "off":
+        row2 = [
+            InlineKeyboardButton("💬 Request Film", url=req_link),
+            InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
+        ]
+    else:
+        row2 = [
+            InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
+        ]
+
+    updated_kb = InlineKeyboardMarkup([nav_row, row1, row2])
+    await client.edit_message_reply_markup(
+        chat_id=watermark,
+        message_id=prev_mid,
+        reply_markup=updated_kb
+    )
+    logger.info(f"Updated in-place post for {title_meta} Eps {prev_ep} (mid={prev_mid}) with forward link to Eps {next_ep} (mid={next_mid})")
+
+
 async def publish_video_to_channel(
     client: Client,
     chat_id: int,
@@ -2410,6 +2728,9 @@ async def publish_video_to_channel(
     meta = metadata or {}
     title_meta = meta.get("title") or "Film Ini"
     year_meta = meta.get("year")
+    season_meta = meta.get("season")
+    episode_meta = meta.get("episode")
+
     title_display = f"{title_meta} ({year_meta})" if year_meta else title_meta
     share_text = f"Nonton film {title_display} di {watermark}!"
     share_url = f"https://t.me/share/url?url={urllib.parse.quote(channel_url)}&text={urllib.parse.quote(share_text)}"
@@ -2434,7 +2755,36 @@ async def publish_video_to_channel(
             InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
         ]
 
-    channel_kb = InlineKeyboardMarkup([row1, row2])
+    kb_rows = []
+    # Series & Drakor Auto-Navigation Row
+    if episode_meta is not None:
+        curr_ep = int(episode_meta)
+        curr_s = int(season_meta or 1)
+        existing_eps = _engine.cache.get_series_episodes(clean_wm, title_meta, curr_s)
+
+        nav_row = []
+        # Previous episode button
+        if (curr_ep - 1) in existing_eps:
+            prev_mid = existing_eps[curr_ep - 1]
+            nav_row.append(InlineKeyboardButton(f"◀️ Eps {curr_ep - 1}", url=f"https://t.me/{clean_wm}/{prev_mid}"))
+
+        # Middle button: List Episode
+        clean_slug = re.sub(r'[^a-zA-Z0-9]', '_', title_meta).strip('_')[:32]
+        list_url = f"https://t.me/{bot_uname}?start=series_{clean_slug}" if bot_uname else f"https://t.me/{clean_wm}?q={urllib.parse.quote(title_meta)}"
+        nav_row.append(InlineKeyboardButton("📑 List Episode", url=list_url))
+
+        # Next episode button (if next was posted earlier or out of order)
+        if (curr_ep + 1) in existing_eps:
+            next_mid = existing_eps[curr_ep + 1]
+            nav_row.append(InlineKeyboardButton(f"Eps {curr_ep + 1} ▶️", url=f"https://t.me/{clean_wm}/{next_mid}"))
+
+        kb_rows.append(nav_row)
+
+    kb_rows.append(row1)
+    kb_rows.append(row2)
+    channel_kb = InlineKeyboardMarkup(kb_rows)
+
+    protect_flag = _engine.cache.get_protect_content(chat_id)
 
     sent_channel = await client.send_video(
         chat_id=watermark,
@@ -2442,6 +2792,7 @@ async def publish_video_to_channel(
         caption=caption_text,
         parse_mode=ParseMode.HTML,
         supports_streaming=True,
+        protect_content=protect_flag,
         reply_markup=channel_kb
     )
     if sent_channel:
@@ -2497,6 +2848,30 @@ async def publish_video_to_channel(
     except Exception as re_err:
         logger.warning(f"Error checking request fulfillment: {re_err}")
 
+    # 3. SERIES NAVIGATION: In-place update previous episode post to link forward to this new episode
+    if episode_meta is not None:
+        curr_ep = int(episode_meta)
+        curr_s = int(season_meta or 1)
+        existing_eps = _engine.cache.get_series_episodes(clean_wm, title_meta, curr_s)
+        if (curr_ep - 1) in existing_eps:
+            prev_mid = existing_eps[curr_ep - 1]
+            try:
+                await _update_previous_episode_post(
+                    client=client,
+                    watermark=watermark,
+                    clean_wm=clean_wm,
+                    title_meta=title_meta,
+                    season=curr_s,
+                    prev_ep=curr_ep - 1,
+                    prev_mid=prev_mid,
+                    next_ep=curr_ep,
+                    next_mid=sent_channel.id,
+                    existing_eps=existing_eps,
+                    chat_id=chat_id
+                )
+            except Exception as pe:
+                logger.debug(f"Failed to update prev episode navigation: {pe}")
+
     # Simpan ke katalog pencarian film beserta file_id cloud Telegram
     try:
         _engine.cache.save_movie_post(
@@ -2508,7 +2883,9 @@ async def publish_video_to_channel(
             channel_username=clean_wm,
             message_id=sent_channel.id,
             caption=caption_text,
-            file_id=video_file_id
+            file_id=video_file_id,
+            season=season_meta,
+            episode=episode_meta
         )
     except Exception as ce:
         logger.warning(f"Gagal mencatat ke katalog film: {ce}")
@@ -3132,6 +3509,10 @@ async def handle_incoming_text(client: Client, msg: Message):
         return
     chat_id = msg.chat.id
     user_id = msg.from_user.id if msg.from_user else chat_id
+    username = msg.from_user.username if msg.from_user else ""
+    first_name = msg.from_user.first_name if msg.from_user else ""
+
+    _engine.cache.register_bot_user(user_id, username, first_name)
 
     # 1. Handle admin caption editing
     job = _jobs.get(chat_id)
@@ -3338,6 +3719,7 @@ async def auto_approve_join_request(client: Client, req: ChatJoinRequest):
     try:
         await req.approve()
         logger.info(f"Auto-approved join request for user {req.from_user.id} in chat {req.chat.id}")
+        _engine.cache.register_bot_user(req.from_user.id, req.from_user.username or "", req.from_user.first_name or "")
     except Exception as e:
         logger.error(f"Gagal menyetujui join request: {e}")
         return
