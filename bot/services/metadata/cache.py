@@ -344,8 +344,8 @@ class MetadataCache:
     def find_existing_movie(
         self,
         title: str,
-        year: Optional[int],
-        channel_username: str
+        year: Optional[int] = None,
+        channel_username: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """Check if a movie already exists in the channel catalog to prevent duplicate uploads."""
         norm_t, norm_y, norm_k = normalize_movie_title_and_year(title, year)

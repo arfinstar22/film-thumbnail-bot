@@ -15,7 +15,7 @@ from pyrogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand,
     InlineQuery, InlineQueryResultArticle, InputTextMessageContent, ChatJoinRequest
 )
-from pyrogram.enums import ParseMode
+from pyrogram.enums import ParseMode, ChatType
 from pyrogram.errors import FloodWait
 
 from .config import (
@@ -35,6 +35,7 @@ else:
     app = Client("thumb_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 _jobs = {}
+_user_states: Dict[int, str] = {}
 _engine = MetadataEngine()
 _video_queue: asyncio.Queue = asyncio.Queue()
 _is_processing: bool = False
@@ -145,14 +146,19 @@ def normalize_telegram_link(val: str) -> str:
     return val
 
 
-def _get_user_request_link(chat_id: int) -> str:
+def _get_user_request_link(chat_id: int, bot_username: Optional[str] = None) -> str:
     link = _engine.cache.get_setting(f"request_link_{chat_id}", "")
-    if link:
+    if link and link.lower() not in ("default", "bot", "auto"):
         return link
     link = _engine.cache.get_setting("global_request_link", "")
-    if link:
+    if link and link.lower() not in ("default", "bot", "auto"):
         return link
-    return DEFAULT_REQUEST_LINK
+    b_uname = bot_username or (app.me.username if getattr(app, "me", None) else "") or _engine.cache.get_setting("bot_username", "")
+    if b_uname:
+        return f"https://t.me/{b_uname}?start=request"
+    if DEFAULT_REQUEST_LINK and "AnoMessBot" not in DEFAULT_REQUEST_LINK:
+        return DEFAULT_REQUEST_LINK
+    return "https://t.me"
 
 
 async def _send_channel_divider(client: Client, chat_id: int, channel_id: str):
@@ -268,27 +274,52 @@ async def start_cmd(client: Client, msg: Message):
     user_id = msg.from_user.id if msg.from_user else msg.chat.id
     first_name = msg.from_user.first_name if msg.from_user else "Sobat Film"
 
+    # Cache bot username if available
+    if getattr(client, "me", None) and client.me.username:
+        _engine.cache.set_setting("bot_username", client.me.username)
+
+    # 1. Deep link: /start request (redirected from channel [ 💬 Request Film ] button)
+    if len(msg.command) > 1 and msg.command[1].strip().lower() in ("request", "req"):
+        _user_states[user_id] = "waiting_movie_request"
+        wm = _get_user_watermark(msg.chat.id)
+        clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
+        prompt_text = (
+            f"🎬 <b>Mau Nonton Film Apa, {first_name}?</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Silakan <b>ketik langsung judul film</b> yang ingin kamu request, lalu kirim ke chat ini.\n\n"
+            f"<i>Contoh:</i>\n"
+            f"• <code>Mencuri Raden Saleh</code>\n"
+            f"• <code>Agak Laen</code>\n"
+            f"• <code>Pengabdi Setan 2</code>\n\n"
+            f"💡 <i>Bot akan otomatis mengecek ketersediaan film di channel @{clean_wm}, atau mencatatnya ke antrean admin dan langsung memberi tahu kamu lewat DM saat film sudah tayang!</i>"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Batal", callback_data="cancel_movie_request")]
+        ])
+        await msg.reply_text(prompt_text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
     # ================= MEMBER VIEW =================
     if not is_admin(user_id):
         wm = _get_user_watermark(msg.chat.id)
         clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
         channel_url = f"https://t.me/{clean_wm}"
-        bot_uname = (client.me.username if getattr(client, "me", None) else "") or "bot"
+        bot_uname = (client.me.username if getattr(client, "me", None) else "") or _engine.cache.get_setting("bot_username", "") or "bot"
 
         member_text = (
             f"👋 <b>Halo, {first_name}!</b>\n\n"
             f"Selamat datang di Bot Resmi <b>@{clean_wm}</b> 🎬🍿\n\n"
             f"🔍 <b>Mau nonton film apa hari ini?</b>\n"
+            f"• <b>Request Film:</b> Cukup tekan tombol <b>💬 Request Film</b> di bawah lalu ketik judul film.\n"
             f"• <b>Pencarian Cepat:</b> Ketik <code>@{bot_uname} [judul film]</code> di chat mana pun!\n"
             f"• <b>Pencarian Teks:</b> Ketik <code>/cari [judul film]</code> untuk mendapatkan link tonton.\n"
-            f"• <b>Request Film:</b> Ketik <code>/request [judul film]</code> jika film belum ada. "
-            f"Bot akan otomatis mengirimkan pesan kepadamu begitu film sudah tayang!\n\n"
-            f"<i>Tekan tombol di bawah untuk langsung mencari atau membuka katalog lengkap!</i>"
+            f"• <b>Katalog Lengkap:</b> Buka pinned message di channel kami.\n\n"
+            f"<i>Tekan tombol di bawah untuk mencari atau request film:</i>"
         )
         member_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 Request Film", callback_data="btn_start_request")],
             [InlineKeyboardButton("🔍 Cari Film Instan", switch_inline_query_current_chat="")],
-            [InlineKeyboardButton("📌 Buka Katalog Film A-Z", url=channel_url)],
-            [InlineKeyboardButton("💬 Cara Request Film", callback_data="member_req_info")]
+            [InlineKeyboardButton("📌 Buka Katalog Film A-Z", url=channel_url)]
         ])
         await msg.reply_text(member_text, parse_mode=ParseMode.HTML, reply_markup=member_kb)
         return
@@ -480,16 +511,14 @@ async def set_request_cmd(client: Client, msg: Message):
     args = msg.text.split(maxsplit=1)
     if len(args) < 2 or not args[1].strip():
         curr = _get_user_request_link(msg.chat.id)
-        status_text = f"<code>{curr}</code>" if curr and curr != "off" else ("<i>Mati (Off)</i>" if curr == "off" else "<i>Belum diatur</i>")
+        status_text = f"<code>{curr}</code>" if curr and curr != "off" else ("<i>Mati (Off)</i>" if curr == "off" else "<i>Default (Arahkan ke Bot Langsung)</i>")
         await msg.reply_text(
             f"💬 <b>Pengaturan Link Tombol Request Film:</b>\n"
             f"• Link saat ini: {status_text}\n\n"
-            f"<b>Cara Mengatur Link:</b>\n"
-            f"Ketik perintah beserta link tujuan:\n"
-            f"<code>/setrequest https://t.me/film_indonesia1/123</code>\n"
-            f"<i>(Bisa link postingan tersemat, grup obrolan, bot request, atau akun admin)</i>\n\n"
-            f"<b>Pilihan Lain:</b>\n"
-            f"• <code>/setrequest off</code> (Sembunyikan tombol request)",
+            f"<b>Pilihan Pengaturan:</b>\n"
+            f"• <code>/setrequest default</code> (Gunakan bot ini: member klik langsung diminta ketik judul film)\n"
+            f"• <code>/setrequest https://t.me/linkanda</code> (Gunakan link kustom)\n"
+            f"• <code>/setrequest off</code> (Sembunyikan tombol request dari channel)",
             parse_mode=ParseMode.HTML
         )
         return
@@ -501,6 +530,18 @@ async def set_request_cmd(client: Client, msg: Message):
         _engine.cache.set_setting(f"request_link_{msg.chat.id}", "off")
         _engine.cache.set_setting("global_request_link", "off")
         await msg.reply_text("⏹️ <b>Tombol Request Film dinonaktifkan dari channel.</b>", parse_mode=ParseMode.HTML)
+        return
+
+    if raw_val.lower() in ("default", "bot", "reset", "auto"):
+        _engine.cache.set_setting(f"request_link_{msg.chat.id}", "")
+        _engine.cache.set_setting("global_request_link", "")
+        b_uname = (client.me.username if getattr(client, "me", None) else "") or _engine.cache.get_setting("bot_username", "")
+        target = f"https://t.me/{b_uname}?start=request" if b_uname else "Bot Telegram ini"
+        await msg.reply_text(
+            f"✅ <b>Tombol Request Film Dialihkan ke Bot Ini!</b>\n\n"
+            f"Setiap kali tombol <b>[ 💬 Request Film ]</b> ditekan di channel, member akan diarahkan langsung ke bot ({target}) dan diminta mengetik judul film tanpa ribet perintah slash!",
+            parse_mode=ParseMode.HTML
+        )
         return
 
     _engine.cache.set_setting(f"request_link_{msg.chat.id}", val)
@@ -543,18 +584,81 @@ async def set_synopsis_cmd(client: Client, msg: Message):
 
 
 # ================= MOVIE REQUEST SYSTEM =================
-@app.on_callback_query(filters.regex(r"^member_req_info$"))
-async def cb_member_req_info(client: Client, query: CallbackQuery):
+@app.on_callback_query(filters.regex(r"^(btn_start_request|member_req_info)$"))
+async def cb_btn_start_request(client: Client, query: CallbackQuery):
     await query.answer()
-    await query.message.reply_text(
-        "💬 <b>Cara Melakukan Request Film:</b>\n\n"
-        "Cukup ketik perintah <code>/request</code> diikuti judul film favoritmu.\n\n"
-        "<b>Contoh:</b>\n"
-        "• <code>/request Pengabdi Setan</code>\n"
-        "• <code>/request Mencuri Raden Saleh</code>\n\n"
-        "<i>Permintaanmu akan langsung tercatat di daftar antrean admin. Begitu film diunggah, bot akan otomatis mengirimkan notifikasi kepadamu! 🎉</i>",
-        parse_mode=ParseMode.HTML
+    user_id = query.from_user.id if query.from_user else query.message.chat.id
+    first_name = query.from_user.first_name if query.from_user else "Sobat Film"
+    _user_states[user_id] = "waiting_movie_request"
+    wm = _get_user_watermark(user_id)
+    clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
+
+    prompt_text = (
+        f"🎬 <b>Mau Nonton Film Apa, {first_name}?</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Silakan <b>ketik langsung judul film</b> yang ingin kamu request, lalu kirimkan ke chat ini.\n\n"
+        f"<i>Contoh:</i>\n"
+        f"• <code>Mencuri Raden Saleh</code>\n"
+        f"• <code>Agak Laen</code>\n"
+        f"• <code>Pengabdi Setan 2</code>\n\n"
+        f"💡 <i>Bot akan otomatis mengecek apakah film sudah ada di channel @{clean_wm}, atau mencatatnya ke antrean admin dan langsung memberi tahu kamu lewat DM saat film sudah tayang!</i>"
     )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ Batal", callback_data="cancel_movie_request")]
+    ])
+    await query.message.reply_text(prompt_text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+@app.on_callback_query(filters.regex(r"^cancel_movie_request$"))
+async def cb_cancel_movie_request(client: Client, query: CallbackQuery):
+    await query.answer("Permintaan dibatalkan.")
+    user_id = query.from_user.id if query.from_user else query.message.chat.id
+    _user_states.pop(user_id, None)
+    try:
+        await query.message.edit_text(
+            "❌ <b>Permintaan film dibatalkan.</b>\n\n"
+            "Kamu bisa me-request film kapan saja dengan menekan tombol di bawah:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💬 Request Film", callback_data="btn_start_request")],
+                [InlineKeyboardButton("🔍 Cari Film Instan", switch_inline_query_current_chat="")]
+            ])
+        )
+    except Exception:
+        pass
+
+
+@app.on_callback_query(filters.regex(r"^auto_req:(.+)$"))
+async def cb_auto_req(client: Client, query: CallbackQuery):
+    await query.answer()
+    title = query.matches[0].group(1).strip()
+    user_id = query.from_user.id if query.from_user else query.message.chat.id
+    username = query.from_user.username or query.from_user.first_name if query.from_user else "Member"
+    wm = _get_user_watermark(user_id)
+    clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
+
+    res = _engine.cache.add_movie_request(user_id, username, title, clean_wm)
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Request Film Lain", callback_data="btn_start_request")],
+        [InlineKeyboardButton("🔍 Cari Film Lain", switch_inline_query_current_chat="")]
+    ])
+    if res.get("is_new"):
+        await query.message.edit_text(
+            f"✅ <b>Permintaan Film Berhasil Dicatat!</b>\n\n"
+            f"🎬 <b>Judul:</b> {title}\n"
+            f"📢 <b>Target Channel:</b> @{clean_wm}\n\n"
+            f"<i>Permintaanmu sudah masuk antrean admin. Begitu film ini diunggah ke channel, bot akan otomatis mengirimkan notifikasi kepadamu lewat DM! 🔔🍿</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb
+        )
+    else:
+        await query.message.edit_text(
+            f"ℹ️ <b>Permintaan Sudah Terdaftar:</b>\n\n"
+            f"Kamu sudah pernah me-request film <b>{title}</b> sebelumnya. "
+            f"Permintaanmu masih aktif dan bot akan mengirimkan notifikasi saat film sudah tayang! 🙏",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb
+        )
 
 
 @app.on_message(filters.command(["request", "req"]))
@@ -562,19 +666,27 @@ async def request_movie_cmd(client: Client, msg: Message):
     chat_id = msg.chat.id
     user_id = msg.from_user.id if msg.from_user else chat_id
     username = msg.from_user.username or msg.from_user.first_name if msg.from_user else "Member"
+    first_name = msg.from_user.first_name if msg.from_user else "Sobat Film"
     wm = _get_user_watermark(chat_id)
     clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
 
     args = msg.text.split(None, 1)
     if len(args) < 2 or not args[1].strip():
-        await msg.reply_text(
-            "💬 <b>Cara Request Film:</b>\n\n"
-            "Ketik perintah diikuti judul film yang kamu cari:\n"
-            "Contoh: <code>/request Mencuri Raden Saleh</code>\n\n"
-            "<i>Jika film sudah ada di channel, bot akan langsung memberikan link tontonnya. "
-            "Jika belum, bot akan mencatatnya dan otomatis mengirimkan pesan kepadamu saat film sudah diunggah oleh admin!</i>",
-            parse_mode=ParseMode.HTML
+        _user_states[user_id] = "waiting_movie_request"
+        prompt_text = (
+            f"🎬 <b>Mau Nonton Film Apa, {first_name}?</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Silakan <b>ketik langsung judul film</b> yang ingin kamu request, lalu kirim ke chat ini.\n\n"
+            f"<i>Contoh:</i>\n"
+            f"• <code>Mencuri Raden Saleh</code>\n"
+            f"• <code>Agak Laen</code>\n"
+            f"• <code>Pengabdi Setan 2</code>\n\n"
+            f"💡 <i>Bot akan otomatis mengecek apakah film sudah ada di channel @{clean_wm}, atau mencatatnya ke antrean admin dan langsung memberi tahu kamu lewat DM saat film sudah tayang!</i>"
         )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Batal", callback_data="cancel_movie_request")]
+        ])
+        await msg.reply_text(prompt_text, parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
     query = args[1].strip()
@@ -592,6 +704,10 @@ async def request_movie_cmd(client: Client, msg: Message):
         ex_disp = f"{ex_title} ({ex_year})" if ex_year else ex_title
         ex_msg_id = existing.get("message_id")
         ex_link = f"https://t.me/{clean_wm}/{ex_msg_id}" if ex_msg_id else f"https://t.me/{clean_wm}"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🍿 Tonton Sekarang", url=ex_link)],
+            [InlineKeyboardButton("💬 Request Film Lain", callback_data="btn_start_request")]
+        ])
         await msg.reply_text(
             f"🎉 <b>Film yang Kamu Cari Sudah Tersedia!</b>\n\n"
             f"🎬 <b>{ex_disp}</b>\n"
@@ -599,26 +715,33 @@ async def request_movie_cmd(client: Client, msg: Message):
             f"👉 <a href=\"{ex_link}\">Klik di sini untuk langsung menonton di channel</a>\n\n"
             f"<i>Selamat menonton! 🍿</i>",
             parse_mode=ParseMode.HTML,
+            reply_markup=kb,
             disable_web_page_preview=True
         )
         return
 
     # 2. Catat request ke database
     res = _engine.cache.add_movie_request(user_id, username, query, clean_wm)
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Request Film Lain", callback_data="btn_start_request")],
+        [InlineKeyboardButton("🔍 Cari Film Lain", switch_inline_query_current_chat="")]
+    ])
     if res.get("is_new"):
         await msg.reply_text(
             f"✅ <b>Permintaan Film Berhasil Dicatat!</b>\n\n"
             f"🎬 <b>Judul:</b> {query}\n"
             f"📢 <b>Target Channel:</b> @{clean_wm}\n\n"
-            f"<i>Bot telah memasukkan permintaanmu ke daftar tunggu admin. Kamu akan otomatis menerima pesan notifikasi di sini begitu film ini diunggah! 🔔</i>",
-            parse_mode=ParseMode.HTML
+            f"<i>Bot telah memasukkan permintaanmu ke daftar tunggu admin. Kamu akan otomatis menerima pesan notifikasi di sini begitu film ini diunggah! 🔔🍿</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb
         )
     else:
         await msg.reply_text(
             f"ℹ️ <b>Permintaan Sudah Terdaftar Sebelumnya:</b>\n\n"
-            f"Kamu sudah pernah me-request film <b>{query}</b>. "
+            f"Kamu sudah pernah me-request film <b>{query}</b>.\n"
             f"Permintaanmu masih aktif dan bot akan tetap mengirimkan notifikasi saat film sudah diunggah. Mohon ditunggu ya! 🙏",
-            parse_mode=ParseMode.HTML
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb
         )
 
 
@@ -2673,8 +2796,11 @@ async def receive_video(client: Client, msg: Message):
         await msg.reply_text(
             "⛔ <b>Akses Ditolak:</b>\n"
             "Hanya Administrator yang dapat memproses dan mengunggah film ke channel.\n"
-            "Gunakan <code>/request [judul film]</code> jika Anda ingin me-request film favorit Anda!",
-            parse_mode=ParseMode.HTML
+            "Tekan tombol di bawah jika Anda ingin me-request film favorit Anda!",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💬 Request Film", callback_data="btn_start_request")]
+            ])
         )
         return
 
@@ -2833,44 +2959,154 @@ async def handle_edit_callback(client: Client, call: CallbackQuery):
 
 
 @app.on_message(filters.text)
-async def handle_edit_caption(client: Client, msg: Message):
+async def handle_incoming_text(client: Client, msg: Message):
     if msg.command:
         return
     chat_id = msg.chat.id
+    user_id = msg.from_user.id if msg.from_user else chat_id
+
+    # 1. Handle admin caption editing
     job = _jobs.get(chat_id)
+    if job and job.get("state") == "waiting_edit":
+        if time.time() > job.get("edit_timeout", 0):
+            _jobs[chat_id].pop("state", None)
+            _jobs[chat_id].pop("edit_timeout", None)
+            await msg.reply_text("⏰ Waktu edit habis (5 menit).")
+            return
 
-    if not job or job.get("state") != "waiting_edit":
+        new_caption = msg.text.strip()
+        if not new_caption:
+            await msg.reply_text("Caption kosong.")
+            return
+
+        try:
+            sent_id = _jobs[chat_id]["sent_msg"].id
+            wm = _get_user_watermark(chat_id)
+            kb = get_caption_kb(sent_id, wm)
+            await client.edit_message_caption(
+                chat_id=chat_id,
+                message_id=sent_id,
+                caption=msg.text,
+                parse_mode=ParseMode.HTML
+            )
+            await _apply_expandable_caption(chat_id, sent_id, msg.text, kb)
+            _jobs[chat_id]["caption_text"] = msg.text
+            _jobs[chat_id].pop("state", None)
+            _jobs[chat_id].pop("edit_timeout", None)
+            await msg.reply_text("✅ Caption berhasil diperbarui!")
+        except Exception as e:
+            logger.exception("Edit caption error")
+            await msg.reply_text(f"❌ Gagal: {str(e)[:100]}")
         return
 
-    if time.time() > job.get("edit_timeout", 0):
-        _jobs[chat_id].pop("state", None)
-        _jobs[chat_id].pop("edit_timeout", None)
-        await msg.reply_text("⏰ Waktu edit habis (5 menit).")
-        return
+    # 2. Handle interactive movie request state
+    if _user_states.get(user_id) == "waiting_movie_request":
+        _user_states.pop(user_id, None)
+        query = msg.text.strip()
 
-    new_caption = msg.text.strip()
-    if not new_caption:
-        await msg.reply_text("Caption kosong.")
-        return
+        if query.lower() in ("batal", "cancel", "/batal", "/cancel", "tidak", "ga jadi", "nggak"):
+            await msg.reply_text(
+                "❌ <b>Request film dibatalkan.</b>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💬 Request Film Lagi", callback_data="btn_start_request")]
+                ])
+            )
+            return
 
-    try:
-        sent_id = _jobs[chat_id]["sent_msg"].id
         wm = _get_user_watermark(chat_id)
-        kb = get_caption_kb(sent_id, wm)
-        await client.edit_message_caption(
-            chat_id=chat_id,
-            message_id=sent_id,
-            caption=msg.text,
-            parse_mode=ParseMode.HTML
-        )
-        await _apply_expandable_caption(chat_id, sent_id, msg.text, kb)
-        _jobs[chat_id]["caption_text"] = msg.text
-        _jobs[chat_id].pop("state", None)
-        _jobs[chat_id].pop("edit_timeout", None)
-        await msg.reply_text("✅ Caption berhasil diperbarui!")
-    except Exception as e:
-        logger.exception("Edit caption error")
-        await msg.reply_text(f"❌ Gagal: {str(e)[:100]}")
+        clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
+        username = msg.from_user.username or msg.from_user.first_name if msg.from_user else "Member"
+
+        # Cek apakah film sudah tersedia di channel
+        existing = _engine.cache.find_existing_movie(query, channel_username=clean_wm)
+        if not existing:
+            search_res = _engine.cache.search_catalog(query, limit=1)
+            if search_res:
+                existing = search_res[0]
+
+        if existing:
+            ex_title = existing.get("title") or query
+            ex_year = existing.get("year")
+            ex_disp = f"{ex_title} ({ex_year})" if ex_year else ex_title
+            ex_msg_id = existing.get("message_id")
+            ex_link = f"https://t.me/{clean_wm}/{ex_msg_id}" if ex_msg_id else f"https://t.me/{clean_wm}"
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🍿 Tonton Sekarang", url=ex_link)],
+                [InlineKeyboardButton("💬 Request Film Lain", callback_data="btn_start_request")]
+            ])
+            await msg.reply_text(
+                f"🎉 <b>Film yang Kamu Cari Sudah Tersedia!</b>\n\n"
+                f"🎬 <b>{ex_disp}</b>\n"
+                f"📢 Channel: @{clean_wm}\n\n"
+                f"Kamu tidak perlu menunggu, film ini sudah bisa langsung ditonton!\n\n"
+                f"👉 <a href=\"{ex_link}\">Klik di sini untuk langsung menonton di channel</a>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb,
+                disable_web_page_preview=True
+            )
+            return
+
+        # Simpan request baru ke database
+        res = _engine.cache.add_movie_request(user_id, username, query, clean_wm)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 Request Film Lain", callback_data="btn_start_request")],
+            [InlineKeyboardButton("🔍 Cari Film Lain", switch_inline_query_current_chat="")]
+        ])
+        if res.get("is_new"):
+            await msg.reply_text(
+                f"✅ <b>Permintaan Film Berhasil Dicatat!</b>\n\n"
+                f"🎬 <b>Judul:</b> {query}\n"
+                f"📢 <b>Target Channel:</b> @{clean_wm}\n\n"
+                f"<i>Permintaanmu sudah masuk antrean admin. Begitu film ini diunggah ke channel, bot akan otomatis mengirimkan notifikasi kepadamu lewat DM! 🔔🍿</i>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb
+            )
+        else:
+            await msg.reply_text(
+                f"ℹ️ <b>Permintaan Sudah Terdaftar Sebelumnya:</b>\n\n"
+                f"Kamu sudah pernah me-request film <b>{query}</b>.\n"
+                f"Permintaanmu masih aktif dan bot akan tetap mengirimkan notifikasi saat film sudah diunggah. Mohon ditunggu ya! 🙏",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb
+            )
+        return
+
+    # 3. Handle casual member chat in PM (auto search & 1-tap request)
+    if msg.chat.type == ChatType.PRIVATE and not is_admin(user_id):
+        query = msg.text.strip()
+        if len(query) >= 2:
+            wm = _get_user_watermark(chat_id)
+            clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
+            results = _engine.cache.search_catalog(query, limit=5)
+            if results:
+                lines = [f"🔍 <b>Hasil Pencarian untuk '{query}':</b>\n"]
+                kb_rows = []
+                for item in results:
+                    t = item["title"]
+                    y = f" ({item['year']})" if item.get("year") else ""
+                    m_id = item.get("message_id")
+                    url = f"https://t.me/{clean_wm}/{m_id}" if m_id else f"https://t.me/{clean_wm}"
+                    lines.append(f"• 🎬 <a href=\"{url}\"><b>{t}{y}</b></a>")
+                    if len(kb_rows) < 3 and m_id:
+                        kb_rows.append([InlineKeyboardButton(f"🍿 Tonton {t[:20]}", url=url)])
+                kb_rows.append([InlineKeyboardButton("💬 Request Film Lain", callback_data="btn_start_request")])
+                lines.append(f"\n📢 Channel: @{clean_wm}")
+                await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb_rows), disable_web_page_preview=True)
+                return
+            else:
+                clean_q = query[:40]
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💬 Ya, Request Film Ini", callback_data=f"auto_req:{clean_q}")],
+                    [InlineKeyboardButton("🔍 Cari Judul Lain", switch_inline_query_current_chat="")]
+                ])
+                await msg.reply_text(
+                    f"🔍 Film <b>{query}</b> belum ditemukan di channel @{clean_wm}.\n\n"
+                    f"Apakah kamu ingin me-request film ini ke admin?",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=kb
+                )
+                return
 
 
 @app.on_inline_query()
@@ -2994,6 +3230,15 @@ async def auto_delete_channel_service_messages(client: Client, msg: Message):
 async def on_bot_startup(client: Client):
     """Background startup task: automatically sets bot commands, hydrates the channel catalog and restores the pinned message."""
     try:
+        # Cache bot username for deep-link request button
+        try:
+            me = getattr(client, "me", None) or await client.get_me()
+            if me and me.username:
+                _engine.cache.set_setting("bot_username", me.username)
+                logger.info(f"Bot username @{me.username} cached for request deep-linking.")
+        except Exception as me_err:
+            logger.debug(f"Could not cache bot username on startup: {me_err}")
+
         # Register all bot commands in Telegram UI menu immediately
         try:
             await client.set_bot_commands(BOT_COMMANDS_LIST)
