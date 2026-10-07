@@ -149,6 +149,25 @@ class MetadataCache:
         except Exception as e:
             logger.error(f"Save movie catalog error: {e}")
 
+    def delete_movie_posts(self, message_ids: List[int]) -> List[str]:
+        """Delete records from movie_catalog by message_ids and return affected channel usernames."""
+        if not message_ids:
+            return []
+        affected_channels = []
+        try:
+            conn = self._conn()
+            self._ensure_catalog_table(conn)
+            placeholders = ",".join("?" for _ in message_ids)
+            cur = conn.execute(f"SELECT DISTINCT channel_username FROM movie_catalog WHERE message_id IN ({placeholders})", list(message_ids))
+            affected_channels = [r[0] for r in cur.fetchall() if r[0]]
+            if affected_channels:
+                conn.execute(f"DELETE FROM movie_catalog WHERE message_id IN ({placeholders})", list(message_ids))
+                conn.commit()
+                logger.info(f"Deleted {len(message_ids)} message IDs from catalog, affected channels: {affected_channels}")
+        except Exception as e:
+            logger.error(f"Delete movie posts error: {e}")
+        return affected_channels
+
     def get_deduplicated_catalog(self, channel_username: str) -> List[Dict[str, Any]]:
         """Retrieve unique movies for a channel, automatically keeping only the latest post for duplicates."""
         raw_items = []

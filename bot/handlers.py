@@ -8,7 +8,7 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
-from typing import Union, Optional, Dict, Any
+from typing import Union, Optional, Dict, Any, List
 
 from pyrogram import Client, filters
 from pyrogram.types import (
@@ -701,6 +701,8 @@ async def sync_catalog_cmd(client: Client, msg: Message):
                     msgs = [msgs]
                 for ch_msg in msgs:
                     if not ch_msg or getattr(ch_msg, "empty", False):
+                        if ch_msg and getattr(ch_msg, "id", None):
+                            _engine.cache.delete_movie_posts([ch_msg.id])
                         continue
                     scanned_total += 1
                     info = parse_movie_from_channel_message(ch_msg)
@@ -1112,3 +1114,22 @@ async def auto_approve_join_request(client: Client, req: ChatJoinRequest):
         )
     except Exception as e:
         logger.debug(f"Info PM user welcome join request: {e}")
+
+
+@app.on_deleted_messages()
+async def auto_sync_deleted_movies(client: Client, messages: List[Message]):
+    """Automatically removes deleted movie posts from catalog and updates pinned message in real-time."""
+    if not messages:
+        return
+
+    deleted_ids = [m.id for m in messages if getattr(m, "id", None)]
+    if not deleted_ids:
+        return
+
+    try:
+        affected_channels = _engine.cache.delete_movie_posts(deleted_ids)
+        for channel in affected_channels:
+            logger.info(f"Detected deleted movie in @{channel}, auto-updating pinned catalog...")
+            await update_pinned_catalog(client, channel)
+    except Exception as e:
+        logger.error(f"Error handling deleted messages sync: {e}")
