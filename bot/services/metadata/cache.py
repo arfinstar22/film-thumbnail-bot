@@ -116,9 +116,14 @@ class MetadataCache:
                 channel_username TEXT,
                 message_id INTEGER,
                 caption TEXT,
+                file_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        try:
+            conn.execute("ALTER TABLE movie_catalog ADD COLUMN file_id TEXT")
+        except Exception:
+            pass
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cat_chan_msg ON movie_catalog (channel_username, message_id)")
 
     def save_movie_post(
@@ -130,21 +135,26 @@ class MetadataCache:
         quality: Optional[str],
         channel_username: str,
         message_id: int,
-        caption: str
+        caption: str,
+        file_id: Optional[str] = None
     ):
         clean_channel = (channel_username or "").lstrip("@").strip().lower()
         clean_title, year, _ = normalize_movie_title_and_year(title, year)
         try:
             conn = self._conn()
             self._ensure_catalog_table(conn)
-            cur = conn.execute("SELECT 1 FROM movie_catalog WHERE LOWER(channel_username) = ? AND message_id = ?", (clean_channel, message_id))
-            if cur.fetchone():
+            cur = conn.execute("SELECT id, file_id FROM movie_catalog WHERE LOWER(channel_username) = ? AND message_id = ?", (clean_channel, message_id))
+            row = cur.fetchone()
+            if row:
+                if file_id and not row[1]:
+                    conn.execute("UPDATE movie_catalog SET file_id = ? WHERE id = ?", (file_id, row[0]))
+                    conn.commit()
                 return
 
             conn.execute("""
-                INSERT INTO movie_catalog (title, year, rating, genre, quality, channel_username, message_id, caption)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (clean_title, year, rating, genre, quality, clean_channel, message_id, caption))
+                INSERT INTO movie_catalog (title, year, rating, genre, quality, channel_username, message_id, caption, file_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (clean_title, year, rating, genre, quality, clean_channel, message_id, caption, file_id))
             conn.commit()
         except Exception as e:
             logger.error(f"Save movie catalog error: {e}")
@@ -176,7 +186,7 @@ class MetadataCache:
             conn = self._conn()
             self._ensure_catalog_table(conn)
             cur = conn.execute("""
-                SELECT title, year, rating, genre, quality, channel_username, message_id, caption
+                SELECT title, year, rating, genre, quality, channel_username, message_id, caption, file_id
                 FROM movie_catalog
                 WHERE LOWER(channel_username) = ?
                 ORDER BY message_id DESC
@@ -191,7 +201,8 @@ class MetadataCache:
                     "quality": row[4],
                     "channel_username": row[5],
                     "message_id": row[6],
-                    "caption": row[7]
+                    "caption": row[7],
+                    "file_id": row[8]
                 })
         except Exception as e:
             logger.error(f"Get deduplicated catalog error: {e}")
@@ -294,3 +305,38 @@ class MetadataCache:
                     break
 
         return dedup_results
+
+    def export_catalog_json(self, channel_username: str) -> str:
+        """Export all movies in catalog for a channel as a formatted JSON string."""
+        movies = self.get_deduplicated_catalog(channel_username)
+        return json.dumps({
+            "channel": (channel_username or "").lstrip("@").strip().lower(),
+            "total": len(movies),
+            "movies": movies
+        }, indent=2, ensure_ascii=False)
+
+    def import_catalog_json(self, json_data: str, target_channel: Optional[str] = None) -> int:
+        """Import a JSON backup into the local database."""
+        try:
+            data = json.loads(json_data)
+            movie_list = data.get("movies", [])
+            imported = 0
+            default_chan = target_channel or data.get("channel", "film_indonesia1")
+            for m in movie_list:
+                chan = target_channel or m.get("channel_username") or default_chan
+                self.save_movie_post(
+                    title=m.get("title", "Film"),
+                    year=m.get("year"),
+                    rating=m.get("rating"),
+                    genre=m.get("genre"),
+                    quality=m.get("quality"),
+                    channel_username=chan,
+                    message_id=m.get("message_id") or 0,
+                    caption=m.get("caption", ""),
+                    file_id=m.get("file_id")
+                )
+                imported += 1
+            return imported
+        except Exception as e:
+            logger.error(f"Import catalog JSON error: {e}")
+            return 0

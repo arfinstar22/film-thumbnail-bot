@@ -16,6 +16,7 @@ from pyrogram.types import (
     InlineQuery, InlineQueryResultArticle, InputTextMessageContent, ChatJoinRequest
 )
 from pyrogram.enums import ParseMode
+from pyrogram.errors import FloodWait
 
 from .config import BOT_TOKEN, API_ID, API_HASH, SESSION_STRING, CHANNEL_WATERMARK, DEFAULT_REQUEST_LINK
 from .services.video import photo_thumbnail
@@ -205,6 +206,8 @@ async def start_cmd(client: Client, msg: Message):
             BotCommand("autopost", "Atur mode posting: Otomatis atau Manual"),
             BotCommand("cari", "Cari film di database channel"),
             BotCommand("synckatalog", "Scan channel & update Pinned Catalog A-Z"),
+            BotCommand("backup", "Backup katalog & file_id film ke file JSON"),
+            BotCommand("restorechannel", "Restore/migrasi semua film ke channel baru"),
             BotCommand("setwatermark", "Atur channel tujuan (@namachannel)"),
             BotCommand("setrequest", "Atur link tombol Request Film"),
             BotCommand("setdivider", "Atur stiker pemisah film di channel"),
@@ -242,6 +245,11 @@ async def start_cmd(client: Client, msg: Message):
         "  ▫️ <i>Mode Inline:</i> Ketik <code>@bot &lt;judul&gt;</code> di chat mana pun!\n\n"
         "• <code>/synckatalog</code>\n"
         "  Scan riwayat channel, bersihkan film duplikat (hanya ambil post terbaru), dan perbarui Pinned Catalog A-Z di channel.\n\n"
+        "• <code>/backup</code>\n"
+        "  Mengekspor seluruh katalog film beserta file_id Telegram ke file JSON untuk cadangan darurat.\n\n"
+        "• <code>/restorechannel @channel_baru</code>\n"
+        "  Restore / migrasi otomatis semua film ke channel baru dengan jeda anti-spam.\n"
+        "  ▫️ <i>Tips:</i> Reply file <code>katalog_backup.json</code> dengan <code>/restorechannel @channel_baru</code>.\n\n"
         f"• <code>/setwatermark @namachannel</code>\n"
         f"  Mengatur channel tujuan dan link promosi watermark.\n"
         f"  <i>Channel aktif saat ini:</i> <b>{wm}</b>\n\n"
@@ -678,7 +686,8 @@ def parse_movie_from_channel_message(msg: Message) -> Optional[Dict[str, Any]]:
         "genre": genre,
         "quality": quality,
         "message_id": msg.id,
-        "caption": caption
+        "caption": caption,
+        "file_id": getattr(media, "file_id", None)
     }
 
 
@@ -734,7 +743,8 @@ async def auto_hydrate_channel_catalog(
                         quality=info["quality"],
                         channel_username=clean_channel,
                         message_id=info["message_id"],
-                        caption=info["caption"]
+                        caption=info["caption"],
+                        file_id=info.get("file_id")
                     )
         except Exception as be:
             logger.debug(f"Hydration batch fetch error: {be}")
@@ -981,7 +991,8 @@ async def sync_catalog_cmd(client: Client, msg: Message):
                             quality=info["quality"],
                             channel_username=clean_wm,
                             message_id=info["message_id"],
-                            caption=info["caption"]
+                            caption=info["caption"],
+                            file_id=info.get("file_id")
                         )
             except Exception as be:
                 logger.warning(f"Batch fetch error for ids {batch_ids[:2]}..: {be}")
@@ -1033,7 +1044,8 @@ async def publish_video_to_channel(
     video_file_id: str,
     caption_text: str,
     metadata: dict,
-    watermark: str
+    watermark: str,
+    update_pin: bool = True
 ) -> Optional[Message]:
     """Publishes a video post to the channel with buttons, divider sticker, cache update, and pinned catalog refresh."""
     clean_wm = watermark.lstrip("@").strip()
@@ -1081,7 +1093,7 @@ async def publish_video_to_channel(
     # Kirim stiker pemisah otomatis di bawah film
     await _send_channel_divider(client, chat_id, watermark)
 
-    # Simpan ke katalog pencarian film
+    # Simpan ke katalog pencarian film beserta file_id cloud Telegram
     try:
         _engine.cache.save_movie_post(
             title=title_meta,
@@ -1091,18 +1103,306 @@ async def publish_video_to_channel(
             quality=meta.get("resolution") or meta.get("quality"),
             channel_username=clean_wm,
             message_id=sent_channel.id,
-            caption=caption_text
+            caption=caption_text,
+            file_id=video_file_id
         )
     except Exception as ce:
         logger.warning(f"Gagal mencatat ke katalog film: {ce}")
 
     # Update pinned catalog channel otomatis
-    try:
-        await update_pinned_catalog(client, watermark, chat_id=chat_id)
-    except Exception as pce:
-        logger.warning(f"Gagal memperbarui pinned catalog: {pce}")
+    if update_pin:
+        try:
+            await update_pinned_catalog(client, watermark, chat_id=chat_id)
+        except Exception as pce:
+            logger.warning(f"Gagal memperbarui pinned catalog: {pce}")
 
     return sent_channel
+
+
+@app.on_message(filters.command(["backup", "backupkatalog"]))
+async def backup_catalog_cmd(client: Client, msg: Message):
+    chat_id = msg.chat.id
+    args = msg.text.split()[1:] if msg.text else []
+    if args:
+        target_wm = args[0]
+    else:
+        target_wm = _get_user_watermark(chat_id)
+
+    clean_wm = (target_wm or "").lstrip("@").strip().lower()
+    if not clean_wm:
+        await msg.reply_text("❌ Channel belum diatur. Gunakan <code>/backup @namachannel</code>.", parse_mode=ParseMode.HTML)
+        return
+
+    status_msg = await msg.reply_text(
+        f"⏳ <b>Mengekspor data katalog channel @{clean_wm}...</b>",
+        parse_mode=ParseMode.HTML
+    )
+
+    try:
+        movies = _engine.cache.get_deduplicated_catalog(clean_wm)
+        if not movies:
+            await auto_hydrate_channel_catalog(client, clean_wm)
+            movies = _engine.cache.get_deduplicated_catalog(clean_wm)
+
+        if not movies:
+            await status_msg.edit_text(
+                f"ℹ️ <b>Katalog Kosong:</b> Tidak ada data film untuk @{clean_wm}.\n"
+                f"Ketik <code>/synckatalog</code> terlebih dahulu di channel aktif.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+        json_str = _engine.cache.export_catalog_json(clean_wm)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as tf:
+            tf.write(json_str)
+            temp_path = tf.name
+
+        doc_name = f"katalog_backup_{clean_wm}.json"
+        caption = (
+            f"💾 <b>BACKUP KATALOG KOLEKSI FILM</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📢 <b>Channel:</b> @{clean_wm}\n"
+            f"🎬 <b>Total Film:</b> {len(movies)} judul\n"
+            f"🔑 <b>Cloud File ID:</b> Tersimpan aman\n\n"
+            f"💡 <b>PANDUAN RESTORE / PINDAH CHANNEL:</b>\n"
+            f"Jika channel Anda diblokir atau ingin pindah ke channel baru, balas (reply) file JSON ini dengan perintah:\n"
+            f"<code>/restorechannel @channel_baru</code>\n\n"
+            f"<i>Bot akan otomatis memposting ulang seluruh film ke channel baru dengan jeda anti-spam 3.5 detik.</i>"
+        )
+
+        await client.send_document(
+            chat_id=chat_id,
+            document=temp_path,
+            file_name=doc_name,
+            caption=caption,
+            parse_mode=ParseMode.HTML
+        )
+        await status_msg.delete()
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.exception("Backup export error")
+        await status_msg.edit_text(f"❌ <b>Gagal membuat backup:</b> <code>{e}</code>", parse_mode=ParseMode.HTML)
+
+
+@app.on_message(filters.command(["restorechannel", "migrasichannel", "restore"]))
+async def restore_channel_cmd(client: Client, msg: Message):
+    chat_id = msg.chat.id
+    args = msg.text.split()[1:] if msg.text else []
+
+    reply = msg.reply_to_message
+    movies = []
+    source_channel = ""
+    target_channel = ""
+
+    # Mode 1: User replies to a backup JSON file
+    if reply and reply.document and (reply.document.file_name or "").endswith(".json"):
+        if not args:
+            await msg.reply_text(
+                "⚠️ <b>Tentukan Channel Tujuan!</b>\n\n"
+                "Balas file JSON backup dengan perintah:\n"
+                "<code>/restorechannel @channel_baru</code>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        target_channel = args[0]
+        status_msg = await msg.reply_text("📥 <b>Membaca file backup JSON...</b>", parse_mode=ParseMode.HTML)
+        try:
+            downloaded = await client.download_media(reply.document)
+            with open(downloaded, "r", encoding="utf-8") as f:
+                content = f.read()
+            try:
+                os.remove(downloaded)
+            except Exception:
+                pass
+
+            data = json.loads(content)
+            movies = data.get("movies", [])
+            source_channel = data.get("channel", "")
+            # Sync into local DB for the new target channel as well
+            clean_tgt = target_channel.lstrip("@").strip().lower()
+            _engine.cache.import_catalog_json(content, target_channel=clean_tgt)
+        except Exception as je:
+            await status_msg.edit_text(f"❌ <b>File JSON tidak valid:</b> <code>{je}</code>", parse_mode=ParseMode.HTML)
+            return
+    else:
+        # Mode 2: User restores from database
+        if len(args) == 1:
+            source_channel = _get_user_watermark(chat_id)
+            target_channel = args[0]
+        elif len(args) >= 2:
+            source_channel = args[0]
+            target_channel = args[1]
+        else:
+            await msg.reply_text(
+                "📖 <b>CARA PENGGUNAAN RESTORE CHANNEL:</b>\n\n"
+                "<b>Cara 1 (Rekomendasi dari File):</b>\n"
+                "Reply file <code>katalog_backup.json</code> dengan perintah:\n"
+                "<code>/restorechannel @channel_baru</code>\n\n"
+                "<b>Cara 2 (Dari Database Bot):</b>\n"
+                "<code>/restorechannel @channel_lama @channel_baru</code>\n\n"
+                "⚠️ <i>Pastikan bot sudah dijadikan Administrator di channel baru sebelum memulai!</i>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+        status_msg = await msg.reply_text("⏳ <b>Memeriksa data katalog film...</b>", parse_mode=ParseMode.HTML)
+        clean_src = (source_channel or "").lstrip("@").strip().lower()
+        movies = _engine.cache.get_deduplicated_catalog(clean_src)
+
+    clean_target = (target_channel or "").lstrip("@").strip().lower()
+    clean_src = (source_channel or "").lstrip("@").strip().lower()
+
+    if not clean_target:
+        await status_msg.edit_text("❌ Channel tujuan tidak valid!", parse_mode=ParseMode.HTML)
+        return
+
+    # Check bot permission in target channel
+    try:
+        test_msg = await client.send_message(f"@{clean_target}", "🔄 <i>Menguji hak akses bot untuk migrasi...</i>", parse_mode=ParseMode.HTML, disable_notification=True)
+        await test_msg.delete()
+    except Exception as pe:
+        await status_msg.edit_text(
+            f"❌ <b>Bot Tidak Bisa Mengakses Channel @{clean_target}:</b>\n\n"
+            f"<code>{pe}</code>\n\n"
+            f"Pastikan:\n"
+            f"1. Bot sudah ditambahkan ke channel @{clean_target}.\n"
+            f"2. Bot dijadikan <b>Administrator</b> dengan izin Kirim & Pin Pesan.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    # Filter movies with valid file_id
+    valid_movies = [m for m in movies if m.get("file_id")]
+    if not valid_movies:
+        await status_msg.edit_text(
+            f"❌ <b>Tidak Ada Film yang Bisa Diposting!</b>\n\n"
+            f"Ditemukan {len(movies)} judul film, namun tidak ada yang memiliki <code>file_id</code> Telegram yang tersimpan.\n"
+            f"<i>Lakukan sinkronisasi atau posting film agar bot dapat mencatat file_id video.</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    total_count = len(valid_movies)
+    await status_msg.edit_text(
+        f"🚀 <b>MEMULAI RESTORE KE CHANNEL BARU</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📢 <b>Channel Tujuan:</b> @{clean_target}\n"
+        f"🎬 <b>Total Film Siap Diposting:</b> {total_count} judul\n"
+        f"⏱️ <b>Jeda Anti-Spam:</b> 3.5 detik per film\n"
+        f"🛡️ <b>Proteksi Spam Telegram:</b> Aktif\n\n"
+        f"<i>Proses sedang berjalan. Mohon jangan hapus bot dari channel selama proses berlangsung...</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+    success_count = 0
+    fail_count = 0
+
+    for idx, m in enumerate(valid_movies, 1):
+        m_title = m.get("title") or "Film"
+        m_year = m.get("year")
+        m_fid = m.get("file_id")
+        caption = m.get("caption") or ""
+
+        # Replace old watermark channel with new watermark channel in caption
+        if clean_src and clean_src != clean_target:
+            caption = re.sub(re.escape(f"@{clean_src}"), f"@{clean_target}", caption, flags=re.I)
+            caption = re.sub(re.escape(f"t.me/{clean_src}"), f"t.me/{clean_target}", caption, flags=re.I)
+
+        metadata = {
+            "title": m_title,
+            "year": m_year,
+            "rating": m.get("rating"),
+            "genre": m.get("genre"),
+            "resolution": m.get("quality")
+        }
+
+        # Send with retry on FloodWait
+        posted = False
+        for attempt in range(3):
+            try:
+                sent = await publish_video_to_channel(
+                    client=client,
+                    chat_id=chat_id,
+                    video_file_id=m_fid,
+                    caption_text=caption,
+                    metadata=metadata,
+                    watermark=f"@{clean_target}",
+                    update_pin=False  # Do not pin on every movie!
+                )
+                if sent:
+                    success_count += 1
+                    posted = True
+                break
+            except FloodWait as fw:
+                wait_sec = fw.value + 3
+                logger.warning(f"FloodWait during restore: waiting {wait_sec}s")
+                try:
+                    await status_msg.edit_text(
+                        f"⏳ <b>Telegram Rate-Limit (FloodWait) Terdeteksi!</b>\n\n"
+                        f"Menunggu jeda <b>{wait_sec} detik</b> secara otomatis agar aman dari spam...\n"
+                        f"Progres saat ini: {idx-1}/{total_count} film.",
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(wait_sec)
+            except Exception as e:
+                logger.error(f"Error publishing {m_title} during restore: {e}")
+                break
+
+        if not posted:
+            fail_count += 1
+
+        # Periodic status update in user PM every 5 movies or last movie
+        if idx % 5 == 0 or idx == total_count:
+            try:
+                pct = int((idx / total_count) * 100)
+                await status_msg.edit_text(
+                    f"⏳ <b>Restoring Film ke @{clean_target}...</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📊 <b>Progres:</b> {idx}/{total_count} ({pct}%)\n"
+                    f"✅ <b>Berhasil:</b> {success_count} film\n"
+                    f"❌ <b>Gagal:</b> {fail_count} film\n"
+                    f"▶️ <b>Terakhir:</b> {m_title}" + (f" ({m_year})" if m_year else "") + "\n\n"
+                    f"⏱️ <i>Jeda anti-spam 3.5 detik per posting...</i>",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
+
+        # JEDA ANTI-SPAM (delay between sending movie files to avoid spam limit)
+        if idx < total_count:
+            await asyncio.sleep(3.5)
+
+    # Done posting all movies! Now create and pin the catalog ONCE on the new channel
+    try:
+        await status_msg.edit_text(
+            f"📌 <b>Membuat & Menyematkan Pinned Catalog di Channel Baru...</b>\n\n"
+            f"📢 <b>Channel:</b> @{clean_target}\n"
+            f"🎬 <b>Total Film Terkirim:</b> {success_count}/{total_count}\n\n"
+            f"<i>Menata indeks A-Z dan menerbitkan Telegra.ph...</i>",
+            parse_mode=ParseMode.HTML
+        )
+        _engine.cache.set_setting(f"synced_{clean_target.lower()}", "yes")
+        unique_pins = await update_pinned_catalog(client, f"@{clean_target}", chat_id=chat_id)
+    except Exception as pe:
+        logger.warning(f"Error updating pinned catalog after restore: {pe}")
+        unique_pins = success_count
+
+    await status_msg.edit_text(
+        f"🎉 <b>RESTORE & MIGRASI CHANNEL SELESAI!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📢 <b>Channel Baru:</b> @{clean_target}\n"
+        f"✅ <b>Berhasil Diposting:</b> {success_count} film\n"
+        f"❌ <b>Gagal:</b> {fail_count} film\n"
+        f"📌 <b>Pinned Catalog:</b> Aktif ({unique_pins} film A-Z)\n"
+        f"⚡ <b>Telegra.ph Instant View:</b> Siap digunakan\n\n"
+        f"✨ <i>Channel baru Anda sekarang sudah lengkap berisi semua koleksi film dengan tombol interaktif, pemisah stiker, dan pinned catalog yang rapi!</i>",
+        parse_mode=ParseMode.HTML
+    )
 
 
 @app.on_message(filters.video | filters.document)
