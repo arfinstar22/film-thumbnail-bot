@@ -65,3 +65,76 @@ class MetadataEngine:
         caption = self.caption_gen.generate(metadata, custom_watermark=watermark)
         self.cache.save_caption(filename, caption)
         return {"caption": caption, "source": "local", "metadata": metadata}
+
+    def extract_metadata(self, caption: str = "", filename: str = "") -> Dict[str, Any]:
+        """Extracts title, year, rating, genre, etc. from caption text or filename."""
+        import re
+        meta: Dict[str, Any] = {}
+        if filename:
+            try:
+                meta = self.parser.parse(filename)
+            except Exception:
+                meta = {}
+
+        if caption:
+            clean = re.sub(r"<[^>]+>", "", caption).strip()
+            lines = [line.strip() for line in clean.splitlines() if line.strip()]
+            if lines and not meta.get("title"):
+                first_line = lines[0]
+                m = re.search(r"^(.*?)\s*\((\d{4})\)", first_line)
+                if m:
+                    meta["title"] = m.group(1).strip()
+                    try:
+                        meta["year"] = int(m.group(2))
+                    except Exception:
+                        pass
+                else:
+                    meta["title"] = first_line
+
+            # Rating
+            rate_match = re.search(r"(?:Rating|IMDb|Skor|⭐)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)(?:\s*/\s*10)?", clean, re.IGNORECASE)
+            if rate_match and not meta.get("rating"):
+                meta["rating"] = rate_match.group(1).strip()
+
+            # Genre
+            genre_match = re.search(r"(?:Genre|🎭)\s*[:：]?\s*([^\n|]+)", clean, re.IGNORECASE)
+            if genre_match and not meta.get("genre"):
+                meta["genre"] = genre_match.group(1).strip()
+
+            # Synopsis
+            syn_match = re.search(r"(?:Sinopsis|Storyline|Deskripsi)\s*[:：]?\s*\n*(.*?)(?=\n\n|\Z)", clean, re.IGNORECASE | re.DOTALL)
+            if syn_match and not meta.get("synopsis"):
+                meta["synopsis"] = syn_match.group(1).strip()
+
+        return meta
+
+    async def enrich_metadata(self, raw_meta: Dict[str, Any], query: str = "") -> Dict[str, Any]:
+        """Enriches raw metadata with synopsis, rating, and genre."""
+        meta = dict(raw_meta or {})
+        title = meta.get("title") or query
+        year = meta.get("year")
+        season = meta.get("season")
+        episode = meta.get("episode")
+        is_series = bool(season is not None or episode is not None)
+
+        tasks = []
+        if not meta.get("synopsis") and title:
+            tasks.append(self.synopsis_service.get_synopsis(title, year, is_series=is_series))
+        else:
+            tasks.append(asyncio.sleep(0, result=""))
+
+        if (not meta.get("rating") or not meta.get("genre")) and title:
+            tasks.append(self.rating_service.get_rating_and_genre(title, year))
+        else:
+            tasks.append(asyncio.sleep(0, result={}))
+
+        syn_res, rate_res = await asyncio.gather(*tasks)
+        if syn_res and not meta.get("synopsis"):
+            meta["synopsis"] = syn_res
+        if rate_res:
+            if rate_res.get("rating") and not meta.get("rating"):
+                meta["rating"] = rate_res["rating"]
+            if rate_res.get("genre") and not meta.get("genre"):
+                meta["genre"] = rate_res["genre"]
+
+        return meta

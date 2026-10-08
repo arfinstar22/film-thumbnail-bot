@@ -387,6 +387,10 @@ class MetadataCache:
                 return m
         return None
 
+    def check_duplicate_movie(self, channel_username: str, title: str, year: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """Convenience alias for find_existing_movie."""
+        return self.find_existing_movie(title=title, year=year, channel_username=channel_username)
+
     def get_catalog_stats(self, channel_username: str) -> Dict[str, Any]:
         """Compute comprehensive statistics about the channel movie collection."""
         from collections import Counter

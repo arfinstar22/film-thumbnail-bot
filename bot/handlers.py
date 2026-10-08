@@ -214,10 +214,14 @@ def format_queue_dashboard(pending_posts: list, watermark: str) -> Tuple[str, In
             "1. Kirim/forward file video film ke bot ini.\n"
             "2. Pada pratinjau film, klik tombol <b>[ ⏰ Jadwal Prime-Time ]</b>.\n"
             "3. Atau aktifkan mode otomatis lewat <code>/autopost schedule</code>.\n\n"
-            "<i>Jam tayang otomatis diatur pada jam sibuk: 16:00, 17:00, 18:00 sore & 20:00, 21:00, 22:00 malam WIB!</i>"
+            "<i>Jam tayang otomatis diatur pada jam sibuk: 16:00, 17:00, 18:00 sore & 20:00, 21:00, 22:00 malam WIB!</i>\n\n"
+            "🛡️ <i>Jika antrean kosong setelah deploy/update server, Anda dapat memulihkannya langsung dengan tombol di bawah!</i>"
         )
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Refresh Antrean", callback_data="sched_refresh")]
+            [
+                InlineKeyboardButton("🔄 Refresh Antrean", callback_data="sched_refresh"),
+                InlineKeyboardButton("🛡️ Pulihkan Antrean", callback_data="sched_recover")
+            ]
         ])
         return text, kb
 
@@ -254,6 +258,9 @@ def format_queue_dashboard(pending_posts: list, watermark: str) -> Tuple[str, In
         [
             InlineKeyboardButton("⚡ Terbitkan Semua Sekarang", callback_data="sched_flush_all"),
             InlineKeyboardButton("🗑 Kosongkan Antrean", callback_data="sched_clear_all")
+        ],
+        [
+            InlineKeyboardButton("🛡️ Pulihkan / Sinkron Antrean", callback_data="sched_recover")
         ]
     ])
     return "\n".join(lines), kb
@@ -357,15 +364,91 @@ async def sync_queue_backup_to_owner(client: Client):
         logger.warning(f"Error syncing queue backup to owner: {e}")
 
 
+async def recover_queue_from_chat(client: Client, chat_id: int) -> int:
+    """Scans recent messages in chat to reconstruct queue if both database and backup file were missing."""
+    try:
+        pending = _engine.cache.get_pending_scheduled_posts()
+        existing_titles = {p["title"].lower().strip() for p in pending if p.get("title")}
+        existing_vids = {p["video_file_id"] for p in pending if p.get("video_file_id")}
+
+        wm = _get_user_watermark(chat_id)
+        clean_wm = (wm or "").lstrip("@").strip().lower()
+
+        candidates = []
+        seen_vids = set(existing_vids)
+        seen_titles = set(existing_titles)
+
+        async for m in client.get_chat_history(chat_id, limit=100):
+            if m.video and m.caption:
+                has_sched_btn = False
+                if m.reply_markup and getattr(m.reply_markup, "inline_keyboard", None):
+                    for row in m.reply_markup.inline_keyboard:
+                        for btn in row:
+                            if btn.callback_data and ("sched:" in btn.callback_data or "post:" in btn.callback_data):
+                                has_sched_btn = True
+                                break
+
+                # Check if this message is a film preview
+                if has_sched_btn or "<b>" in m.caption or "Sinopsis" in m.caption or "Rating" in m.caption:
+                    vid_id = m.video.file_id
+                    if vid_id in seen_vids:
+                        continue
+
+                    parsed_meta = _engine.extract_metadata(m.caption, "")
+                    title = parsed_meta.get("title")
+                    if not title:
+                        clean_cap = re.sub(r"<[^>]+>", "", m.caption).strip()
+                        title = clean_cap.splitlines()[0].strip() if clean_cap else (m.video.file_name or "Film")
+
+                    title_clean = title.lower().strip()
+                    if title_clean in seen_titles:
+                        continue
+
+                    # If already live in channel catalog, skip re-queue
+                    if clean_wm and _engine.cache.check_duplicate_movie(clean_wm, title):
+                        continue
+
+                    seen_vids.add(vid_id)
+                    seen_titles.add(title_clean)
+                    candidates.append((m, vid_id, title, parsed_meta))
+
+        if not candidates:
+            return 0
+
+        # Reverse so older messages are scheduled earlier
+        candidates.reverse()
+        recovered_count = 0
+        for m, vid_id, title, parsed_meta in candidates:
+            _engine.cache.add_scheduled_post(
+                chat_id=chat_id,
+                video_file_id=vid_id,
+                caption_text=m.caption,
+                metadata=parsed_meta,
+                watermark=wm,
+                title=title
+            )
+            recovered_count += 1
+
+        if recovered_count > 0:
+            await sync_queue_backup_to_owner(client)
+            ensure_scheduler_worker(client)
+
+        return recovered_count
+    except Exception as e:
+        logger.warning(f"Error in recover_queue_from_chat: {e}")
+        return 0
+
+
 async def restore_queue_from_telegram_if_needed(client: Client):
-    """Restores pending scheduled posts from Telegram cloud backup if local database is empty after restart."""
+    """Restores pending scheduled posts from Telegram cloud backup or chat history if local database is empty after restart."""
     try:
         pending = _engine.cache.get_pending_scheduled_posts()
         if pending:
             return 0
 
         owner_id = 1166479771
-        async for m in client.get_chat_history(owner_id, limit=20):
+        imported = 0
+        async for m in client.get_chat_history(owner_id, limit=60):
             if m.document and m.document.file_name == "antrean_backup.json":
                 temp_file = await m.download()
                 try:
@@ -373,28 +456,36 @@ async def restore_queue_from_telegram_if_needed(client: Client):
                         content = f.read()
                     imported = _engine.cache.import_scheduled_posts_json(content)
                     if imported > 0:
-                        logger.info(f"Successfully restored {imported} scheduled posts from Telegram cloud backup!")
-                        try:
-                            await client.send_message(
-                                chat_id=owner_id,
-                                text=(
-                                    f"🔄 <b>[PEMULIHAN ANTREAN OTOMATIS]</b>\n"
-                                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                                    f"Bot baru saja menyala / deploy ulang di Render.\n"
-                                    f"✅ Sebanyak <b>{imported} film</b> dalam antrean jadwal tayang berhasil dipulihkan otomatis dari Cloud Telegram!\n\n"
-                                    f"<i>Ketik /queue untuk melihat daftar antrean aktif.</i>"
-                                ),
-                                parse_mode=ParseMode.HTML
-                            )
-                        except Exception:
-                            pass
-                    return imported
+                        logger.info(f"Successfully restored {imported} scheduled posts from Telegram cloud backup JSON!")
+                        break
                 finally:
                     try:
                         os.remove(temp_file)
                     except Exception:
                         pass
-                break
+
+        # If backup file didn't exist yet, fall back to scanning chat history for unposted video previews
+        if imported == 0:
+            imported = await recover_queue_from_chat(client, owner_id)
+            if imported > 0:
+                logger.info(f"Successfully recovered {imported} scheduled posts from owner chat history scan!")
+
+        if imported > 0:
+            try:
+                await client.send_message(
+                    chat_id=owner_id,
+                    text=(
+                        f"🔄 <b>[PEMULIHAN ANTREAN OTOMATIS]</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"Bot baru saja menyala / deploy ulang di Render.\n"
+                        f"✅ Sebanyak <b>{imported} film</b> dalam antrean jadwal tayang berhasil dipulihkan otomatis dari riwayat Telegram!\n\n"
+                        f"<i>Ketik /queue untuk melihat daftar antrean aktif.</i>"
+                    ),
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
+            return imported
     except Exception as e:
         logger.warning(f"Error restoring queue from telegram: {e}")
     return 0
@@ -632,6 +723,7 @@ BOT_COMMANDS_LIST = [
     BotCommand("cari", "Cari film di database channel"),
     BotCommand("queue", "Antrean & jadwal tayang prime-time"),
     BotCommand("postjadwal", "Posting jadwal film hari ini ke channel"),
+    BotCommand("recoverqueue", "Pulihkan antrean jika restart/terhapus"),
     BotCommand("fsub", "Atur force-subscribe (wajib join)"),
     BotCommand("channels", "Kelola & ganti channel aktif"),
     BotCommand("usechannel", "Pilih channel aktif cepat"),
@@ -748,6 +840,8 @@ def build_admin_dashboard_text(chat_id: int, user_id: int, first_name: str, user
         f"  <i>Status antrean:</i> <b>{sched_status}</b>\n\n"
         "• <code>/postjadwal</code>\n"
         "  Posting pengumuman jadwal film hari ini langsung ke channel.\n\n"
+        "• <code>/recoverqueue</code> atau <code>/pulihkanantrean</code>\n"
+        "  Pulihkan antrean film otomatis dari cloud backup atau riwayat video chat.\n\n"
         "• <code>/fsub on / off</code>\n"
         "  Kunci bot wajib join channel sebelum request/cari film.\n"
         f"  <i>Status FSUB:</i> <b>{fsub_status}</b>\n\n"
@@ -2664,6 +2758,39 @@ async def post_jadwal_cmd(client: Client, msg: Message):
     await msg.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
+@app.on_message(filters.command(["recoverqueue", "pulihkanantrean", "restorequeue"]))
+async def recover_queue_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Khusus Administrator.", parse_mode=ParseMode.HTML)
+        return
+
+    chat_id = msg.chat.id
+    status_msg = await msg.reply_text("🔍 <i>Sedang memeriksa backup cloud & memindai riwayat video...</i>", parse_mode=ParseMode.HTML)
+
+    imported = await restore_queue_from_telegram_if_needed(client)
+    if imported == 0:
+        imported = await recover_queue_from_chat(client, chat_id)
+
+    pending = _engine.cache.get_pending_scheduled_posts()
+    if imported > 0:
+        await status_msg.edit_text(
+            f"🎉 <b>[PEMULIHAN ANTREAN BERHASIL]</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ Berhasil memulihkan <b>{imported} film</b> ke jadwal tayang Prime-Time!\n"
+            f"📊 Total antrean aktif saat ini: <b>{len(pending)} film</b>\n"
+            f"🛡️ File <code>antrean_backup.json</code> telah diperbarui otomatis agar tahan restart ke depannya.\n\n"
+            f"<i>Gunakan <code>/queue</code> untuk memeriksa daftar antrean, atau <code>/postjadwal</code> untuk posting ke channel.</i>",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        await status_msg.edit_text(
+            f"ℹ️ <b>Tidak ditemukan video baru yang perlu dipulihkan.</b>\n"
+            f"📊 Antrean aktif saat ini: <b>{len(pending)} film</b>.\n\n"
+            f"<i>Catatan: Anda juga bisa scroll ke atas ke pesan pratinjau video film yang diinginkan dan langsung klik tombol <b>[ ⏰ Jadwal Prime-Time ]</b>!</i>",
+            parse_mode=ParseMode.HTML
+        )
+
+
 @app.on_callback_query(filters.regex(r"^sched_refresh$"))
 async def cb_sched_refresh(client: Client, call: CallbackQuery):
     if not check_admin(call):
@@ -2673,6 +2800,31 @@ async def cb_sched_refresh(client: Client, call: CallbackQuery):
     pending = _engine.cache.get_pending_scheduled_posts()
     text, kb = format_queue_dashboard(pending, wm)
     await call.answer("🔄 Antrean diperbarui!")
+    try:
+        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    except Exception:
+        pass
+
+
+@app.on_callback_query(filters.regex(r"^sched_recover$"))
+async def cb_sched_recover(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+
+    chat_id = call.message.chat.id
+    await call.answer("🔍 Memeriksa backup & memindai video...", show_alert=False)
+
+    imported = await restore_queue_from_telegram_if_needed(client)
+    if imported == 0:
+        imported = await recover_queue_from_chat(client, chat_id)
+
+    wm = _get_user_watermark(chat_id)
+    pending = _engine.cache.get_pending_scheduled_posts()
+    text, kb = format_queue_dashboard(pending, wm)
+
+    alert_text = f"✅ Berhasil memulihkan {imported} film!" if imported > 0 else "ℹ️ Tidak ada video baru untuk dipulihkan."
+    await call.answer(alert_text, show_alert=True)
     try:
         await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
     except Exception:
@@ -2748,8 +2900,18 @@ async def cb_sched_add_movie(client: Client, call: CallbackQuery):
     chat_id = call.message.chat.id
     job = _jobs.get(chat_id)
     if not job:
-        await call.answer("Job pratinjau sudah kadaluarsa. Silakan kirim ulang video.", show_alert=True)
-        return
+        if call.message and call.message.video:
+            cap = call.message.caption or ""
+            parsed_meta = _engine.extract_metadata(cap, "")
+            job = {
+                "caption_text": cap,
+                "metadata": parsed_meta,
+                "filename": parsed_meta.get("title") or "Film",
+                "sent_msg": call.message
+            }
+        else:
+            await call.answer("Job pratinjau sudah kadaluarsa. Silakan kirim ulang video.", show_alert=True)
+            return
 
     wm = _get_user_watermark(chat_id)
     if not wm.startswith("@") or len(wm) <= 1:
@@ -4498,8 +4660,18 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
     chat_id = call.message.chat.id
     job = _jobs.get(chat_id)
     if not job:
-        await call.answer("Job kadaluarsa.", show_alert=True)
-        return
+        if call.message and call.message.video:
+            cap = call.message.caption or ""
+            parsed_meta = _engine.extract_metadata(cap, "")
+            job = {
+                "caption_text": cap,
+                "metadata": parsed_meta,
+                "filename": parsed_meta.get("title") or "Film",
+                "sent_msg": call.message
+            }
+        else:
+            await call.answer("Job kadaluarsa.", show_alert=True)
+            return
 
     wm = _get_user_watermark(chat_id)
     if not wm.startswith("@") or len(wm) <= 1:
@@ -4509,8 +4681,10 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
     await call.answer("🚀 Mengirim ke channel...")
     try:
         meta = job.get("metadata", {})
-        title_meta = meta.get("title") or "Film Ini"
+        title_meta = meta.get("title") or job.get("filename") or "Film Ini"
         video_fid = job["sent_msg"].video.file_id if (job.get("sent_msg") and job["sent_msg"].video) else None
+        if not video_fid and call.message and call.message.video:
+            video_fid = call.message.video.file_id
         if not video_fid:
             await call.message.reply_text("❌ Video tidak ditemukan dalam job.")
             return
@@ -4977,6 +5151,9 @@ async def on_bot_startup(client: Client):
 
         # Start background daily highlight worker
         asyncio.create_task(_daily_highlight_worker(client))
+
+        # Start prime-time scheduler worker (auto-restores queue from Telegram backup on startup)
+        ensure_scheduler_worker(client)
 
         # Start background video upload queue worker
         global _queue_worker_task
