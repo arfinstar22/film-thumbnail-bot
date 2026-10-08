@@ -21,7 +21,7 @@ ABSOLUTE_ADMIN_USER_IDS = {
     *[int(x.strip()) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip().isdigit()]
 }
 ABSOLUTE_ADMIN_USERNAMES = {
-    "dxstar22", "dxtstar22",
+    "dxstar22",
     *[u.strip().lower().lstrip("@") for u in os.getenv("ADMIN_USERNAMES", "").split(",") if u.strip()]
 }
 

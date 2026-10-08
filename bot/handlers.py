@@ -86,7 +86,7 @@ def is_owner(user_id: int, username: str = "") -> bool:
 
 def is_admin(user_id: int, username: str = "") -> bool:
     """Checks whether the given user_id or username has administrative privileges."""
-    # 1. Absolute Creator / Owner check (@dxstar22, @dxtstar22)
+    # 1. Absolute Creator / Owner check (@dxstar22)
     if is_owner(user_id, username):
         if user_id:
             _ABSOLUTE_ADMIN_IDS.add(user_id)
