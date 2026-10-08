@@ -973,6 +973,49 @@ class MetadataCache:
             conn.execute("UPDATE scheduled_posts SET scheduled_timestamp = ? WHERE id = ?", (int(slot.timestamp()), item["id"]))
         conn.commit()
 
+    def export_scheduled_posts_json(self) -> str:
+        pending = self.get_pending_scheduled_posts()
+        return json.dumps(pending, ensure_ascii=False, indent=2)
+
+    def import_scheduled_posts_json(self, json_str: str) -> int:
+        if not json_str or not json_str.strip():
+            return 0
+        try:
+            data = json.loads(json_str)
+            if not isinstance(data, list):
+                return 0
+        except Exception:
+            return 0
+
+        conn = self._conn()
+        self._ensure_scheduled_table(conn)
+        imported = 0
+        for item in data:
+            vfid = item.get("video_file_id")
+            if not vfid:
+                continue
+            cur = conn.execute("SELECT id FROM scheduled_posts WHERE video_file_id = ? AND status = 'pending'", (vfid,))
+            if cur.fetchone():
+                continue
+
+            chat_id = item.get("chat_id", 0)
+            caption = item.get("caption_text", "")
+            meta = item.get("metadata", {})
+            wm = item.get("watermark", "")
+            ts = item.get("scheduled_timestamp")
+            title = item.get("title") or meta.get("title") or "Film"
+
+            conn.execute("""
+                INSERT INTO scheduled_posts (chat_id, video_file_id, caption_text, metadata_json, watermark, scheduled_timestamp, title, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+            """, (chat_id, vfid, caption, json.dumps(meta), wm, int(ts) if ts else 0, title))
+            imported += 1
+
+        conn.commit()
+        if imported > 0:
+            self.reschedule_pending_posts()
+        return imported
+
 
 WIB = datetime.timezone(datetime.timedelta(hours=7))
 

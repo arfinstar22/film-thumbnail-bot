@@ -258,9 +258,107 @@ def format_queue_dashboard(pending_posts: list, watermark: str) -> Tuple[str, In
     return "\n".join(lines), kb
 
 
+async def sync_queue_backup_to_owner(client: Client):
+    """Backs up the pending scheduled queue to Tuan Darfin's private chat so it survives Render redeploys."""
+    owner_id = 1166479771
+    try:
+        pending = _engine.cache.get_pending_scheduled_posts()
+        old_msg_id = _engine.cache.get_setting("last_queue_backup_msg_id", "")
+
+        if not pending:
+            if old_msg_id and old_msg_id.isdigit():
+                try:
+                    await client.delete_messages(owner_id, int(old_msg_id))
+                except Exception:
+                    pass
+                _engine.cache.set_setting("last_queue_backup_msg_id", "")
+            return
+
+        json_data = _engine.cache.export_scheduled_posts_json()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as tf:
+            tf.write(json_data)
+            temp_path = tf.name
+
+        if old_msg_id and old_msg_id.isdigit():
+            try:
+                await client.delete_messages(owner_id, int(old_msg_id))
+            except Exception:
+                pass
+
+        sent = await client.send_document(
+            chat_id=owner_id,
+            document=temp_path,
+            file_name="antrean_backup.json",
+            caption=(
+                f"🛡️ <b>[CLOUD BACKUP ANTREAN TAYANG]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📊 <b>Total Antrean:</b> {len(pending)} film dijadwalkan\n"
+                f"💡 <i>File ini otomatis diperbarui agar antrean TIDAK PERNAH HILANG meski Render deploy ulang atau restart.</i>"
+            ),
+            parse_mode=ParseMode.HTML,
+            disable_notification=True
+        )
+        if sent:
+            _engine.cache.set_setting("last_queue_backup_msg_id", str(sent.id))
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.warning(f"Error syncing queue backup to owner: {e}")
+
+
+async def restore_queue_from_telegram_if_needed(client: Client):
+    """Restores pending scheduled posts from Telegram cloud backup if local database is empty after restart."""
+    try:
+        pending = _engine.cache.get_pending_scheduled_posts()
+        if pending:
+            return 0
+
+        owner_id = 1166479771
+        async for m in client.get_chat_history(owner_id, limit=20):
+            if m.document and m.document.file_name == "antrean_backup.json":
+                temp_file = await m.download()
+                try:
+                    with open(temp_file, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    imported = _engine.cache.import_scheduled_posts_json(content)
+                    if imported > 0:
+                        logger.info(f"Successfully restored {imported} scheduled posts from Telegram cloud backup!")
+                        try:
+                            await client.send_message(
+                                chat_id=owner_id,
+                                text=(
+                                    f"🔄 <b>[PEMULIHAN ANTREAN OTOMATIS]</b>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"Bot baru saja menyala / deploy ulang di Render.\n"
+                                    f"✅ Sebanyak <b>{imported} film</b> dalam antrean jadwal tayang berhasil dipulihkan otomatis dari Cloud Telegram!\n\n"
+                                    f"<i>Ketik /queue untuk melihat daftar antrean aktif.</i>"
+                                ),
+                                parse_mode=ParseMode.HTML
+                            )
+                        except Exception:
+                            pass
+                    return imported
+                finally:
+                    try:
+                        os.remove(temp_file)
+                    except Exception:
+                        pass
+                break
+    except Exception as e:
+        logger.warning(f"Error restoring queue from telegram: {e}")
+    return 0
+
+
 async def scheduler_worker(client: Client):
     """Background worker that periodically checks and publishes scheduled prime-time posts."""
     logger.info("Prime-time scheduler background worker started.")
+    try:
+        await restore_queue_from_telegram_if_needed(client)
+    except Exception as re:
+        logger.warning(f"Could not restore queue on startup: {re}")
+
     while True:
         try:
             now_ts = int(time.time())
@@ -278,6 +376,7 @@ async def scheduler_worker(client: Client):
                         update_pin=True
                     )
                     _engine.cache.mark_scheduled_post_done(item["id"])
+                    asyncio.create_task(sync_queue_backup_to_owner(client))
                     try:
                         clean_t = datetime.datetime.fromtimestamp(item["scheduled_timestamp"], WIB).strftime("%H:%M")
                         await client.send_message(
@@ -2473,6 +2572,7 @@ async def cb_sched_clear_all(client: Client, call: CallbackQuery):
         await call.answer("⛔ Khusus Administrator!", show_alert=True)
         return
     count = _engine.cache.clear_all_scheduled_posts()
+    asyncio.create_task(sync_queue_backup_to_owner(client))
     await call.answer(f"🗑 {count} film dihapus dari antrean!", show_alert=True)
     wm = _get_user_watermark(call.message.chat.id)
     text, kb = format_queue_dashboard([], wm)
@@ -2512,6 +2612,7 @@ async def cb_sched_flush_all(client: Client, call: CallbackQuery):
         except Exception as pe:
             logger.error(f"Error flushing scheduled post {item['id']}: {pe}")
 
+    asyncio.create_task(sync_queue_backup_to_owner(client))
     wm = _get_user_watermark(call.message.chat.id)
     rem = _engine.cache.get_pending_scheduled_posts()
     text, kb = format_queue_dashboard(rem, wm)
@@ -2560,6 +2661,7 @@ async def cb_sched_add_movie(client: Client, call: CallbackQuery):
         watermark=wm,
         title=title_meta
     )
+    asyncio.create_task(sync_queue_backup_to_owner(client))
 
     pending = _engine.cache.get_pending_scheduled_posts()
     this_item = next((p for p in pending if p["id"] == row_id), None)
@@ -4129,6 +4231,7 @@ async def _process_video_task(client: Client, msg: Message):
                     watermark=wm,
                     title=title_name
                 )
+                asyncio.create_task(sync_queue_backup_to_owner(client))
                 pending = _engine.cache.get_pending_scheduled_posts()
                 this_item = next((p for p in pending if p["id"] == row_id), None)
                 sched_str = "Segera"
