@@ -2765,11 +2765,11 @@ async def recover_queue_cmd(client: Client, msg: Message):
         return
 
     chat_id = msg.chat.id
-    status_msg = await msg.reply_text("🔍 <i>Sedang memeriksa file backup cloud & riwayat chat...</i>", parse_mode=ParseMode.HTML)
+    user_id = msg.from_user.id if msg.from_user else chat_id
 
-    imported = 0
     # 1. If replied directly to a json document:
     if msg.reply_to_message and msg.reply_to_message.document and msg.reply_to_message.document.file_name.lower().endswith(".json"):
+        status_msg = await msg.reply_text("⏳ <i>Sedang membaca file backup yang di-reply...</i>", parse_mode=ParseMode.HTML)
         temp_file = await msg.reply_to_message.download()
         try:
             with open(temp_file, "r", encoding="utf-8") as f:
@@ -2778,40 +2778,49 @@ async def recover_queue_cmd(client: Client, msg: Message):
             if imported > 0:
                 await sync_queue_backup_to_owner(client)
                 ensure_scheduler_worker(client)
+                pending = _engine.cache.get_pending_scheduled_posts()
+                items_preview = []
+                for i, p in enumerate(pending[:8], 1):
+                    dt = datetime.datetime.fromtimestamp(p["scheduled_timestamp"], WIB).strftime("%d %b, %H:%M WIB")
+                    items_preview.append(f"<b>#{i}.</b> 🎬 <b>{p['title']}</b> (🕒 <code>{dt}</code>)")
+                list_str = "\n".join(items_preview)
+                if len(pending) > 8:
+                    list_str += f"\n<i>...dan {len(pending) - 8} film lainnya.</i>"
+                await status_msg.edit_text(
+                    f"🎉 <b>[PEMULIHAN ANTREAN BERHASIL]</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"✅ Berhasil memulihkan <b>{imported} film</b> dari file <code>{msg.reply_to_message.document.file_name}</code>!\n"
+                    f"📊 Total antrean aktif: <b>{len(pending)} film</b>\n\n"
+                    f"📋 <b>Daftar Antrean Tayang:</b>\n{list_str}\n\n"
+                    f"<i>Ketik <code>/queue</code> untuk melihat antrean lengkap.</i>",
+                    parse_mode=ParseMode.HTML
+                )
+                return
+            else:
+                await status_msg.edit_text("ℹ️ File antrean valid, namun seluruh film di dalamnya sudah ada di antrean aktif.")
+                return
         except Exception as e:
-            logger.warning(f"Error importing replied json: {e}")
+            await status_msg.edit_text(f"❌ Gagal memulihkan dari file: <code>{e}</code>", parse_mode=ParseMode.HTML)
+            return
         finally:
             try:
                 os.remove(temp_file)
             except Exception:
                 pass
 
-    # 2. Check cloud backup in chat history
-    if imported == 0:
-        imported = await restore_queue_from_telegram_if_needed(client, force=True)
-
-    # 3. Fallback to scanning preview messages in chat history
-    if imported == 0:
-        imported = await recover_queue_from_chat(client, chat_id)
-
-    pending = _engine.cache.get_pending_scheduled_posts()
-    if imported > 0:
-        await status_msg.edit_text(
-            f"🎉 <b>[PEMULIHAN ANTREAN BERHASIL]</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"✅ Berhasil memulihkan <b>{imported} film</b> ke jadwal tayang Prime-Time!\n"
-            f"📊 Total antrean aktif saat ini: <b>{len(pending)} film</b>\n"
-            f"🛡️ File <code>antrean_backup.json</code> telah diperbarui otomatis agar tahan restart ke depannya.\n\n"
-            f"<i>Gunakan <code>/queue</code> untuk memeriksa daftar antrean, atau <code>/postjadwal</code> untuk posting ke channel.</i>",
-            parse_mode=ParseMode.HTML
-        )
-    else:
-        await status_msg.edit_text(
-            f"ℹ️ <b>Tidak ditemukan video baru yang perlu dipulihkan.</b>\n"
-            f"📊 Antrean aktif saat ini: <b>{len(pending)} film</b>.\n\n"
-            f"<i>Catatan: Anda juga bisa scroll ke atas ke pesan pratinjau video film yang diinginkan dan langsung klik tombol <b>[ ⏰ Jadwal Prime-Time ]</b>!</i>",
-            parse_mode=ParseMode.HTML
-        )
+    # 2. Set interactive state and ask user to forward/upload the JSON file
+    _user_states[user_id] = "waiting_queue_backup"
+    await msg.reply_text(
+        "📥 <b>PULIHKAN ANTREAN — SILAKAN FORWARD FILE JSON</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Silakan <b>teruskan (forward)</b> atau <b>kirimkan file <code>antrean_backup.json</code></b> ke bot ini sekarang!\n\n"
+        "💡 <b>Langkah Mudah:</b>\n"
+        "1. Cari pesan file <code>antrean_backup.json</code> di riwayat chat ini.\n"
+        "2. Tekan & tahan file tersebut, lalu pilih <b>Forward (Teruskan)</b> ke bot ini.\n"
+        "<i>(Atau Reply file tersebut langsung dengan perintah <code>/recoverqueue</code>)</i>\n\n"
+        "❌ Ketik <code>/cancel</code> jika ingin membatalkan.",
+        parse_mode=ParseMode.HTML
+    )
 
 
 @app.on_callback_query(filters.regex(r"^sched_refresh$"))
@@ -2836,11 +2845,20 @@ async def cb_sched_recover(client: Client, call: CallbackQuery):
         return
 
     chat_id = call.message.chat.id
-    await call.answer("🔍 Memeriksa backup & memindai video...", show_alert=False)
-
-    imported = await restore_queue_from_telegram_if_needed(client, force=True)
-    if imported == 0:
-        imported = await recover_queue_from_chat(client, chat_id)
+    user_id = call.from_user.id if call.from_user else chat_id
+    _user_states[user_id] = "waiting_queue_backup"
+    await call.answer("📥 Menunggu file antrean_backup.json...")
+    await call.message.reply_text(
+        "📥 <b>PULIHKAN ANTREAN — SILAKAN FORWARD FILE JSON</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Silakan <b>teruskan (forward)</b> atau <b>kirimkan file <code>antrean_backup.json</code></b> ke bot ini sekarang!\n\n"
+        "💡 <b>Langkah Mudah:</b>\n"
+        "1. Cari pesan file <code>antrean_backup.json</code> di riwayat chat ini.\n"
+        "2. Tekan & tahan file tersebut, lalu pilih <b>Forward (Teruskan)</b> ke bot ini.\n"
+        "<i>(Atau Reply file tersebut langsung dengan perintah <code>/recoverqueue</code>)</i>\n\n"
+        "❌ Ketik <code>/cancel</code> jika ingin membatalkan.",
+        parse_mode=ParseMode.HTML
+    )
 
     wm = _get_user_watermark(chat_id)
     pending = _engine.cache.get_pending_scheduled_posts()
@@ -4638,37 +4656,76 @@ async def receive_video(client: Client, msg: Message):
         )
         return
 
-    # Check if this document is a queue backup JSON
+    # Check if this document is a JSON file (Antrean backup or catalog backup)
     if msg.document and msg.document.file_name and msg.document.file_name.lower().endswith(".json"):
-        fn = msg.document.file_name.lower()
-        if "antrean" in fn or "queue" in fn or "sched" in fn:
-            temp_file = await msg.download()
-            try:
-                with open(temp_file, "r", encoding="utf-8") as f:
-                    content = f.read()
-                imported = _engine.cache.import_scheduled_posts_json(content)
-                if imported > 0:
-                    await sync_queue_backup_to_owner(client)
-                    ensure_scheduler_worker(client)
-                    pending = _engine.cache.get_pending_scheduled_posts()
-                    await msg.reply_text(
-                        f"🛡️ <b>[BACKUP ANTREAN DITERIMA & DIPULIHKAN]</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"✅ Berhasil memulihkan <b>{imported} film</b> dari file <code>{msg.document.file_name}</code> ke jadwal Prime-Time!\n"
-                        f"📊 Total antrean aktif saat ini: <b>{len(pending)} film</b>.\n\n"
-                        f"<i>Ketik <code>/queue</code> untuk melihat jadwal antrean.</i>",
+        _user_states.pop(user_id, None)
+        status_msg = await msg.reply_text("⏳ <i>Sedang membaca & memverifikasi file backup JSON...</i>", parse_mode=ParseMode.HTML)
+        temp_file = await msg.download()
+        try:
+            with open(temp_file, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            imported = _engine.cache.import_scheduled_posts_json(content)
+            if imported > 0:
+                await sync_queue_backup_to_owner(client)
+                ensure_scheduler_worker(client)
+                pending = _engine.cache.get_pending_scheduled_posts()
+                items_preview = []
+                for i, p in enumerate(pending[:10], 1):
+                    dt = datetime.datetime.fromtimestamp(p["scheduled_timestamp"], WIB).strftime("%d %b, %H:%M WIB")
+                    items_preview.append(f"<b>#{i}.</b> 🎬 <b>{p['title']}</b> (🕒 <code>{dt}</code>)")
+                list_str = "\n".join(items_preview)
+                if len(pending) > 10:
+                    list_str += f"\n<i>...dan {len(pending) - 10} film lainnya.</i>"
+
+                await status_msg.edit_text(
+                    f"🎉 <b>[PEMULIHAN ANTREAN BERHASIL]</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"✅ Berhasil memulihkan <b>{imported} film</b> dari file <code>{msg.document.file_name}</code> ke jadwal Prime-Time!\n"
+                    f"📊 Total film dalam antrean saat ini: <b>{len(pending)} film</b>\n\n"
+                    f"📋 <b>Daftar Antrean Tayang:</b>\n{list_str}\n\n"
+                    f"<i>Ketik <code>/queue</code> untuk melihat live dashboard antrean.</i>",
+                    parse_mode=ParseMode.HTML
+                )
+                return
+            else:
+                # Check if it's channel catalog JSON
+                try:
+                    raw_data = json.loads(content)
+                    if isinstance(raw_data, list) and raw_data and "channel_username" in raw_data[0]:
+                        await status_msg.edit_text(
+                            "⚠️ <b>File ini adalah Backup Katalog Channel, bukan antrean tayang.</b>\n\n"
+                            "Untuk memulihkan film dari katalog channel ini, reply file tersebut dengan:\n"
+                            "<code>/restorechannel @namachannel</code>",
+                            parse_mode=ParseMode.HTML
+                        )
+                        return
+                except Exception:
+                    pass
+
+                pending = _engine.cache.get_pending_scheduled_posts()
+                if pending:
+                    await status_msg.edit_text(
+                        f"ℹ️ File valid, namun seluruh film di dalamnya sudah ada di antrean aktif ({len(pending)} film).\n"
+                        f"Ketik <code>/queue</code> untuk memeriksa antrean lengkap.",
                         parse_mode=ParseMode.HTML
                     )
                 else:
-                    await msg.reply_text("ℹ️ File antrean valid, namun seluruh film di dalamnya sudah ada di antrean aktif.")
-            except Exception as je:
-                await msg.reply_text(f"❌ Gagal memulihkan antrean: <code>{je}</code>", parse_mode=ParseMode.HTML)
-            finally:
-                try:
-                    os.remove(temp_file)
-                except Exception:
-                    pass
+                    await status_msg.edit_text(
+                        "❌ <b>Format File Tidak Sesuai:</b>\n"
+                        "File JSON tidak berisi data antrean film yang valid. Pastikan file yang Anda forward/kirim adalah <code>antrean_backup.json</code>.",
+                        parse_mode=ParseMode.HTML
+                    )
+                return
+        except Exception as je:
+            logger.exception("Error restoring json backup from document")
+            await status_msg.edit_text(f"❌ Gagal memproses file JSON: <code>{je}</code>", parse_mode=ParseMode.HTML)
             return
+        finally:
+            try:
+                os.remove(temp_file)
+            except Exception:
+                pass
 
     global _queue_worker_task
     if _queue_worker_task is None or _queue_worker_task.done():
@@ -4878,6 +4935,21 @@ async def handle_incoming_text(client: Client, msg: Message):
         except Exception as e:
             logger.exception("Edit caption error")
             await msg.reply_text(f"❌ Gagal: {str(e)[:100]}")
+        return
+
+    # Handle interactive waiting queue backup state (when user sends text instead of json file)
+    if _user_states.get(user_id) == "waiting_queue_backup":
+        query = msg.text.strip()
+        if query.lower() in ("batal", "cancel", "/batal", "/cancel", "tidak", "ga jadi", "nggak"):
+            _user_states.pop(user_id, None)
+            await msg.reply_text("❌ <b>Pemulihan antrean dibatalkan.</b>", parse_mode=ParseMode.HTML)
+            return
+
+        await msg.reply_text(
+            "⚠️ <b>Mohon kirimkan dokumen file <code>antrean_backup.json</code></b> (bukan teks).\n\n"
+            "💡 Silakan forward (teruskan) pesan file backup tersebut ke sini, atau ketik <code>/cancel</code> untuk membatalkan.",
+            parse_mode=ParseMode.HTML
+        )
         return
 
     # 2. Handle interactive admin movie input

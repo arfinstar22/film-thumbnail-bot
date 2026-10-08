@@ -995,7 +995,7 @@ class MetadataCache:
         self._ensure_scheduled_table(conn)
         imported = 0
         for item in data:
-            vfid = item.get("video_file_id")
+            vfid = item.get("video_file_id") or item.get("file_id")
             if not vfid:
                 continue
             cur = conn.execute("SELECT id FROM scheduled_posts WHERE video_file_id = ? AND status = 'pending'", (vfid,))
@@ -1003,11 +1003,16 @@ class MetadataCache:
                 continue
 
             chat_id = item.get("chat_id", 0)
-            caption = item.get("caption_text", "")
-            meta = item.get("metadata", {})
-            wm = item.get("watermark", "")
+            caption = item.get("caption_text") or item.get("caption") or ""
+            meta = item.get("metadata") or {}
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            wm = item.get("watermark") or item.get("channel_username") or ""
             ts = item.get("scheduled_timestamp")
-            title = item.get("title") or meta.get("title") or "Film"
+            title = item.get("title") or (meta.get("title") if isinstance(meta, dict) else None) or "Film"
 
             conn.execute("""
                 INSERT INTO scheduled_posts (chat_id, video_file_id, caption_text, metadata_json, watermark, scheduled_timestamp, title, status)
