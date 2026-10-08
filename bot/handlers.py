@@ -248,11 +248,60 @@ def format_queue_dashboard(pending_posts: list, watermark: str) -> Tuple[str, In
 
     kb = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🔄 Refresh Antrean", callback_data="sched_refresh"),
-            InlineKeyboardButton("⚡ Terbitkan Semua Sekarang", callback_data="sched_flush_all")
+            InlineKeyboardButton("📢 Posting Jadwal ke Channel", callback_data="sched_post_schedule"),
+            InlineKeyboardButton("🔄 Refresh Antrean", callback_data="sched_refresh")
         ],
         [
+            InlineKeyboardButton("⚡ Terbitkan Semua Sekarang", callback_data="sched_flush_all"),
             InlineKeyboardButton("🗑 Kosongkan Antrean", callback_data="sched_clear_all")
+        ]
+    ])
+    return "\n".join(lines), kb
+
+
+def format_schedule_announcement(pending_posts: list, watermark: str, bot_username: str = "") -> Tuple[str, InlineKeyboardMarkup]:
+    now = datetime.datetime.now(WIB)
+    clean_wm = (watermark or "@film_indonesia1").lstrip("@").strip()
+    channel_url = f"https://t.me/{clean_wm}"
+
+    lines = [
+        "🗓️ <b>JADWAL TAYANG FILM HARI INI</b> 🍿",
+        f"📢 Channel: <b>@{clean_wm}</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "Halo Sobat Film! Berikut adalah daftar film yang akan tayang di channel kami sesuai jadwal prime-time:\n"
+    ]
+
+    for idx, item in enumerate(pending_posts, 1):
+        sched_dt = datetime.datetime.fromtimestamp(item["scheduled_timestamp"], WIB)
+        if sched_dt.date() == now.date():
+            day_tag = "Hari ini"
+        elif sched_dt.date() == (now + datetime.timedelta(days=1)).date():
+            day_tag = "Besok"
+        else:
+            day_tag = sched_dt.strftime("%d %b")
+
+        time_str = sched_dt.strftime("%H:%M WIB")
+        meta = item.get("metadata") or {}
+        title = item.get("title") or meta.get("title") or "Film"
+        year = meta.get("year")
+        year_str = f" ({year})" if year else ""
+        genre = meta.get("genre")
+        genre_str = f" | 🎭 <i>{genre}</i>" if genre and str(genre).strip() not in ("-", "None", "") else ""
+        rating = meta.get("rating")
+        rating_str = f" | ⭐ <b>{rating}</b>" if rating and str(rating).strip() not in ("-", "None", "") else ""
+
+        lines.append(f"⏰ <b>{time_str}</b> ({day_tag})")
+        lines.append(f"🎬 <b>{title}{year_str}</b>{genre_str}{rating_str}")
+        lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🔔 <i>Nyalakan notifikasi channel agar langsung dapat menonton saat film rilis!</i>")
+
+    btn_req_url = f"https://t.me/{bot_username}?start=request" if bot_username else channel_url
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💬 Request Judul Lain", url=btn_req_url),
+            InlineKeyboardButton("📌 Pinned Katalog A-Z", url=channel_url)
         ]
     ])
     return "\n".join(lines), kb
@@ -582,6 +631,7 @@ BOT_COMMANDS_LIST = [
     BotCommand("request", "Kirim permintaan judul film"),
     BotCommand("cari", "Cari film di database channel"),
     BotCommand("queue", "Antrean & jadwal tayang prime-time"),
+    BotCommand("postjadwal", "Posting jadwal film hari ini ke channel"),
     BotCommand("fsub", "Atur force-subscribe (wajib join)"),
     BotCommand("channels", "Kelola & ganti channel aktif"),
     BotCommand("usechannel", "Pilih channel aktif cepat"),
@@ -696,6 +746,8 @@ def build_admin_dashboard_text(chat_id: int, user_id: int, first_name: str, user
         "• <code>/queue</code> atau <code>/jadwal</code>\n"
         "  Live dashboard antrean jadwal tayang prime-time.\n"
         f"  <i>Status antrean:</i> <b>{sched_status}</b>\n\n"
+        "• <code>/postjadwal</code>\n"
+        "  Posting pengumuman jadwal film hari ini langsung ke channel.\n\n"
         "• <code>/fsub on / off</code>\n"
         "  Kunci bot wajib join channel sebelum request/cari film.\n"
         f"  <i>Status FSUB:</i> <b>{fsub_status}</b>\n\n"
@@ -2549,6 +2601,67 @@ async def queue_cmd(client: Client, msg: Message):
     pending = _engine.cache.get_pending_scheduled_posts()
     text, kb = format_queue_dashboard(pending, wm)
     await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def post_schedule_to_channel_action(client: Client, chat_id: int) -> Tuple[bool, str, Optional[str]]:
+    """Posts the current prime-time upcoming queue announcement to the channel."""
+    wm = _get_user_watermark(chat_id)
+    clean_wm = (wm or "").lstrip("@").strip()
+    if not clean_wm or not wm.startswith("@"):
+        return False, "⚠️ <b>Channel belum diatur!</b> Gunakan <code>/setwatermark @namachannel</code> terlebih dahulu.", None
+
+    pending = _engine.cache.get_pending_scheduled_posts()
+    if not pending:
+        return False, "📭 <b>Antrean kosong!</b> Tidak ada film yang sedang dijadwalkan untuk diposting.", None
+
+    bot_uname = (client.me.username if getattr(client, "me", None) else "") or _engine.cache.get_setting("bot_username", "") or ""
+    ann_text, ann_kb = format_schedule_announcement(pending, wm, bot_uname)
+
+    try:
+        channel_target = f"@{clean_wm}"
+        sent = await client.send_message(
+            chat_id=channel_target,
+            text=ann_text,
+            reply_markup=ann_kb,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
+        post_link = f"https://t.me/{clean_wm}/{sent.id}" if getattr(sent, "id", None) else f"https://t.me/{clean_wm}"
+        return True, (
+            f"✅ <b>Jadwal Tayang Berhasil Diposting ke Channel @{clean_wm}!</b>\n\n"
+            f"📊 Total film dijadwalkan: <b>{len(pending)} film</b>\n"
+            f"👉 <a href=\"{post_link}\">Lihat Postingan Jadwal di Channel</a>"
+        ), post_link
+    except Exception as e:
+        logger.error(f"Failed to post schedule announcement: {e}")
+        return False, f"❌ <b>Gagal memposting jadwal ke channel:</b> {e}\n\n<i>Pastikan bot sudah dijadikan Administrator di channel @{clean_wm} dengan izin kirim pesan.</i>", None
+
+
+@app.on_callback_query(filters.regex(r"^sched_post_schedule$"))
+async def cb_sched_post_schedule(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+
+    chat_id = call.message.chat.id
+    ok, text, post_link = await post_schedule_to_channel_action(client, chat_id)
+    if ok:
+        await call.answer("✅ Jadwal berhasil diposting ke channel!", show_alert=False)
+        await call.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    else:
+        await call.answer("Gagal memposting jadwal.", show_alert=True)
+        await call.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+@app.on_message(filters.command(["postjadwal", "broadcastjadwal"]))
+async def post_jadwal_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Khusus Administrator.", parse_mode=ParseMode.HTML)
+        return
+
+    chat_id = msg.chat.id
+    ok, text, post_link = await post_schedule_to_channel_action(client, chat_id)
+    await msg.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
 @app.on_callback_query(filters.regex(r"^sched_refresh$"))
