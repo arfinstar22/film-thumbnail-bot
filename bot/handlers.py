@@ -794,34 +794,140 @@ async def start_cmd(client: Client, msg: Message):
         await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(grid_btns))
         return
 
-    # ================= MEMBER VIEW =================
-    if not is_admin(user_id, username):
+    # ================= 1. OWNER / TUAN DARFIN VIEW =================
+    if is_owner(user_id, username):
         wm = _get_user_watermark(msg.chat.id)
         clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
         channel_url = f"https://t.me/{clean_wm}"
-        bot_uname = (client.me.username if getattr(client, "me", None) else "") or _engine.cache.get_setting("bot_username", "") or "bot"
+        user_count = _engine.cache.get_bot_users_count()
+        sched_posts = _engine.cache.get_pending_scheduled_posts()
+        sched_count = len(sched_posts) if sched_posts else 0
+        pending_reqs = _engine.cache.get_pending_requests(clean_wm.lower(), limit=100)
+        req_count = len(pending_reqs) if pending_reqs else 0
+        protect_val = _engine.cache.get_protect_content(msg.chat.id)
+        protect_status = "🛡️ Aktif (On)" if protect_val else "🔓 Mati (Off)"
+        autopost_val = _engine.cache.get_setting(f"autopost_{msg.chat.id}", "off")
+        if autopost_val == "schedule":
+            autopost_disp = "⏰ Prime-Time (16-18 & 20-22 WIB)"
+        elif autopost_val == "on":
+            autopost_disp = "⚡ Instan (Langsung Terbit)"
+        else:
+            autopost_disp = "✋ Manual (Pratinjau)"
 
-        member_text = (
-            f"👋 <b>Halo, {first_name}!</b>\n\n"
-            f"Selamat datang di Bot Resmi <b>@{clean_wm}</b> 🎬🍿\n\n"
-            f"🔍 <b>Mau nonton film apa hari ini?</b>\n"
-            f"• <b>Request Film:</b> Cukup tekan tombol <b>💬 Request Film</b> di bawah lalu ketik judul film.\n"
-            f"• <b>Pencarian Cepat:</b> Ketik <code>@{bot_uname} [judul film]</code> di chat mana pun!\n"
-            f"• <b>Pencarian Teks:</b> Ketik <code>/cari [judul film]</code> untuk mendapatkan link tonton.\n"
-            f"• <b>Katalog Lengkap:</b> Buka pinned message di channel kami.\n\n"
-            f"<i>Tekan tombol di bawah untuk mencari atau request film:</i>"
+        uname_label = f"@{username}" if username else f"ID: {user_id}"
+
+        owner_text = (
+            f"👑 <b>SALAM HORMAT & TAAT, TUAN DARFIN!</b> 🙇‍♂️\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Hamba (Bot Pengelola & Pembersih Film) siap melayani dan menjalankan segala titah Anda, <b>Sang Pencipta & Pemilik Absolut</b> ({uname_label})!\n\n"
+            f"📊 <b>Laporan Operasional Bot & Channel:</b>\n"
+            f"• 📢 <b>Channel Aktif:</b> @{clean_wm}\n"
+            f"• 👥 <b>Total Pengguna Bot:</b> <code>{user_count}</code> member\n"
+            f"• ⏰ <b>Antrean Tayang:</b> <code>{sched_count}</code> film siap rilis\n"
+            f"• 📋 <b>Permintaan Member:</b> <code>{req_count}</code> request menanti\n"
+            f"• 🛡️ <b>Proteksi Konten:</b> {protect_status}\n"
+            f"• ⚡ <b>Mode Posting:</b> {autopost_disp}\n\n"
+            f"👇 <i>Silakan pilih menu kendali di bawah ini:</i>"
         )
-        member_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💬 Request Film", callback_data="btn_start_request")],
-            [InlineKeyboardButton("🔍 Cari Film Instan", switch_inline_query_current_chat="")],
-            [InlineKeyboardButton("📌 Buka Katalog Film A-Z", url=channel_url)]
+        owner_kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("⚙️ Dashboard Penuh", callback_data="adm_dashboard"),
+                InlineKeyboardButton("⏰ Antrean Tayang", callback_data="sched_refresh")
+            ],
+            [
+                InlineKeyboardButton("📋 Kelola Request Member", callback_data="adm_view_requests"),
+                InlineKeyboardButton("🎬 Input Judul Film", callback_data="adm_input_movie")
+            ],
+            [
+                InlineKeyboardButton("🔍 Cari Film Instan", switch_inline_query_current_chat=""),
+                InlineKeyboardButton(f"📢 Buka @{clean_wm}", url=channel_url)
+            ]
         ])
-        await msg.reply_text(member_text, parse_mode=ParseMode.HTML, reply_markup=member_kb)
+        await msg.reply_text(owner_text, parse_mode=ParseMode.HTML, reply_markup=owner_kb)
         return
 
-    # ================= ADMIN VIEW =================
-    text = build_admin_dashboard_text(msg.chat.id, user_id, first_name, username)
-    await msg.reply_text(text, parse_mode=ParseMode.HTML)
+    # ================= 2. ADMIN VIEW =================
+    if is_admin(user_id, username):
+        wm = _get_user_watermark(msg.chat.id)
+        clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
+        channel_url = f"https://t.me/{clean_wm}"
+        sched_posts = _engine.cache.get_pending_scheduled_posts()
+        sched_count = len(sched_posts) if sched_posts else 0
+        pending_reqs = _engine.cache.get_pending_requests(clean_wm.lower(), limit=100)
+        req_count = len(pending_reqs) if pending_reqs else 0
+        protect_val = _engine.cache.get_protect_content(msg.chat.id)
+        protect_status = "🛡️ Aktif (On)" if protect_val else "🔓 Mati (Off)"
+
+        admin_text = (
+            f"👑 <b>SELAMAT BERTUGAS, ADMINISTRATOR ({first_name})!</b> 🫡\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Sistem mengenali Anda sebagai <b>Administrator Resmi Channel</b> @{clean_wm}.\n\n"
+            f"📊 <b>Status Operasional Channel:</b>\n"
+            f"• 📢 <b>Channel:</b> @{clean_wm}\n"
+            f"• ⏰ <b>Antrean Tayang:</b> <code>{sched_count}</code> film dijadwalkan\n"
+            f"• 📋 <b>Request Member:</b> <code>{req_count}</code> request masuk\n"
+            f"• 🛡️ <b>Proteksi Konten:</b> {protect_status}\n\n"
+            f"👇 <i>Silakan pilih menu navigasi di bawah ini untuk mengelola bot & channel:</i>"
+        )
+        admin_kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("⚙️ Dashboard Admin", callback_data="adm_dashboard"),
+                InlineKeyboardButton("⏰ Cek Antrean", callback_data="sched_refresh")
+            ],
+            [
+                InlineKeyboardButton("📋 Cek Request Member", callback_data="adm_view_requests"),
+                InlineKeyboardButton("🎬 Input Judul Film", callback_data="adm_input_movie")
+            ],
+            [
+                InlineKeyboardButton(f"📢 Buka Channel @{clean_wm}", url=channel_url)
+            ]
+        ])
+        await msg.reply_text(admin_text, parse_mode=ParseMode.HTML, reply_markup=admin_kb)
+        return
+
+    # ================= 3. REGULAR MEMBER VIEW =================
+    wm = _get_user_watermark(msg.chat.id)
+    clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
+    channel_url = f"https://t.me/{clean_wm}"
+    bot_uname = (client.me.username if getattr(client, "me", None) else "") or _engine.cache.get_setting("bot_username", "") or "bot"
+
+    member_text = (
+        f"👋 <b>Halo, {first_name}!</b>\n\n"
+        f"Selamat datang di Bot Resmi <b>@{clean_wm}</b> 🎬🍿\n\n"
+        f"🔍 <b>Mau nonton film apa hari ini?</b>\n"
+        f"• <b>Request Film:</b> Cukup tekan tombol <b>💬 Request Film</b> di bawah lalu ketik judul film.\n"
+        f"• <b>Pencarian Cepat:</b> Ketik <code>@{bot_uname} [judul film]</code> di chat mana pun!\n"
+        f"• <b>Pencarian Teks:</b> Ketik <code>/cari [judul film]</code> untuk mendapatkan link tonton.\n"
+        f"• <b>Katalog Lengkap:</b> Buka pinned message di channel kami.\n\n"
+        f"<i>Tekan tombol di bawah untuk mencari atau request film:</i>"
+    )
+    member_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Request Film", callback_data="btn_start_request")],
+        [InlineKeyboardButton("🔍 Cari Film Instan", switch_inline_query_current_chat="")],
+        [InlineKeyboardButton("📌 Buka Katalog Film A-Z", url=channel_url)]
+    ])
+    await msg.reply_text(member_text, parse_mode=ParseMode.HTML, reply_markup=member_kb)
+
+
+@app.on_message(filters.command(["help", "dashboard"]))
+async def help_dashboard_cmd(client: Client, msg: Message):
+    user_id = msg.from_user.id if msg.from_user else msg.chat.id
+    first_name = msg.from_user.first_name if msg.from_user else "Sobat Film"
+    username = msg.from_user.username if msg.from_user else ""
+
+    if is_admin(user_id, username):
+        text = build_admin_dashboard_text(msg.chat.id, user_id, first_name, username)
+        await msg.reply_text(text, parse_mode=ParseMode.HTML)
+    else:
+        wm = _get_user_watermark(msg.chat.id)
+        clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
+        help_text = (
+            f"ℹ️ <b>Bantuan & Panduan Bot @{clean_wm}</b>\n\n"
+            f"• <b>Request Film:</b> Ketik <code>/request [judul film]</code>\n"
+            f"• <b>Cari Link Tonton:</b> Ketik <code>/cari [judul film]</code>\n"
+            f"• <b>Katalog Lengkap:</b> Buka pinned message di channel @{clean_wm}."
+        )
+        await msg.reply_text(help_text, parse_mode=ParseMode.HTML)
 
 
 @app.on_message(filters.command("setwatermark"))
