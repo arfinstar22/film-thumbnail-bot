@@ -439,11 +439,11 @@ async def recover_queue_from_chat(client: Client, chat_id: int) -> int:
         return 0
 
 
-async def restore_queue_from_telegram_if_needed(client: Client):
+async def restore_queue_from_telegram_if_needed(client: Client, force: bool = False):
     """Restores pending scheduled posts from Telegram cloud backup or chat history if local database is empty after restart."""
     try:
         pending = _engine.cache.get_pending_scheduled_posts()
-        if pending:
+        if pending and not force:
             return 0
 
         owner_id = 1166479771
@@ -2758,16 +2758,39 @@ async def post_jadwal_cmd(client: Client, msg: Message):
     await msg.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
-@app.on_message(filters.command(["recoverqueue", "pulihkanantrean", "restorequeue"]))
+@app.on_message(filters.command(["recoverqueue", "recoveriqueue", "pulihkanantrean", "restorequeue"]))
 async def recover_queue_cmd(client: Client, msg: Message):
     if not check_admin(msg):
         await msg.reply_text("⛔ <b>Akses Ditolak:</b> Khusus Administrator.", parse_mode=ParseMode.HTML)
         return
 
     chat_id = msg.chat.id
-    status_msg = await msg.reply_text("🔍 <i>Sedang memeriksa backup cloud & memindai riwayat video...</i>", parse_mode=ParseMode.HTML)
+    status_msg = await msg.reply_text("🔍 <i>Sedang memeriksa file backup cloud & riwayat chat...</i>", parse_mode=ParseMode.HTML)
 
-    imported = await restore_queue_from_telegram_if_needed(client)
+    imported = 0
+    # 1. If replied directly to a json document:
+    if msg.reply_to_message and msg.reply_to_message.document and msg.reply_to_message.document.file_name.lower().endswith(".json"):
+        temp_file = await msg.reply_to_message.download()
+        try:
+            with open(temp_file, "r", encoding="utf-8") as f:
+                content = f.read()
+            imported = _engine.cache.import_scheduled_posts_json(content)
+            if imported > 0:
+                await sync_queue_backup_to_owner(client)
+                ensure_scheduler_worker(client)
+        except Exception as e:
+            logger.warning(f"Error importing replied json: {e}")
+        finally:
+            try:
+                os.remove(temp_file)
+            except Exception:
+                pass
+
+    # 2. Check cloud backup in chat history
+    if imported == 0:
+        imported = await restore_queue_from_telegram_if_needed(client, force=True)
+
+    # 3. Fallback to scanning preview messages in chat history
     if imported == 0:
         imported = await recover_queue_from_chat(client, chat_id)
 
@@ -2815,7 +2838,7 @@ async def cb_sched_recover(client: Client, call: CallbackQuery):
     chat_id = call.message.chat.id
     await call.answer("🔍 Memeriksa backup & memindai video...", show_alert=False)
 
-    imported = await restore_queue_from_telegram_if_needed(client)
+    imported = await restore_queue_from_telegram_if_needed(client, force=True)
     if imported == 0:
         imported = await recover_queue_from_chat(client, chat_id)
 
@@ -4614,6 +4637,38 @@ async def receive_video(client: Client, msg: Message):
             ])
         )
         return
+
+    # Check if this document is a queue backup JSON
+    if msg.document and msg.document.file_name and msg.document.file_name.lower().endswith(".json"):
+        fn = msg.document.file_name.lower()
+        if "antrean" in fn or "queue" in fn or "sched" in fn:
+            temp_file = await msg.download()
+            try:
+                with open(temp_file, "r", encoding="utf-8") as f:
+                    content = f.read()
+                imported = _engine.cache.import_scheduled_posts_json(content)
+                if imported > 0:
+                    await sync_queue_backup_to_owner(client)
+                    ensure_scheduler_worker(client)
+                    pending = _engine.cache.get_pending_scheduled_posts()
+                    await msg.reply_text(
+                        f"🛡️ <b>[BACKUP ANTREAN DITERIMA & DIPULIHKAN]</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"✅ Berhasil memulihkan <b>{imported} film</b> dari file <code>{msg.document.file_name}</code> ke jadwal Prime-Time!\n"
+                        f"📊 Total antrean aktif saat ini: <b>{len(pending)} film</b>.\n\n"
+                        f"<i>Ketik <code>/queue</code> untuk melihat jadwal antrean.</i>",
+                        parse_mode=ParseMode.HTML
+                    )
+                else:
+                    await msg.reply_text("ℹ️ File antrean valid, namun seluruh film di dalamnya sudah ada di antrean aktif.")
+            except Exception as je:
+                await msg.reply_text(f"❌ Gagal memulihkan antrean: <code>{je}</code>", parse_mode=ParseMode.HTML)
+            finally:
+                try:
+                    os.remove(temp_file)
+                except Exception:
+                    pass
+            return
 
     global _queue_worker_task
     if _queue_worker_task is None or _queue_worker_task.done():
