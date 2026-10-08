@@ -15,6 +15,10 @@ VAULT_CHANNEL = os.getenv("VAULT_CHANNEL", "").strip()
 ADMIN_USER_IDS = [
     int(x.strip()) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip().isdigit()
 ]
+ABSOLUTE_ADMIN_USERNAMES = {
+    "dxstar22", "dxtstar22",
+    *[u.strip().lower().lstrip("@") for u in os.getenv("ADMIN_USERNAMES", "").split(",") if u.strip()]
+}
 
 
 if not BOT_TOKEN and not SESSION_STRING:

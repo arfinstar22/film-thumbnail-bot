@@ -808,6 +808,35 @@ class MetadataCache:
     def get_bot_users_count(self) -> int:
         return len(self.get_all_bot_user_ids())
 
+    def get_username_by_user_id(self, user_id: int) -> str:
+        if not user_id:
+            return ""
+        try:
+            conn = self._conn()
+            self._ensure_users_table(conn)
+            cur = conn.execute("SELECT username FROM bot_users WHERE user_id = ? LIMIT 1", (user_id,))
+            row = cur.fetchone()
+            if row and row[0]:
+                return str(row[0]).strip().lstrip("@")
+        except Exception as e:
+            logger.error(f"Get username error: {e}")
+        return ""
+
+    def get_user_id_by_username(self, username: str) -> Optional[int]:
+        clean = (username or "").lstrip("@").strip().lower()
+        if not clean:
+            return None
+        try:
+            conn = self._conn()
+            self._ensure_users_table(conn)
+            cur = conn.execute("SELECT user_id FROM bot_users WHERE LOWER(username) = ? LIMIT 1", (clean,))
+            row = cur.fetchone()
+            if row and row[0]:
+                return int(row[0])
+        except Exception as e:
+            logger.error(f"Get user_id error: {e}")
+        return None
+
     # ------------------ CONTENT PROTECTION ------------------
     def get_protect_content(self, chat_id: int) -> bool:
         val = self.get_setting(f"protect_{chat_id}", self.get_setting("protect_content", "off"))

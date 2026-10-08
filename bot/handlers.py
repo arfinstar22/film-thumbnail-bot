@@ -21,7 +21,7 @@ from pyrogram.errors import FloodWait, UserIsBlocked, InputUserDeactivated
 
 from .config import (
     BOT_TOKEN, API_ID, API_HASH, SESSION_STRING, CHANNEL_WATERMARK,
-    DEFAULT_REQUEST_LINK, ADMIN_USER_IDS, VAULT_CHANNEL
+    DEFAULT_REQUEST_LINK, ADMIN_USER_IDS, ABSOLUTE_ADMIN_USERNAMES, VAULT_CHANNEL
 )
 from .services.video import photo_thumbnail
 from .services.metadata.engine import MetadataEngine
@@ -43,20 +43,80 @@ _video_queue: asyncio.Queue = asyncio.Queue()
 _is_processing: bool = False
 _queue_worker_task: Optional[asyncio.Task] = None
 _scheduler_worker_task: Optional[asyncio.Task] = None
+_ABSOLUTE_ADMIN_IDS: set = set()
 
 
-def is_admin(user_id: int) -> bool:
-    """Checks whether the given user_id has administrative privileges."""
+def is_owner(user_id: int, username: str = "") -> bool:
+    """Checks whether the user is Tuan Darfin (Absolute Creator/Owner)."""
+    clean_uname = (username or "").lstrip("@").strip().lower()
+    if clean_uname and clean_uname in ABSOLUTE_ADMIN_USERNAMES:
+        if user_id:
+            _ABSOLUTE_ADMIN_IDS.add(user_id)
+            try:
+                _engine.cache.set_setting("owner_user_id", str(user_id))
+            except Exception:
+                pass
+        return True
+    if user_id and user_id in _ABSOLUTE_ADMIN_IDS:
+        return True
+    if user_id:
+        try:
+            owner_saved = _engine.cache.get_setting("owner_user_id", "")
+            if owner_saved and str(user_id) == str(owner_saved):
+                _ABSOLUTE_ADMIN_IDS.add(user_id)
+                return True
+        except Exception:
+            pass
+        db_uname = _engine.cache.get_username_by_user_id(user_id) if hasattr(_engine.cache, "get_username_by_user_id") else ""
+        if db_uname and db_uname.lower() in ABSOLUTE_ADMIN_USERNAMES:
+            _ABSOLUTE_ADMIN_IDS.add(user_id)
+            try:
+                _engine.cache.set_setting("owner_user_id", str(user_id))
+            except Exception:
+                pass
+            return True
+    return False
+
+
+def is_admin(user_id: int, username: str = "") -> bool:
+    """Checks whether the given user_id or username has administrative privileges."""
+    # 1. Absolute Creator / Owner check (@dxstar22, @dxtstar22)
+    if is_owner(user_id, username):
+        if user_id:
+            _ABSOLUTE_ADMIN_IDS.add(user_id)
+            if user_id not in ADMIN_USER_IDS:
+                ADMIN_USER_IDS.append(user_id)
+            _engine.cache.add_admin_id(user_id)
+            _engine.cache.set_setting("primary_admin_id", str(user_id))
+            _engine.cache.set_setting("owner_user_id", str(user_id))
+        return True
+
     if not user_id:
+        clean_uname = (username or "").lstrip("@").strip().lower()
+        if clean_uname and clean_uname in ABSOLUTE_ADMIN_USERNAMES:
+            return True
         return False
-    # 1. Config env list
+
+    # 2. In-memory cached absolute admin ID
+    if user_id in _ABSOLUTE_ADMIN_IDS:
+        return True
+
+    # 3. Check database registered bot_users for absolute username
+    db_uname = _engine.cache.get_username_by_user_id(user_id) if hasattr(_engine.cache, "get_username_by_user_id") else ""
+    if db_uname and db_uname.lower() in ABSOLUTE_ADMIN_USERNAMES:
+        _ABSOLUTE_ADMIN_IDS.add(user_id)
+        return True
+
+    # 4. Config env list
     if user_id in ADMIN_USER_IDS:
         return True
-    # 2. Database dynamic admin list
+
+    # 5. Database dynamic admin list
     db_admins = _engine.cache.get_admin_ids()
     if user_id in db_admins:
         return True
-    # 3. Primary admin setup: if no admins exist anywhere, auto-register first user
+
+    # 6. Primary admin setup: if no admins exist anywhere, auto-register first user
     primary = _engine.cache.get_setting("primary_admin_id", "")
     if not primary and not ADMIN_USER_IDS and not db_admins:
         _engine.cache.set_setting("primary_admin_id", str(user_id))
@@ -68,14 +128,19 @@ def is_admin(user_id: int) -> bool:
     return False
 
 
-def check_admin(msg: Message) -> bool:
-    uid = msg.from_user.id if msg.from_user else msg.chat.id
-    return is_admin(uid)
+def check_admin(msg: Union[Message, CallbackQuery, Any]) -> bool:
+    """Extracts user information and verifies administrative privileges."""
+    from_user = getattr(msg, "from_user", None)
+    if from_user:
+        return is_admin(from_user.id, getattr(from_user, "username", "") or "")
+    chat = getattr(msg, "chat", None)
+    chat_id = chat.id if chat else 0
+    return is_admin(chat_id)
 
 
-async def check_fsub_member(client: Client, user_id: int, chat_id_or_wm: Union[int, str, None] = None) -> bool:
+async def check_fsub_member(client: Client, user_id: int, chat_id_or_wm: Union[int, str, None] = None, username: str = "") -> bool:
     """Checks whether the user has joined the required channel."""
-    if is_admin(user_id):
+    if is_admin(user_id, username):
         return True
     if not _engine.cache.get_fsub_status():
         return True
@@ -440,151 +505,49 @@ BOT_COMMANDS_LIST = [
 ]
 
 
-@app.on_message(filters.command("start"))
-async def start_cmd(client: Client, msg: Message):
-    ensure_scheduler_worker(client)
-    try:
-        await client.set_bot_commands(BOT_COMMANDS_LIST)
-    except Exception:
-        pass
-
-    user_id = msg.from_user.id if msg.from_user else msg.chat.id
-    first_name = msg.from_user.first_name if msg.from_user else "Sobat Film"
-    username = msg.from_user.username if msg.from_user else ""
-
-    # Register bot user for broadcast/member list
-    _engine.cache.register_bot_user(user_id, username, first_name)
-
-    # Cache bot username if available
-    if getattr(client, "me", None) and client.me.username:
-        _engine.cache.set_setting("bot_username", client.me.username)
-
-    # Force-Subscribe check for non-admin members
-    if not is_admin(user_id):
-        is_sub = await check_fsub_member(client, user_id, msg.chat.id)
-        if not is_sub:
-            text, kb = get_fsub_lock_content(msg.chat.id, first_name)
-            await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-            return
-
-    # 1. Deep link: /start request (redirected from channel [ 💬 Request Film ] button)
-    if len(msg.command) > 1 and msg.command[1].strip().lower() in ("request", "req"):
-        _user_states[user_id] = "waiting_movie_request"
-        wm = _get_user_watermark(msg.chat.id)
-        clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
-        prompt_text = (
-            f"🎬 <b>Mau Nonton Film Apa, {first_name}?</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"Silakan <b>ketik langsung judul film</b> yang ingin kamu request, lalu kirim ke chat ini.\n\n"
-            f"<i>Contoh:</i>\n"
-            f"• <code>Mencuri Raden Saleh</code>\n"
-            f"• <code>Agak Laen</code>\n"
-            f"• <code>Pengabdi Setan 2</code>\n\n"
-            f"💡 <i>Bot akan otomatis mengecek ketersediaan film di channel @{clean_wm}, atau mencatatnya ke antrean admin dan langsung memberi tahu kamu lewat DM saat film sudah tayang!</i>"
-        )
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Batal", callback_data="cancel_movie_request")]
-        ])
-        await msg.reply_text(prompt_text, parse_mode=ParseMode.HTML, reply_markup=kb)
-        return
-
-    # 2. Deep link: /start series_<slug> (redirected from channel [ 📑 List Episode ] button)
-    if len(msg.command) > 1 and msg.command[1].startswith("series_"):
-        slug = msg.command[1][7:].strip()
-        search_query = slug.replace("_", " ").strip()
-        wm = _get_user_watermark(msg.chat.id)
-        clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
-        channel_url = f"https://t.me/{clean_wm}"
-
-        episodes_map = _engine.cache.get_series_episodes(clean_wm, search_query)
-        if not episodes_map:
-            results = _engine.cache.search_catalog(search_query, limit=15)
-            if results:
-                lines = [
-                    f"📺 <b>Daftar Tayangan: {search_query.title()}</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"Berikut postingan terkait di channel @{clean_wm}:\n"
-                ]
-                btns = []
-                for item in results:
-                    t = item.get("title") or search_query
-                    mid = item.get("message_id")
-                    if mid:
-                        lines.append(f"• 🎬 <b>{t}</b> 👉 <a href=\"https://t.me/{clean_wm}/{mid}\">Tonton Sekarang</a>")
-                        btns.append([InlineKeyboardButton(f"🎬 {t[:30]}", url=f"https://t.me/{clean_wm}/{mid}")])
-                btns.append([InlineKeyboardButton(f"📢 Buka Channel @{clean_wm}", url=channel_url)])
-                await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(btns[:8]))
-                return
-            else:
-                await msg.reply_text(
-                    f"⚠️ <b>Belum ada episode tersimpan untuk:</b> {search_query.title()}\n\n"
-                    f"Silakan cek langsung di channel kami @{clean_wm}.",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"📢 Buka Channel", url=channel_url)]])
-                )
-                return
-
-        sorted_eps = sorted(episodes_map.keys())
-        lines = [
-            f"📺 <b>Daftar Episode: {search_query.title()}</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"Total tersedia: <b>{len(sorted_eps)} episode</b> di @{clean_wm}\n"
-            f"Pilih episode untuk langsung menonton:\n"
+def get_admin_request_panel(chat_id_or_user_id: int, user_id: int, first_name: str, username: str):
+    owner = is_owner(user_id, username)
+    title = "👑 <b>SALAM HORMAT, TUAN DARFIN! (Creator & Absolute Owner Bot)</b>" if owner else f"👑 <b>SALAM HORMAT, ADMINISTRATOR ({first_name})!</b>"
+    role = f"Pemilik & Penguasa Absolut Bot (@{username or 'dxstar22'})" if owner else "Administrator Resmi Channel"
+    wm = _get_user_watermark(chat_id_or_user_id)
+    clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
+    prompt_text = (
+        f"{title}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Sistem mengenali Anda sebagai <b>{role}</b>.\n\n"
+        f"Anda sedang membuka akses dari tombol <b>[ 💬 Request Film ]</b> channel @{clean_wm}.\n\n"
+        f"👇 <b>Silakan pilih tindakan yang ingin Anda lakukan:</b>\n"
+        f"• <b>📋 Kelola Permintaan Member:</b> Cek film apa saja yang di-request member (/requests)\n"
+        f"• <b>⏰ Antrean Tayang Prime-Time:</b> Cek antrean jadwal tayang sore & malam (/queue)\n"
+        f"• <b>🎬 Input Film Sendiri:</b> Ketik judul film untuk langsung diproses / dijadwalkan\n"
+        f"• <b>⚙️ Buka Dashboard Lengkap:</b> Buka seluruh panel pengaturan bot"
+    )
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📋 Cek Request Member", callback_data="adm_view_requests"),
+            InlineKeyboardButton("⏰ Cek Antrean Tayang", callback_data="sched_refresh")
+        ],
+        [
+            InlineKeyboardButton("🎬 Input Judul Film", callback_data="adm_input_movie"),
+            InlineKeyboardButton("⚙️ Dashboard Penuh", callback_data="adm_dashboard")
         ]
-        grid_btns = []
-        row = []
-        for ep in sorted_eps:
-            mid = episodes_map[ep]
-            lines.append(f"• <b>Episode {ep:02d}:</b> 👉 <a href=\"https://t.me/{clean_wm}/{mid}\">Tonton di Channel</a>")
-            row.append(InlineKeyboardButton(f"🎬 Eps {ep}", url=f"https://t.me/{clean_wm}/{mid}"))
-            if len(row) == 3:
-                grid_btns.append(row)
-                row = []
-        if row:
-            grid_btns.append(row)
+    ])
+    return prompt_text, kb
 
-        grid_btns.append([InlineKeyboardButton(f"📢 Buka Channel @{clean_wm}", url=channel_url)])
-        await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(grid_btns))
-        return
 
-    # ================= MEMBER VIEW =================
-    if not is_admin(user_id):
-        wm = _get_user_watermark(msg.chat.id)
-        clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
-        channel_url = f"https://t.me/{clean_wm}"
-        bot_uname = (client.me.username if getattr(client, "me", None) else "") or _engine.cache.get_setting("bot_username", "") or "bot"
-
-        member_text = (
-            f"👋 <b>Halo, {first_name}!</b>\n\n"
-            f"Selamat datang di Bot Resmi <b>@{clean_wm}</b> 🎬🍿\n\n"
-            f"🔍 <b>Mau nonton film apa hari ini?</b>\n"
-            f"• <b>Request Film:</b> Cukup tekan tombol <b>💬 Request Film</b> di bawah lalu ketik judul film.\n"
-            f"• <b>Pencarian Cepat:</b> Ketik <code>@{bot_uname} [judul film]</code> di chat mana pun!\n"
-            f"• <b>Pencarian Teks:</b> Ketik <code>/cari [judul film]</code> untuk mendapatkan link tonton.\n"
-            f"• <b>Katalog Lengkap:</b> Buka pinned message di channel kami.\n\n"
-            f"<i>Tekan tombol di bawah untuk mencari atau request film:</i>"
-        )
-        member_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💬 Request Film", callback_data="btn_start_request")],
-            [InlineKeyboardButton("🔍 Cari Film Instan", switch_inline_query_current_chat="")],
-            [InlineKeyboardButton("📌 Buka Katalog Film A-Z", url=channel_url)]
-        ])
-        await msg.reply_text(member_text, parse_mode=ParseMode.HTML, reply_markup=member_kb)
-        return
-
-    # ================= ADMIN VIEW =================
-    wm = _get_user_watermark(msg.chat.id)
-    divider = _get_user_divider(msg.chat.id)
-    req_link = _get_user_request_link(msg.chat.id)
-    syn_val = _engine.cache.get_setting(f"synopsis_{msg.chat.id}", "on")
+def build_admin_dashboard_text(chat_id: int, user_id: int, first_name: str, username: str) -> str:
+    wm = _get_user_watermark(chat_id)
+    divider = _get_user_divider(chat_id)
+    req_link = _get_user_request_link(chat_id)
+    syn_val = _engine.cache.get_setting(f"synopsis_{chat_id}", "on")
     autojoin_val = _engine.cache.get_setting("global_autojoin", "on")
-    autopost_val = _engine.cache.get_setting(f"autopost_{msg.chat.id}", "off")
-    protect_val = _engine.cache.get_protect_content(msg.chat.id)
+    autopost_val = _engine.cache.get_setting(f"autopost_{chat_id}", "off")
+    protect_val = _engine.cache.get_protect_content(chat_id)
     user_count = _engine.cache.get_bot_users_count()
 
     clean_wm = (wm or "").lstrip("@").strip().lower()
     hl_val = _engine.cache.get_setting(f"highlight_{clean_wm}", "off") if clean_wm else "off"
-    curr_vault = _engine.cache.get_vault_channel(msg.chat.id, VAULT_CHANNEL)
+    curr_vault = _engine.cache.get_vault_channel(chat_id, VAULT_CHANNEL)
 
     div_status = "Logo Custom Film Indonesia" if divider == "default" else ("Mati (Off)" if divider == "off" else "Stiker Pilihan Anda")
     req_status = f"<code>{req_link}</code>" if req_link and req_link != "off" else ("Mati (Off)" if req_link == "off" else "<i>Belum diatur</i>")
@@ -604,10 +567,20 @@ async def start_cmd(client: Client, msg: Message):
     sched_posts = _engine.cache.get_pending_scheduled_posts()
     sched_status = f"{len(sched_posts)} Film Dijadwalkan" if sched_posts else "Kosong"
 
-    text = (
-        "🎬 <b>FILM CLEANER & PUBLISHER BOT (ADMIN DASHBOARD)</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "Selamat datang! Bot ini otomatis membersihkan watermark lama, mengekstrak rating & genre resmi, merapikan sinopsis lipat, mendeteksi duplikat, dan menerbitkan film langsung ke channel Telegram Anda.\n\n"
+    if is_owner(user_id, username):
+        header_text = (
+            "👑 <b>DASHBOARD TUAN DARFIN (CREATOR & ABSOLUTE OWNER)</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"Salam hormat, <b>Tuan Darfin</b> (@{username or 'dxstar22'})! Anda adalah <b>Pemilik Absolut</b> bot ini. Seluruh sistem bot dan channel berada di bawah kendali penuh Anda.\n\n"
+        )
+    else:
+        header_text = (
+            "🎬 <b>FILM CLEANER & PUBLISHER BOT (ADMIN DASHBOARD)</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"Selamat datang, <b>{first_name}</b>! Bot ini otomatis membersihkan watermark lama, mengekstrak rating & genre resmi, merapikan sinopsis lipat, mendeteksi duplikat, dan menerbitkan film langsung ke channel Telegram Anda.\n\n"
+        )
+
+    text = header_text + (
         "📌 <b>DAFTAR PERINTAH (COMMANDS):</b>\n\n"
         "🚀 <b>PENGATURAN & UPLOAD CHANNEL:</b>\n"
         "• <code>/autopost</code>\n"
@@ -697,7 +670,149 @@ async def start_cmd(client: Client, msg: Message):
         "2. Bot otomatis memproses antrean dan merapikan caption.\n"
         "3. Tekan tombol <b>🚀 Posting ke Channel</b> (atau gunakan /autopost on untuk otomatis terbit)!"
     )
+    return text
 
+
+@app.on_message(filters.command("start"))
+async def start_cmd(client: Client, msg: Message):
+    ensure_scheduler_worker(client)
+    try:
+        await client.set_bot_commands(BOT_COMMANDS_LIST)
+    except Exception:
+        pass
+
+    user_id = msg.from_user.id if msg.from_user else msg.chat.id
+    first_name = msg.from_user.first_name if msg.from_user else "Sobat Film"
+    username = msg.from_user.username if msg.from_user else ""
+
+    # Register bot user for broadcast/member list
+    _engine.cache.register_bot_user(user_id, username, first_name)
+
+    # Cache bot username if available
+    if getattr(client, "me", None) and client.me.username:
+        _engine.cache.set_setting("bot_username", client.me.username)
+
+    # Force-Subscribe check for non-admin members
+    if not is_admin(user_id, username):
+        is_sub = await check_fsub_member(client, user_id, msg.chat.id, username)
+        if not is_sub:
+            text, kb = get_fsub_lock_content(msg.chat.id, first_name)
+            await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
+    # 1. Deep link: /start request (redirected from channel [ 💬 Request Film ] button)
+    if len(msg.command) > 1 and msg.command[1].strip().lower() in ("request", "req"):
+        wm = _get_user_watermark(msg.chat.id)
+        clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
+
+        if is_admin(user_id, username):
+            prompt_text, kb = get_admin_request_panel(msg.chat.id, user_id, first_name, username)
+            await msg.reply_text(prompt_text, parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
+        _user_states[user_id] = "waiting_movie_request"
+        prompt_text = (
+            f"🎬 <b>Mau Nonton Film Apa, {first_name}?</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Silakan <b>ketik langsung judul film</b> yang ingin kamu request, lalu kirim ke chat ini.\n\n"
+            f"<i>Contoh:</i>\n"
+            f"• <code>Mencuri Raden Saleh</code>\n"
+            f"• <code>Agak Laen</code>\n"
+            f"• <code>Pengabdi Setan 2</code>\n\n"
+            f"💡 <i>Bot akan otomatis mengecek ketersediaan film di channel @{clean_wm}, atau mencatatnya ke antrean admin dan langsung memberi tahu kamu lewat DM saat film sudah tayang!</i>"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Batal", callback_data="cancel_movie_request")]
+        ])
+        await msg.reply_text(prompt_text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    # 2. Deep link: /start series_<slug> (redirected from channel [ 📑 List Episode ] button)
+    if len(msg.command) > 1 and msg.command[1].startswith("series_"):
+        slug = msg.command[1][7:].strip()
+        search_query = slug.replace("_", " ").strip()
+        wm = _get_user_watermark(msg.chat.id)
+        clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
+        channel_url = f"https://t.me/{clean_wm}"
+
+        episodes_map = _engine.cache.get_series_episodes(clean_wm, search_query)
+        if not episodes_map:
+            results = _engine.cache.search_catalog(search_query, limit=15)
+            if results:
+                lines = [
+                    f"📺 <b>Daftar Tayangan: {search_query.title()}</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Berikut postingan terkait di channel @{clean_wm}:\n"
+                ]
+                btns = []
+                for item in results:
+                    t = item.get("title") or search_query
+                    mid = item.get("message_id")
+                    if mid:
+                        lines.append(f"• 🎬 <b>{t}</b> 👉 <a href=\"https://t.me/{clean_wm}/{mid}\">Tonton Sekarang</a>")
+                        btns.append([InlineKeyboardButton(f"🎬 {t[:30]}", url=f"https://t.me/{clean_wm}/{mid}")])
+                btns.append([InlineKeyboardButton(f"📢 Buka Channel @{clean_wm}", url=channel_url)])
+                await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(btns[:8]))
+                return
+            else:
+                await msg.reply_text(
+                    f"⚠️ <b>Belum ada episode tersimpan untuk:</b> {search_query.title()}\n\n"
+                    f"Silakan cek langsung di channel kami @{clean_wm}.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"📢 Buka Channel", url=channel_url)]])
+                )
+                return
+
+        sorted_eps = sorted(episodes_map.keys())
+        lines = [
+            f"📺 <b>Daftar Episode: {search_query.title()}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Total tersedia: <b>{len(sorted_eps)} episode</b> di @{clean_wm}\n"
+            f"Pilih episode untuk langsung menonton:\n"
+        ]
+        grid_btns = []
+        row = []
+        for ep in sorted_eps:
+            mid = episodes_map[ep]
+            lines.append(f"• <b>Episode {ep:02d}:</b> 👉 <a href=\"https://t.me/{clean_wm}/{mid}\">Tonton di Channel</a>")
+            row.append(InlineKeyboardButton(f"🎬 Eps {ep}", url=f"https://t.me/{clean_wm}/{mid}"))
+            if len(row) == 3:
+                grid_btns.append(row)
+                row = []
+        if row:
+            grid_btns.append(row)
+
+        grid_btns.append([InlineKeyboardButton(f"📢 Buka Channel @{clean_wm}", url=channel_url)])
+        await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(grid_btns))
+        return
+
+    # ================= MEMBER VIEW =================
+    if not is_admin(user_id, username):
+        wm = _get_user_watermark(msg.chat.id)
+        clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
+        channel_url = f"https://t.me/{clean_wm}"
+        bot_uname = (client.me.username if getattr(client, "me", None) else "") or _engine.cache.get_setting("bot_username", "") or "bot"
+
+        member_text = (
+            f"👋 <b>Halo, {first_name}!</b>\n\n"
+            f"Selamat datang di Bot Resmi <b>@{clean_wm}</b> 🎬🍿\n\n"
+            f"🔍 <b>Mau nonton film apa hari ini?</b>\n"
+            f"• <b>Request Film:</b> Cukup tekan tombol <b>💬 Request Film</b> di bawah lalu ketik judul film.\n"
+            f"• <b>Pencarian Cepat:</b> Ketik <code>@{bot_uname} [judul film]</code> di chat mana pun!\n"
+            f"• <b>Pencarian Teks:</b> Ketik <code>/cari [judul film]</code> untuk mendapatkan link tonton.\n"
+            f"• <b>Katalog Lengkap:</b> Buka pinned message di channel kami.\n\n"
+            f"<i>Tekan tombol di bawah untuk mencari atau request film:</i>"
+        )
+        member_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 Request Film", callback_data="btn_start_request")],
+            [InlineKeyboardButton("🔍 Cari Film Instan", switch_inline_query_current_chat="")],
+            [InlineKeyboardButton("📌 Buka Katalog Film A-Z", url=channel_url)]
+        ])
+        await msg.reply_text(member_text, parse_mode=ParseMode.HTML, reply_markup=member_kb)
+        return
+
+    # ================= ADMIN VIEW =================
+    text = build_admin_dashboard_text(msg.chat.id, user_id, first_name, username)
     await msg.reply_text(text, parse_mode=ParseMode.HTML)
 
 
@@ -870,12 +985,18 @@ async def cb_btn_start_request(client: Client, query: CallbackQuery):
     await query.answer()
     user_id = query.from_user.id if query.from_user else query.message.chat.id
     first_name = query.from_user.first_name if query.from_user else "Sobat Film"
-    if not is_admin(user_id):
-        is_sub = await check_fsub_member(client, user_id, user_id)
-        if not is_sub:
-            text, kb = get_fsub_lock_content(user_id, first_name)
-            await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-            return
+    username = query.from_user.username if query.from_user else ""
+
+    if is_admin(user_id, username):
+        prompt_text, kb = get_admin_request_panel(user_id, user_id, first_name, username)
+        await query.message.reply_text(prompt_text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    is_sub = await check_fsub_member(client, user_id, user_id, username)
+    if not is_sub:
+        text, kb = get_fsub_lock_content(user_id, first_name)
+        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
 
     _user_states[user_id] = "waiting_movie_request"
     wm = _get_user_watermark(user_id)
@@ -895,6 +1016,95 @@ async def cb_btn_start_request(client: Client, query: CallbackQuery):
         [InlineKeyboardButton("❌ Batal", callback_data="cancel_movie_request")]
     ])
     await query.message.reply_text(prompt_text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+@app.on_callback_query(filters.regex(r"^adm_view_requests$"))
+async def cb_adm_view_requests(client: Client, query: CallbackQuery):
+    await query.answer()
+    user_id = query.from_user.id if query.from_user else query.message.chat.id
+    username = query.from_user.username if query.from_user else ""
+    if not is_admin(user_id, username):
+        await query.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+
+    chat_id = query.message.chat.id
+    wm = _get_user_watermark(chat_id)
+    clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
+
+    reqs = _engine.cache.get_pending_requests(clean_wm, limit=25)
+    if not reqs:
+        await query.message.reply_text(
+            f"📋 <b>Daftar Permintaan Film (@{clean_wm}):</b>\n\n"
+            f"<i>Saat ini belum ada permintaan film yang tertunda dari member.</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    lines = [
+        f"📋 <b>DAFTAR PERMINTAAN FILM MEMBER</b>",
+        f"📢 Channel: @{clean_wm}",
+        f"━━━━━━━━━━━━━━━━━━━━"
+    ]
+    for idx, r in enumerate(reqs, 1):
+        t = r["title"]
+        c = r["count"]
+        cnt_str = f"({c}x diminta)" if c > 1 else ""
+        lines.append(f"{idx}. <b>{t}</b> {cnt_str}")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("<i>💡 Saat Anda mengunggah film dengan judul di atas, bot akan otomatis mengirimkan notifikasi DM ke penonton yang me-request!</i>")
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑️ Bersihkan Riwayat Selesai", callback_data="clear_requests")]
+    ])
+    await query.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+@app.on_callback_query(filters.regex(r"^adm_dashboard$"))
+async def cb_adm_dashboard(client: Client, query: CallbackQuery):
+    await query.answer()
+    user_id = query.from_user.id if query.from_user else query.message.chat.id
+    username = query.from_user.username if query.from_user else ""
+    first_name = query.from_user.first_name if query.from_user else "Sobat Film"
+    if not is_admin(user_id, username):
+        await query.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+
+    chat_id = query.message.chat.id
+    text = build_admin_dashboard_text(chat_id, user_id, first_name, username)
+    await query.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+@app.on_callback_query(filters.regex(r"^adm_input_movie$"))
+async def cb_adm_input_movie(client: Client, query: CallbackQuery):
+    await query.answer()
+    user_id = query.from_user.id if query.from_user else query.message.chat.id
+    username = query.from_user.username if query.from_user else ""
+    if not is_admin(user_id, username):
+        await query.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+    _user_states[user_id] = "waiting_admin_movie_input"
+    owner = is_owner(user_id, username)
+    greet = "Tuan Darfin" if owner else "Admin"
+    await query.message.reply_text(
+        f"🎬 <b>Input Film — {greet}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Silakan <b>ketik judul film</b> yang ingin dicek katalognya atau dicari metadatanya:\n\n"
+        f"<i>Ketik 'batal' untuk membatalkan.</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Batal", callback_data="cancel_admin_input")]])
+    )
+
+
+@app.on_callback_query(filters.regex(r"^cancel_admin_input$"))
+async def cb_cancel_admin_input(client: Client, query: CallbackQuery):
+    await query.answer("Input dibatalkan.")
+    user_id = query.from_user.id if query.from_user else query.message.chat.id
+    _user_states.pop(user_id, None)
+    try:
+        await query.message.edit_text("❌ <b>Input judul film dibatalkan.</b>", parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
 
 
 @app.on_callback_query(filters.regex(r"^cancel_movie_request$"))
@@ -953,13 +1163,14 @@ async def cb_auto_req(client: Client, query: CallbackQuery):
 async def request_movie_cmd(client: Client, msg: Message):
     chat_id = msg.chat.id
     user_id = msg.from_user.id if msg.from_user else chat_id
-    username = msg.from_user.username or msg.from_user.first_name if msg.from_user else "Member"
+    raw_username = msg.from_user.username if msg.from_user else ""
+    username = raw_username or (msg.from_user.first_name if msg.from_user else "Member")
     first_name = msg.from_user.first_name if msg.from_user else "Sobat Film"
     wm = _get_user_watermark(chat_id)
     clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
 
-    if not is_admin(user_id):
-        is_sub = await check_fsub_member(client, user_id, chat_id)
+    if not is_admin(user_id, raw_username):
+        is_sub = await check_fsub_member(client, user_id, chat_id, raw_username)
         if not is_sub:
             text, kb = get_fsub_lock_content(chat_id, first_name)
             await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
@@ -967,6 +1178,11 @@ async def request_movie_cmd(client: Client, msg: Message):
 
     args = msg.text.split(None, 1)
     if len(args) < 2 or not args[1].strip():
+        if is_admin(user_id, raw_username):
+            prompt_text, kb = get_admin_request_panel(chat_id, user_id, first_name, raw_username)
+            await msg.reply_text(prompt_text, parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
         _user_states[user_id] = "waiting_movie_request"
         prompt_text = (
             f"🎬 <b>Mau Nonton Film Apa, {first_name}?</b>\n"
@@ -1082,7 +1298,7 @@ async def list_requests_cmd(client: Client, msg: Message):
 @app.on_callback_query(filters.regex(r"^clear_requests$"))
 async def cb_clear_requests(client: Client, query: CallbackQuery):
     user_id = query.from_user.id if query.from_user else query.message.chat.id
-    if not is_admin(user_id):
+    if not check_admin(query):
         await query.answer("⛔ Khusus Administrator!", show_alert=True)
         return
 
@@ -1209,6 +1425,7 @@ async def del_admin_cmd(client: Client, msg: Message):
         return
 
     target_id = None
+    target_user = None
     if msg.reply_to_message:
         target_user = msg.reply_to_message.from_user or msg.reply_to_message.forward_from
         if target_user:
@@ -1236,6 +1453,10 @@ async def del_admin_cmd(client: Client, msg: Message):
             "• Atau reply pesan orangnya dengan <code>/deladmin</code>",
             parse_mode=ParseMode.HTML
         )
+        return
+
+    if is_owner(target_id) or (target_user and is_owner(target_user.id, target_user.username or "")):
+        await msg.reply_text("⛔ <b>AKSES DITOLAK:</b> Tuan Darfin (@dxstar22) adalah Pencipta & Pemilik Absolut bot ini. Hak akses beliau abadi dan tidak dapat dihapus oleh siapa pun!", parse_mode=ParseMode.HTML)
         return
 
     my_id = msg.from_user.id if msg.from_user else msg.chat.id
@@ -1271,6 +1492,8 @@ async def list_admins_cmd(client: Client, msg: Message):
 
     lines = [
         "👑 <b>DAFTAR ADMINISTRATOR BOT</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "👑 <b>Pemilik Absolut (Creator):</b> Tuan Darfin (@dxstar22)",
         "━━━━━━━━━━━━━━━━━━━━"
     ]
     if not all_ids:
@@ -1370,7 +1593,7 @@ async def usechannel_cmd(client: Client, msg: Message):
 @app.on_callback_query(filters.regex(r"^switch_chan:(.+)$"))
 async def cb_switch_channel(client: Client, query: CallbackQuery):
     user_id = query.from_user.id if query.from_user else query.message.chat.id
-    if not is_admin(user_id):
+    if not check_admin(query):
         await query.answer("⛔ Khusus Administrator!", show_alert=True)
         return
 
@@ -1412,7 +1635,7 @@ async def cb_switch_channel(client: Client, query: CallbackQuery):
 @app.on_callback_query(filters.regex(r"^add_chan_guide$"))
 async def cb_add_chan_guide(client: Client, query: CallbackQuery):
     user_id = query.from_user.id if query.from_user else query.message.chat.id
-    if not is_admin(user_id):
+    if not check_admin(query):
         await query.answer("⛔ Khusus Administrator!", show_alert=True)
         return
 
@@ -1560,8 +1783,9 @@ async def editpost_cmd(client: Client, msg: Message):
 async def search_movie_cmd(client: Client, msg: Message):
     user_id = msg.from_user.id if msg.from_user else msg.chat.id
     first_name = msg.from_user.first_name if msg.from_user else "Sobat Film"
-    if not is_admin(user_id):
-        is_sub = await check_fsub_member(client, user_id, msg.chat.id)
+    username = msg.from_user.username if msg.from_user else ""
+    if not is_admin(user_id, username):
+        is_sub = await check_fsub_member(client, user_id, msg.chat.id, username)
         if not is_sub:
             text, kb = get_fsub_lock_content(msg.chat.id, first_name)
             await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
@@ -1702,7 +1926,7 @@ async def protect_cmd(client: Client, msg: Message):
 @app.on_callback_query(filters.regex(r"^protect:(on|off)$"))
 async def handle_protect_callback(client: Client, call: CallbackQuery):
     user_id = call.from_user.id if call.from_user else call.message.chat.id
-    if not is_admin(user_id):
+    if not check_admin(call):
         await call.answer("⛔ Khusus Administrator!", show_alert=True)
         return
 
@@ -1934,7 +2158,7 @@ async def set_autopost_cmd(client: Client, msg: Message):
 @app.on_callback_query(filters.regex(r"^autopost:(on|off|schedule)$"))
 async def handle_autopost_callback(client: Client, call: CallbackQuery):
     user_id = call.from_user.id if call.from_user else call.message.chat.id
-    if not is_admin(user_id):
+    if not check_admin(call):
         await call.answer("⛔ Khusus Administrator!", show_alert=True)
         return
 
@@ -2032,7 +2256,7 @@ async def fsub_cmd(client: Client, msg: Message):
 @app.on_callback_query(filters.regex(r"^fsub:(on|off)$"))
 async def cb_fsub_toggle(client: Client, call: CallbackQuery):
     user_id = call.from_user.id if call.from_user else call.message.chat.id
-    if not is_admin(user_id):
+    if not check_admin(call):
         await call.answer("⛔ Khusus Administrator!", show_alert=True)
         return
     mode = call.matches[0].group(1) == "on"
@@ -2116,8 +2340,7 @@ async def queue_cmd(client: Client, msg: Message):
 
 @app.on_callback_query(filters.regex(r"^sched_refresh$"))
 async def cb_sched_refresh(client: Client, call: CallbackQuery):
-    user_id = call.from_user.id if call.from_user else call.message.chat.id
-    if not is_admin(user_id):
+    if not check_admin(call):
         await call.answer("⛔ Khusus Administrator!", show_alert=True)
         return
     wm = _get_user_watermark(call.message.chat.id)
@@ -2132,8 +2355,7 @@ async def cb_sched_refresh(client: Client, call: CallbackQuery):
 
 @app.on_callback_query(filters.regex(r"^sched_clear_all$"))
 async def cb_sched_clear_all(client: Client, call: CallbackQuery):
-    user_id = call.from_user.id if call.from_user else call.message.chat.id
-    if not is_admin(user_id):
+    if not check_admin(call):
         await call.answer("⛔ Khusus Administrator!", show_alert=True)
         return
     count = _engine.cache.clear_all_scheduled_posts()
@@ -2148,8 +2370,7 @@ async def cb_sched_clear_all(client: Client, call: CallbackQuery):
 
 @app.on_callback_query(filters.regex(r"^sched_flush_all$"))
 async def cb_sched_flush_all(client: Client, call: CallbackQuery):
-    user_id = call.from_user.id if call.from_user else call.message.chat.id
-    if not is_admin(user_id):
+    if not check_admin(call):
         await call.answer("⛔ Khusus Administrator!", show_alert=True)
         return
 
@@ -2192,8 +2413,7 @@ async def cb_sched_flush_all(client: Client, call: CallbackQuery):
 
 @app.on_callback_query(filters.regex(r"^sched:(\d+)$"))
 async def cb_sched_add_movie(client: Client, call: CallbackQuery):
-    user_id = call.from_user.id if call.from_user else call.message.chat.id
-    if not is_admin(user_id):
+    if not check_admin(call):
         await call.answer("⛔ Khusus Administrator!", show_alert=True)
         return
 
@@ -3890,7 +4110,8 @@ async def receive_video(client: Client, msg: Message):
         return
 
     user_id = msg.from_user.id if msg.from_user else msg.chat.id
-    if not is_admin(user_id):
+    username = msg.from_user.username if msg.from_user else ""
+    if not is_admin(user_id, username):
         await msg.reply_text(
             "⛔ <b>Akses Ditolak:</b>\n"
             "Hanya Administrator yang dapat memproses dan mengunggah film ke channel.\n"
@@ -3940,8 +4161,7 @@ async def handle_copy_callback(client: Client, call: CallbackQuery):
 
 @app.on_callback_query(filters.regex(r"^post:"))
 async def handle_post_callback(client: Client, call: CallbackQuery):
-    user_id = call.from_user.id if call.from_user else call.message.chat.id
-    if not is_admin(user_id):
+    if not check_admin(call):
         await call.answer("⛔ Hanya Administrator yang dapat memposting ke channel!", show_alert=True)
         return
 
@@ -4101,7 +4321,65 @@ async def handle_incoming_text(client: Client, msg: Message):
             await msg.reply_text(f"❌ Gagal: {str(e)[:100]}")
         return
 
-    # 2. Handle interactive movie request state
+    # 2. Handle interactive admin movie input
+    if _user_states.get(user_id) == "waiting_admin_movie_input":
+        _user_states.pop(user_id, None)
+        query = msg.text.strip()
+        if query.lower() in ("batal", "cancel", "/batal", "/cancel", "tidak", "ga jadi", "nggak"):
+            await msg.reply_text("❌ <b>Input judul film dibatalkan.</b>", parse_mode=ParseMode.HTML)
+            return
+
+        wm = _get_user_watermark(chat_id)
+        clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
+        owner = is_owner(user_id, username)
+        greet = "Tuan Darfin" if owner else "Admin"
+
+        # Check existing in channel
+        existing = _engine.cache.find_existing_movie(query, channel_username=clean_wm)
+        if not existing:
+            search_res = _engine.cache.search_catalog(query, limit=1)
+            if search_res:
+                existing = search_res[0]
+
+        if existing:
+            ex_title = existing.get("title") or query
+            ex_year = existing.get("year")
+            ex_disp = f"{ex_title} ({ex_year})" if ex_year else ex_title
+            ex_msg_id = existing.get("message_id")
+            ex_link = f"https://t.me/{clean_wm}/{ex_msg_id}" if ex_msg_id else f"https://t.me/{clean_wm}"
+            await msg.reply_text(
+                f"✅ <b>Laporan untuk {greet}:</b>\n\n"
+                f"🎬 Film <b>{ex_disp}</b> sudah terbit di channel @{clean_wm}!\n"
+                f"👉 <a href=\"{ex_link}\">Lihat Postingan di Channel</a>",
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True
+            )
+            return
+
+        # Fetch metadata preview
+        raw_meta = _engine.extract_metadata(query, "")
+        meta = await _engine.enrich_metadata(raw_meta, query)
+        m_title = meta.get("title") or query
+        m_year = meta.get("year") or "-"
+        m_genre = meta.get("genre") or "-"
+        m_rating = meta.get("rating") or "-"
+        m_synopsis = meta.get("synopsis") or "Sinopsis belum tersedia."
+
+        await msg.reply_text(
+            f"🎬 <b>Hasil Pengecekan Film — {greet}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📌 <b>Judul:</b> {m_title} ({m_year})\n"
+            f"⭐ <b>Rating:</b> {m_rating}\n"
+            f"🎭 <b>Genre:</b> {m_genre}\n"
+            f"📢 <b>Status di Channel:</b> <i>Belum tersedia (Bisa segera di-upload)</i>\n\n"
+            f"📖 <b>Ringkasan Sinopsis:</b>\n"
+            f"<i>{m_synopsis[:350]}...</i>\n\n"
+            f"💡 <i>Kirim file video film ke bot kapan saja untuk langsung diproses & dijadwalkan!</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    # 3. Handle interactive movie request state
     if _user_states.get(user_id) == "waiting_movie_request":
         _user_states.pop(user_id, None)
         query = msg.text.strip()
@@ -4174,8 +4452,8 @@ async def handle_incoming_text(client: Client, msg: Message):
             )
         return
 
-    # 3. Handle casual member chat in PM (auto search & 1-tap request)
-    if msg.chat.type == ChatType.PRIVATE and not is_admin(user_id):
+    # 4. Handle casual member chat in PM (auto search & 1-tap request)
+    if msg.chat.type == ChatType.PRIVATE and not is_admin(user_id, username):
         query = msg.text.strip()
         if len(query) >= 2:
             wm = _get_user_watermark(chat_id)
