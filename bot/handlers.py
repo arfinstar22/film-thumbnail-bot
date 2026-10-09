@@ -463,27 +463,33 @@ async def restore_queue_from_telegram_if_needed(client: Client, force: bool = Fa
 
         owner_id = 1166479771
         imported = 0
-        async for m in client.get_chat_history(owner_id, limit=60):
-            if m.document and m.document.file_name == "antrean_backup.json":
-                temp_file = await m.download()
-                try:
-                    with open(temp_file, "r", encoding="utf-8") as f:
-                        content = f.read()
-                    imported = _engine.cache.import_scheduled_posts_json(content)
-                    if imported > 0:
-                        logger.info(f"Successfully restored {imported} scheduled posts from Telegram cloud backup JSON!")
-                        break
-                finally:
+        try:
+            async for m in client.get_chat_history(owner_id, limit=60):
+                if m.document and m.document.file_name == "antrean_backup.json":
+                    temp_file = await m.download()
                     try:
-                        os.remove(temp_file)
-                    except Exception:
-                        pass
+                        with open(temp_file, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        imported = _engine.cache.import_scheduled_posts_json(content)
+                        if imported > 0:
+                            logger.info(f"Successfully restored {imported} scheduled posts from Telegram cloud backup JSON!")
+                            break
+                    finally:
+                        try:
+                            os.remove(temp_file)
+                        except Exception:
+                            pass
+        except Exception as che:
+            logger.debug(f"Chat history backup lookup skipped (bots cannot read private chats): {che}")
 
         # If backup file didn't exist yet, fall back to scanning chat history for unposted video previews
         if imported == 0:
-            imported = await recover_queue_from_chat(client, owner_id)
-            if imported > 0:
-                logger.info(f"Successfully recovered {imported} scheduled posts from owner chat history scan!")
+            try:
+                imported = await recover_queue_from_chat(client, owner_id)
+                if imported > 0:
+                    logger.info(f"Successfully recovered {imported} scheduled posts from owner chat history scan!")
+            except Exception as rce:
+                logger.debug(f"Recover queue from chat skipped: {rce}")
 
         if imported > 0:
             try:
@@ -4736,6 +4742,8 @@ async def _process_video_task(client: Client, msg: Message):
 
     syn_enabled = _engine.cache.get_setting(f"synopsis_{chat_id}", "on") != "off"
     result = await _engine.process(filename, extra=extra, watermark=wm, enable_synopsis=syn_enabled)
+    caption = result["caption"]
+
     # Clean up previous job's temp directory if one exists
     old_job = _jobs.get(chat_id)
     if old_job and old_job.get("temp_dir") and os.path.isdir(old_job["temp_dir"]):
