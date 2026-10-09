@@ -72,6 +72,9 @@ class ThumbnailGenerator:
         rgb_img.paste(base_img, mask=base_img.split()[3] if base_img.mode == "RGBA" else None)
 
         if output_path:
+            out_dir = os.path.dirname(os.path.abspath(output_path))
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
             rgb_img.save(output_path, "JPEG", quality=90, optimize=True)
 
         return rgb_img

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from typing import Any, Dict, Optional
 
 from .parser import FilenameParser
@@ -60,14 +61,20 @@ class MetadataEngine:
             if rate_res:
                 verified_t = rate_res.get("verified_title")
                 if verified_t and verified_t.lower() != title.lower():
-                    logger.info(f"Verified movie title corrected: '{title}' -> '{verified_t}'")
-                    title = verified_t
-                    metadata["title"] = title
-                    if not syn_res and enable_synopsis:
-                        try:
-                            syn_res = await self.synopsis_service.get_synopsis(title, year, is_series=is_series, genre=metadata.get("genre"))
-                        except Exception:
-                            pass
+                    clean_orig = re.sub(r"[^\w\s]", "", title).lower()
+                    clean_ver = re.sub(r"[^\w\s]", "", verified_t).lower()
+                    # Only adopt if verified_t is a substring of original title (stripping junk prefix)
+                    # or if title had low confidence. Do NOT convert original local titles to English translations.
+                    conf = metadata.get("confidence", {}).get("title", 1.0)
+                    if clean_ver in clean_orig or not clean_orig or conf < 0.6:
+                        logger.info(f"Verified movie title corrected: '{title}' -> '{verified_t}'")
+                        title = verified_t
+                        metadata["title"] = title
+                        if not syn_res and enable_synopsis:
+                            try:
+                                syn_res = await self.synopsis_service.get_synopsis(title, year, is_series=is_series, genre=metadata.get("genre"))
+                            except Exception:
+                                pass
 
                 if rate_res.get("rating") and not metadata.get("rating"):
                     metadata["rating"] = rate_res["rating"]

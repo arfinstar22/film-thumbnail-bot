@@ -453,6 +453,10 @@ async def recover_queue_from_chat(client: Client, chat_id: int) -> int:
 async def restore_queue_from_telegram_if_needed(client: Client, force: bool = False):
     """Restores pending scheduled posts from Telegram cloud backup or chat history if local database is empty after restart."""
     try:
+        # If Supabase cloud sync is active, queue is already hydrated cleanly on startup
+        if hasattr(_engine.cache, "cloud") and _engine.cache.cloud.is_enabled:
+            return 0
+
         pending = _engine.cache.get_pending_scheduled_posts()
         if pending and not force:
             return 0
@@ -4732,7 +4736,10 @@ async def _process_video_task(client: Client, msg: Message):
 
     syn_enabled = _engine.cache.get_setting(f"synopsis_{chat_id}", "on") != "off"
     result = await _engine.process(filename, extra=extra, watermark=wm, enable_synopsis=syn_enabled)
-    caption = result["caption"]
+    # Clean up previous job's temp directory if one exists
+    old_job = _jobs.get(chat_id)
+    if old_job and old_job.get("temp_dir") and os.path.isdir(old_job["temp_dir"]):
+        shutil.rmtree(old_job["temp_dir"], ignore_errors=True)
 
     tmp = tempfile.mkdtemp()
     thumb_path = None
@@ -4915,7 +4922,6 @@ async def _process_video_task(client: Client, msg: Message):
     except Exception as e:
         logger.exception("Send video error")
         await msg.reply_text(f"❌ Gagal: {str(e)[:100]}")
-    finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -5119,7 +5125,11 @@ async def handle_setthumb_choice(client: Client, call: CallbackQuery):
 
     wm = job.get("watermark") or _get_user_watermark(chat_id)
     title = job.get("metadata", {}).get("title") or job.get("filename") or "Film"
-    tmp = job.get("temp_dir") or tempfile.mkdtemp()
+    tmp = job.get("temp_dir")
+    if not tmp or not os.path.isdir(tmp):
+        tmp = tempfile.mkdtemp()
+        job["temp_dir"] = tmp
+    os.makedirs(tmp, exist_ok=True)
     new_thumb = os.path.join(tmp, f"thumb_{choice}.jpg")
 
     if choice == "poster":
@@ -5164,7 +5174,11 @@ async def handle_custom_photo_thumbnail(client: Client, msg: Message):
 
     status = await msg.reply_text("⏳ <i>Sedang mengunduh foto & menambahkan watermark badge...</i>", parse_mode=ParseMode.HTML)
     try:
-        tmp = job.get("temp_dir") or tempfile.mkdtemp()
+        tmp = job.get("temp_dir")
+        if not tmp or not os.path.isdir(tmp):
+            tmp = tempfile.mkdtemp()
+            job["temp_dir"] = tmp
+        os.makedirs(tmp, exist_ok=True)
         photo_raw = os.path.join(tmp, "custom_photo_raw.jpg")
         await client.download_media(msg.photo.file_id, file_name=photo_raw)
 
