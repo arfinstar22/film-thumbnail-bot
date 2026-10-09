@@ -718,10 +718,13 @@ def get_caption_kb(message_id: int, watermark: str):
         ],
         [
             InlineKeyboardButton("⏰ Jadwal Prime-Time", callback_data=f"sched:{message_id}"),
-            InlineKeyboardButton("✏️ Edit Caption", callback_data=f"edit:{message_id}")
+            InlineKeyboardButton("🎨 Banner Promosi", callback_data=f"banner:{message_id}")
         ],
         [
-            InlineKeyboardButton("📋 Salin Teks", callback_data=f"copy:{message_id}"),
+            InlineKeyboardButton("✏️ Edit Caption", callback_data=f"edit:{message_id}"),
+            InlineKeyboardButton("📋 Salin Teks", callback_data=f"copy:{message_id}")
+        ],
+        [
             InlineKeyboardButton("🔄 Format Ulang", callback_data=f"info:{message_id}")
         ]
     ])
@@ -759,6 +762,8 @@ BOT_COMMANDS_LIST = [
     BotCommand("deladmin", "Hapus admin dari bot"),
     BotCommand("admins", "Daftar admin bot yang aktif"),
     BotCommand("protect", "Aktif/matikan proteksi konten (Anti-Forward/Save)"),
+    BotCommand("banner", "Buat gambar banner promosi sinematik film"),
+    BotCommand("setbanner", "Atur banner otomatis terbit (on/off)"),
     BotCommand("broadcast", "Kirim pengumuman ke seluruh member bot")
 ]
 
@@ -2376,6 +2381,122 @@ async def handle_protect_callback(client: Client, call: CallbackQuery):
         await call.message.edit_text(prompt, parse_mode=ParseMode.HTML, reply_markup=kb)
     except Exception:
         pass
+
+
+@app.on_message(filters.command(["banner", "poster"]))
+async def banner_cmd(client: Client, msg: Message):
+    chat_id = msg.chat.id
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
+    text = (msg.text or "").strip()
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await msg.reply_text(
+            "🎨 <b>Format Penggunaan Generator Banner:</b>\n"
+            "<code>/banner Judul Film (Tahun)</code>\n\n"
+            "<i>Contoh:</i>\n"
+            "• <code>/banner Sleep No More (2026)</code>\n"
+            "• <code>/banner Pengabdi Setan 2 (2022)</code>\n"
+            "• <code>/banner Dilan 1990 (2018)</code>\n\n"
+            "<i>Bot akan otomatis membuat banner promosi sinematik HD 1280x720 lengkap dengan poster, rating, dan watermark channel!</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    query = parts[1].strip()
+    status_msg = await msg.reply_text(f"⏳ <i>Meracik banner sinematik untuk: <b>{html.escape(query)}</b>...</i>", parse_mode=ParseMode.HTML)
+
+    wm = _get_user_watermark(chat_id)
+    banner_path = None
+    try:
+        parsed = _engine.parser.parse(query)
+        meta = await _engine.enrich_metadata(parsed, query=query)
+        poster_src = meta.get("poster_url")
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+            banner_path = tf.name
+
+        _engine.banner_gen.create_banner(
+            metadata=meta,
+            poster_source=poster_src,
+            watermark=wm,
+            output_path=banner_path
+        )
+
+        title_disp = meta.get("title") or query
+        year_disp = f" ({meta['year']})" if meta.get("year") else ""
+        caption = (
+            f"🎨 <b>Banner Promosi Sinematik HD (1280x720)</b>\n\n"
+            f"🎬 <b>{html.escape(title_disp)}{year_disp}</b>\n"
+            f"⭐ Rating: {html.escape(str(meta.get('rating') or 'Belum ada'))}\n"
+            f"🎭 Genre: {html.escape(str(meta.get('genre') or 'Film'))}\n"
+            f"📢 Channel: {html.escape(wm)}\n\n"
+            f"<i>Siap dibagikan ke channel atau media sosial untuk promosi!</i>"
+        )
+
+        await client.send_photo(
+            chat_id=chat_id,
+            photo=banner_path,
+            caption=caption,
+            parse_mode=ParseMode.HTML
+        )
+        await status_msg.delete()
+    except Exception as e:
+        logger.exception("Banner command error")
+        await status_msg.edit_text(f"❌ <b>Gagal membuat banner:</b> {html.escape(str(e))}", parse_mode=ParseMode.HTML)
+    finally:
+        if banner_path and os.path.exists(banner_path):
+            try:
+                os.remove(banner_path)
+            except Exception:
+                pass
+
+
+@app.on_message(filters.command(["setbanner", "bannerpost"]))
+async def setbanner_cmd(client: Client, msg: Message):
+    chat_id = msg.chat.id
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
+    text = (msg.text or "").strip().lower()
+    parts = text.split()
+    curr = _engine.cache.get_setting("banner_post_mode", "on")
+
+    if len(parts) > 1:
+        arg = parts[1].strip()
+        if arg in ("on", "aktif", "yes", "1"):
+            _engine.cache.set_setting("banner_post_mode", "on")
+            await msg.reply_text(
+                "✅ <b>Mode Banner Promosi: DIAKTIFKAN</b>\n\n"
+                "Mulai sekarang, setiap posting film ke channel akan diawali dengan Foto Banner Sinematik HD lalu disusul file video dengan tombol interaktif.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        elif arg in ("off", "mati", "no", "0"):
+            _engine.cache.set_setting("banner_post_mode", "off")
+            await msg.reply_text(
+                "✋ <b>Mode Banner Promosi: DINONAKTIFKAN</b>\n\n"
+                "Posting film kembali ke mode 1 pesan video tunggal biasa.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+    status_str = "AKTIF (Foto Banner + Video)" if curr != "off" else "NONAKTIF (Video saja)"
+    await msg.reply_text(
+        f"🎨 <b>Pengaturan Banner Promosi Otomatis:</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Status saat ini: <b>{status_str}</b>\n\n"
+        f"<b>Format Posting Dua Pesan:</b>\n"
+        f"• <b>Pesan 1:</b> Foto Banner Sinematik HD + Caption Sinopsis Lengkap\n"
+        f"• <b>Pesan 2:</b> File Video + Tombol [ Gabung ], [ Trailer ], [ Request ], [ Bagikan ]\n\n"
+        f"<i>Perintah ganti status:</i>\n"
+        f"• <code>/setbanner on</code> (Aktifkan mode banner)\n"
+        f"• <code>/setbanner off</code> (Matikan mode banner)",
+        parse_mode=ParseMode.HTML
+    )
 
 
 @app.on_message(filters.command(["broadcast", "siaran"]))
@@ -4109,16 +4230,71 @@ async def publish_video_to_channel(
 
     protect_flag = _engine.cache.get_protect_content(chat_id)
 
+    banner_mode = _engine.cache.get_setting("banner_post_mode", "on")
+    sent_banner = None
+
+    if banner_mode != "off":
+        banner_path = None
+        try:
+            poster_src = meta.get("poster_url") or meta.get("poster_path") or meta.get("thumb_path")
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as banner_tmp:
+                banner_path = banner_tmp.name
+
+            _engine.banner_gen.create_banner(
+                metadata=meta,
+                poster_source=poster_src,
+                watermark=watermark,
+                output_path=banner_path
+            )
+
+            sent_banner = await client.send_photo(
+                chat_id=watermark,
+                photo=banner_path,
+                caption=caption_text,
+                parse_mode=ParseMode.HTML,
+                protect_content=protect_flag
+            )
+            if sent_banner:
+                await _apply_expandable_caption(watermark, sent_banner.id, caption_text, None)
+        except Exception as be:
+            logger.warning(f"Failed to publish banner photo to {watermark}: {be}")
+            sent_banner = None
+        finally:
+            if banner_path and os.path.exists(banner_path):
+                try:
+                    os.remove(banner_path)
+                except Exception:
+                    pass
+
+    # Video caption: concise if banner was posted, full if banner was skipped
+    if sent_banner:
+        v_lines = [f"🎬 <b>{html.escape(title_display.upper())}</b>"]
+        tech_parts = []
+        if meta.get("resolution"):
+            tech_parts.append(html.escape(str(meta['resolution'])))
+        if meta.get("source"):
+            tech_parts.append(html.escape(str(meta['source'])))
+        if meta.get("fileSize"):
+            tech_parts.append(html.escape(str(meta['fileSize'])))
+        elif meta.get("duration"):
+            tech_parts.append(html.escape(str(meta['duration'])))
+        if tech_parts:
+            v_lines.append(f"📦 {' • '.join(tech_parts)}")
+        v_lines.append(f"🍿 <b>Channel Resmi:</b> <a href=\"{html.escape(channel_url, quote=True)}\">{html.escape(watermark)}</a>")
+        video_caption = "\n".join(v_lines)
+    else:
+        video_caption = caption_text
+
     sent_channel = await client.send_video(
         chat_id=watermark,
         video=video_file_id,
-        caption=caption_text,
+        caption=video_caption,
         parse_mode=ParseMode.HTML,
         supports_streaming=True,
         protect_content=protect_flag,
         reply_markup=channel_kb
     )
-    if sent_channel:
+    if sent_channel and not sent_banner:
         await _apply_expandable_caption(watermark, sent_channel.id, caption_text, channel_kb)
 
     # Kirim stiker pemisah otomatis di bawah film
@@ -4891,6 +5067,77 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
             f"3. Tekan lagi tombol <b>🚀 Posting ke Channel</b>!",
             parse_mode=ParseMode.HTML
         )
+
+
+@app.on_callback_query(filters.regex(r"^banner:"))
+async def handle_banner_callback(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Hanya Administrator yang dapat membuat banner!", show_alert=True)
+        return
+
+    chat_id = call.message.chat.id
+    job = _jobs.get(chat_id)
+    if not job:
+        if call.message and (call.message.video or call.message.caption):
+            cap = call.message.caption or ""
+            parsed_meta = _engine.extract_metadata(cap, "")
+            job = {
+                "caption_text": cap,
+                "metadata": parsed_meta,
+                "filename": parsed_meta.get("title") or "Film",
+                "sent_msg": call.message
+            }
+        else:
+            await call.answer("Job tidak ditemukan atau sesi telah berakhir.", show_alert=True)
+            return
+
+    meta = job.get("metadata", {})
+    title = meta.get("title") or job.get("filename") or "Film Ini"
+    await call.answer("🎨 Sedang meracik banner sinematik...")
+
+    status_msg = await call.message.reply_text(f"🎨 <i>Meracik banner sinematik untuk: <b>{html.escape(title)}</b>...</i>", parse_mode=ParseMode.HTML)
+
+    banner_path = None
+    try:
+        wm = _get_user_watermark(chat_id)
+        poster_src = meta.get("poster_url") or meta.get("poster_path") or meta.get("thumb_path")
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+            banner_path = tf.name
+
+        _engine.banner_gen.create_banner(
+            metadata=meta,
+            poster_source=poster_src,
+            watermark=wm,
+            output_path=banner_path
+        )
+
+        title_disp = meta.get("title") or title
+        year_disp = f" ({meta['year']})" if meta.get("year") else ""
+        caption = (
+            f"🎨 <b>Banner Promosi Sinematik HD (1280x720)</b>\n\n"
+            f"🎬 <b>{html.escape(title_disp)}{year_disp}</b>\n"
+            f"⭐ Rating: {html.escape(str(meta.get('rating') or 'Belum ada'))}\n"
+            f"🎭 Genre: {html.escape(str(meta.get('genre') or 'Film'))}\n"
+            f"📢 Channel: {html.escape(wm)}\n\n"
+            f"<i>Banner ini otomatis dikirim di atas video saat memposting ke channel.</i>"
+        )
+
+        await client.send_photo(
+            chat_id=chat_id,
+            photo=banner_path,
+            caption=caption,
+            parse_mode=ParseMode.HTML
+        )
+        await status_msg.delete()
+    except Exception as e:
+        logger.exception("Banner callback error")
+        await status_msg.edit_text(f"❌ <b>Gagal membuat banner:</b> {html.escape(str(e))}", parse_mode=ParseMode.HTML)
+    finally:
+        if banner_path and os.path.exists(banner_path):
+            try:
+                os.remove(banner_path)
+            except Exception:
+                pass
 
 
 @app.on_callback_query(filters.regex(r"^info:"))

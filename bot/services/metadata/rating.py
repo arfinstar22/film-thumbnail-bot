@@ -120,6 +120,8 @@ class MovieRatingService:
                             res["actors"] = data["Actors"]
                         if data.get("Plot") and data["Plot"] != "N/A":
                             res["plot"] = data["Plot"]
+                        if data.get("Poster") and data["Poster"] != "N/A" and data["Poster"].startswith("http"):
+                            res["poster_url"] = data["Poster"]
                         if res:
                             self.cache.set_setting(cache_key, json.dumps(res))
                             return res

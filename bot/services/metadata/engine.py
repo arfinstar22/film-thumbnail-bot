@@ -7,6 +7,7 @@ from .caption import CaptionGenerator
 from .cache import MetadataCache
 from .synopsis import WikipediaSynopsisService
 from .rating import MovieRatingService
+from .banner import BannerGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,7 @@ class MetadataEngine:
     def __init__(self, groq_api_key: Optional[str] = None):
         self.parser = FilenameParser()
         self.caption_gen = CaptionGenerator()
+        self.banner_gen = BannerGenerator()
         self.cache = MetadataCache()
         self.synopsis_service = WikipediaSynopsisService(cache=self.cache)
         self.rating_service = MovieRatingService(cache=self.cache)
@@ -62,6 +64,8 @@ class MetadataEngine:
                     metadata["director"] = rate_res["director"]
                 if rate_res.get("actors") and not metadata.get("actors"):
                     metadata["actors"] = rate_res["actors"]
+                if rate_res.get("poster_url") and not metadata.get("poster_url"):
+                    metadata["poster_url"] = rate_res["poster_url"]
 
             if syn_res and not metadata.get("synopsis"):
                 metadata["synopsis"] = syn_res
@@ -162,6 +166,8 @@ class MetadataEngine:
                 meta["director"] = rate_res["director"]
             if rate_res.get("actors") and not meta.get("actors"):
                 meta["actors"] = rate_res["actors"]
+            if rate_res.get("poster_url") and not meta.get("poster_url"):
+                meta["poster_url"] = rate_res["poster_url"]
 
         if syn_res and not meta.get("synopsis"):
             meta["synopsis"] = syn_res

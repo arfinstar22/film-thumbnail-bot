@@ -132,6 +132,47 @@ def test_smart_caption_enrichment():
     print("✅ Smart Caption: Fallback synopsis, translation, and enrichment verified!")
 
 
+def test_banner_generator():
+    from bot.services.metadata.banner import BannerGenerator
+    from bot.handlers import get_caption_kb
+
+    bg = BannerGenerator()
+    meta = {
+        "title": "Sleep No More",
+        "year": 2026,
+        "rating": "7.5 / 10 • IMDb",
+        "genre": "Horor, Fantasi",
+        "director": "Marcus Adams",
+        "actors": "John Doe, Jane Smith",
+        "resolution": "1080p",
+        "source": "WEB-DL",
+        "audioCodec": "AAC 2.0",
+        "duration": "1j 35m"
+    }
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+        out_path = tf.name
+
+    try:
+        img = bg.create_banner(meta, watermark="@film_indonesia1", output_path=out_path)
+        assert img.size == (1280, 720), f"Expected 1280x720, got {img.size}"
+        assert os.path.exists(out_path)
+        assert os.path.getsize(out_path) > 10000
+    finally:
+        if os.path.exists(out_path):
+            os.remove(out_path)
+
+    # Check keyboard has banner button
+    kb = get_caption_kb(12345, "@film_indonesia1")
+    has_banner_btn = False
+    for row in kb.inline_keyboard:
+        for btn in row:
+            if btn.callback_data == "banner:12345":
+                has_banner_btn = True
+                break
+    assert has_banner_btn, "Banner button missing in get_caption_kb"
+    print("✅ BannerGenerator & Keyboard: 1280x720 composition and buttons verified!")
+
+
 if __name__ == "__main__":
     test_caption_generator()
     test_rating_service_non_ascii()
@@ -141,5 +182,7 @@ if __name__ == "__main__":
     test_video_service_timestamp_parsing()
     test_admin_dashboard_length()
     test_smart_caption_enrichment()
+    test_banner_generator()
     print("\n🎉 ALL AUDIT VERIFICATION CHECKS PASSED!")
+
 
