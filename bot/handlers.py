@@ -464,7 +464,7 @@ async def recover_queue_from_chat(client: Client, chat_id: int) -> int:
 
         return recovered_count
     except Exception as e:
-        logger.warning(f"Error in recover_queue_from_chat: {e}")
+        logger.debug(f"recover_queue_from_chat skipped: {e}")
         return 0
 
 
@@ -5176,16 +5176,38 @@ async def handle_setthumb_choice(client: Client, call: CallbackQuery):
         job["thumb_path"] = new_thumb
         await call.answer("✅ Cover diubah ke Snapshot Video Bawaan!", show_alert=True)
 
+    choice_label = "Poster Resmi Bioskop" if choice == "poster" else "Snapshot Video Bawaan"
     try:
         await call.message.edit_text(
             f"✅ <b>Cover Berhasil Diperbarui:</b>\n"
-            f"Pilihan: <b>{'Poster Resmi Bioskop' if choice == 'poster' else 'Snapshot Video Bawaan'}</b>\n"
+            f"Pilihan: <b>{choice_label}</b>\n"
             f"Watermark: <code>{wm}</code>\n\n"
-            f"Cover ini akan otomatis disematkan saat film diposting ke channel.",
+            f"<i>Pratinjau foto cover ber-watermark telah dikirim di bawah.</i>",
             parse_mode=ParseMode.HTML
         )
     except Exception as ee:
         logger.debug(f"Failed to edit message text: {ee}")
+
+    # Send visual preview photo directly to the admin so they can see the generated cover
+    if os.path.exists(new_thumb):
+        try:
+            await client.send_photo(
+                chat_id=chat_id,
+                photo=new_thumb,
+                caption=(
+                    f"🖼️ <b>[PRATINJAU COVER BER-WATERMARK]</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎬 <b>{html.escape(title)}</b>\n"
+                    f"🏷️ Watermark: <code>{html.escape(wm)}</code>\n"
+                    f"📌 Pilihan: <b>{choice_label}</b>\n\n"
+                    f"✅ <i>Cover ini telah disimpan di memori bot dan siap disematkan.</i>\n\n"
+                    f"💡 <b>Tips Tampilan Channel Mewah:</b>\n"
+                    f"Klik tombol <b>🎨 Banner Promosi</b> untuk posting Banner Sinematik 1280x720 HD tepat di atas film saat tayang di channel!"
+                ),
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as pe:
+            logger.debug(f"Failed to send cover preview photo: {pe}")
 
 
 @app.on_message(filters.photo)
