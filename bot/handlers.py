@@ -722,10 +722,13 @@ def get_caption_kb(message_id: int, watermark: str):
         ],
         [
             InlineKeyboardButton("🖼️ Cover / Thumbnail", callback_data=f"thumbmenu:{message_id}"),
-            InlineKeyboardButton("✏️ Edit Caption", callback_data=f"edit:{message_id}")
+            InlineKeyboardButton("🔊 Audio & Sub", callback_data=f"audiosub:{message_id}")
         ],
         [
-            InlineKeyboardButton("📋 Salin Teks", callback_data=f"copy:{message_id}"),
+            InlineKeyboardButton("✏️ Edit Caption", callback_data=f"edit:{message_id}"),
+            InlineKeyboardButton("📋 Salin Teks", callback_data=f"copy:{message_id}")
+        ],
+        [
             InlineKeyboardButton("🔄 Format Ulang", callback_data=f"info:{message_id}")
         ]
     ])
@@ -4808,6 +4811,23 @@ async def _process_video_task(client: Client, msg: Message):
                 disable_web_page_preview=True
             )
 
+        # MEMBER REQUEST MATCH ALERT: Check if any members requested this film
+        matching_reqs = _engine.cache.find_matching_requests(meta_title)
+        if matching_reqs:
+            req_count = len(matching_reqs)
+            names = [f"@{r['username']}" if r.get("username") else f"User {r.get('user_id')}" for r in matching_reqs[:5]]
+            names_str = ", ".join(names)
+            if req_count > 5:
+                names_str += f" dan {req_count - 5} member lainnya"
+
+            await msg.reply_text(
+                f"💌 <b>PERMINTAAN MEMBER DITEMUKAN!</b>\n\n"
+                f"Ada <b>{req_count} member</b> yang sedang menunggu film ini:\n"
+                f"👥 <b>Pemohon:</b> {names_str}\n\n"
+                f"✨ <i>Saat Anda menekan '🚀 Posting ke Channel', bot akan otomatis mengirim notifikasi chat ke semua pemohon di atas!</i>",
+                parse_mode=ParseMode.HTML
+            )
+
         # Check Auto-Post setting
         autopost_mode = _engine.cache.get_setting(f"autopost_{chat_id}", "off")
         if autopost_mode == "schedule":
@@ -5166,6 +5186,131 @@ async def handle_custom_photo_thumbnail(client: Client, msg: Message):
     except Exception as pe:
         logger.exception("Error processing custom photo thumbnail")
         await status.edit_text(f"❌ Gagal memproses foto: <code>{pe}</code>", parse_mode=ParseMode.HTML)
+
+
+@app.on_callback_query(filters.regex(r"^audiosub:(\d+)$"))
+async def handle_audiosub_callback(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Hanya Administrator!", show_alert=True)
+        return
+
+    chat_id = call.message.chat.id
+    job = _jobs.get(chat_id)
+    msg_id = call.matches[0].group(1)
+
+    meta = job.get("metadata", {}) if job else {}
+    curr_aud = meta.get("audio") or meta.get("audioCodec") or "Belum diatur"
+    curr_sub = meta.get("subtitle") or "Belum diatur"
+
+    buttons = [
+        [
+            InlineKeyboardButton("🇮🇩 Dub Indo", callback_data=f"setaud:Dub Indo:{msg_id}"),
+            InlineKeyboardButton("🇬🇧 English Ori", callback_data=f"setaud:English Ori:{msg_id}")
+        ],
+        [
+            InlineKeyboardButton("🔊 Dual (ID+EN)", callback_data=f"setaud:Dual Audio (ID+EN):{msg_id}"),
+            InlineKeyboardButton("🇰🇷 Korea", callback_data=f"setaud:Korean:{msg_id}"),
+            InlineKeyboardButton("🇯🇵 Jepang", callback_data=f"setaud:Japanese:{msg_id}")
+        ],
+        [
+            InlineKeyboardButton("💬 Softsub Indo", callback_data=f"setsub:Softsub Indo:{msg_id}"),
+            InlineKeyboardButton("💬 Hardsub Indo", callback_data=f"setsub:Hardsub Indo:{msg_id}")
+        ],
+        [
+            InlineKeyboardButton("💬 English Sub", callback_data=f"setsub:English Sub:{msg_id}"),
+            InlineKeyboardButton("❌ Tanpa Subtitle", callback_data=f"setsub:none:{msg_id}")
+        ],
+        [
+            InlineKeyboardButton("🔙 Tutup Menu", callback_data=f"audiosubback:{msg_id}")
+        ]
+    ]
+
+    await call.message.reply_text(
+        f"🔊 <b>Pengaturan Cepat Audio & Subtitle:</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Pilih preset audio atau subtitle untuk langsung memperbarui teks caption:\n\n"
+        f"• 🔊 <b>Audio Sekarang:</b> <code>{html.escape(str(curr_aud))}</code>\n"
+        f"• 💬 <b>Subtitle Sekarang:</b> <code>{html.escape(str(curr_sub))}</code>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+    await call.answer()
+
+
+@app.on_callback_query(filters.regex(r"^audiosubback:(\d+)$"))
+async def handle_audiosubback_callback(client: Client, call: CallbackQuery):
+    await call.answer("Ditutup")
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
+
+@app.on_callback_query(filters.regex(r"^(setaud|setsub):(.+):(\d+)$"))
+async def handle_setaudiosub_choice(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Hanya Administrator!", show_alert=True)
+        return
+
+    action = call.matches[0].group(1)
+    val = call.matches[0].group(2)
+    msg_id = call.matches[0].group(3)
+    chat_id = call.message.chat.id
+    job = _jobs.get(chat_id)
+    if not job:
+        await call.answer("Job film kadaluarsa. Kirim ulang videonya.", show_alert=True)
+        return
+
+    meta = job.setdefault("metadata", {})
+    wm = job.get("watermark") or _get_user_watermark(chat_id)
+
+    if action == "setaud":
+        meta["audio"] = val
+        alert_text = f"✅ Audio diubah ke: {val}"
+    else:
+        if val == "none":
+            meta.pop("subtitle", None)
+            alert_text = "✅ Subtitle dihapus dari caption."
+        else:
+            meta["subtitle"] = val
+            alert_text = f"✅ Subtitle diubah ke: {val}"
+
+    # Regenerate caption
+    new_caption = _engine.caption_gen.generate(meta, custom_watermark=wm)
+    job["caption_text"] = new_caption
+
+    # Update sent video caption
+    sent_msg = job.get("sent_msg")
+    kb = get_caption_kb(int(msg_id), wm)
+    if sent_msg:
+        try:
+            await sent_msg.edit_caption(
+                caption=new_caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb
+            )
+            await _apply_expandable_caption(chat_id, sent_msg.id, new_caption, kb)
+        except Exception as ee:
+            logger.debug(f"Edit sent_msg caption failed: {ee}")
+
+    # Update the audiosub menu message
+    curr_aud = meta.get("audio") or meta.get("audioCodec") or "Belum diatur"
+    curr_sub = meta.get("subtitle") or "Belum diatur"
+    try:
+        await call.message.edit_text(
+            f"🔊 <b>Pengaturan Cepat Audio & Subtitle:</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Pilih preset audio atau subtitle untuk langsung memperbarui teks caption:\n\n"
+            f"• 🔊 <b>Audio Sekarang:</b> <code>{html.escape(str(curr_aud))}</code>\n"
+            f"• 💬 <b>Subtitle Sekarang:</b> <code>{html.escape(str(curr_sub))}</code>\n\n"
+            f"<i>{alert_text}</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=call.message.reply_markup
+        )
+    except Exception:
+        pass
+
+    await call.answer(alert_text, show_alert=True)
 
 
 @app.on_callback_query(filters.regex(r"^post:"))

@@ -242,6 +242,57 @@ def test_supabase_cloud_sync():
     print("✅ SupabaseSyncService: Cloud database hydration & schema replication verified!")
 
 
+def test_audiosub_and_request_match():
+    from bot.handlers import get_caption_kb
+    from bot.services.metadata.caption import CaptionGenerator
+    from bot.services.metadata.cache import MetadataCache
+
+    # 1. Keyboard button check
+    kb = get_caption_kb(99999, "@film_indonesia1")
+    has_audiosub_btn = any(btn.callback_data == "audiosub:99999" for row in kb.inline_keyboard for btn in row)
+    assert has_audiosub_btn, "Audio & Sub button missing in get_caption_kb"
+
+    # 2. Caption Audio & Subtitle generation
+    gen = CaptionGenerator()
+    cap = gen.generate({
+        "title": "Avenger Endgame",
+        "year": 2019,
+        "audio": "Dub Indo",
+        "subtitle": "Softsub Indo"
+    }, custom_watermark="@film_indonesia1")
+    assert "🔊 <b>Audio :</b> Dub Indo" in cap, f"Audio missing in caption: {cap}"
+    assert "💬 <b>Subtitle :</b> Softsub Indo" in cap, f"Subtitle missing in caption: {cap}"
+
+    # 3. Member request matching check
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
+        temp_db = tf.name
+
+    try:
+        cache = MetadataCache(db_path=temp_db)
+        # Add request
+        res = cache.add_movie_request(112233, "marvel_fan", "Avenger Endgame", "@film_indonesia1")
+        assert res["success"] is True
+
+        # Find matching request without fulfilling
+        matches = cache.find_matching_requests("Avenger Endgame 2019 1080p")
+        assert len(matches) == 1, f"Expected 1 match, got {len(matches)}"
+        assert matches[0]["username"] == "marvel_fan"
+
+        # Ensure request is still pending
+        pending = cache.get_pending_requests()
+        assert len(pending) == 1
+
+        # Fulfill request
+        fulfilled = cache.fulfill_movie_requests("Avenger Endgame")
+        assert len(fulfilled) == 1
+        assert len(cache.get_pending_requests()) == 0
+    finally:
+        if os.path.exists(temp_db):
+            os.remove(temp_db)
+
+    print("✅ Audio/Sub Preset & Member Request Matching: Verified successfully!")
+
+
 if __name__ == "__main__":
     test_caption_generator()
     test_rating_service_non_ascii()
@@ -254,6 +305,8 @@ if __name__ == "__main__":
     test_banner_generator()
     test_thumbnail_generator()
     test_supabase_cloud_sync()
+    test_audiosub_and_request_match()
     print("\n🎉 ALL AUDIT VERIFICATION CHECKS PASSED!")
+
 
 

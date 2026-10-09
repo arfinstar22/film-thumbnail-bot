@@ -562,6 +562,15 @@ class MetadataCache:
             (user_id, username or "", movie_title.strip(), clean_t, clean_chan)
         )
         conn.commit()
+
+        if self.cloud.is_enabled:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self.cloud.async_save_request(user_id, username or "", movie_title.strip(), clean_t, clean_chan))
+            except Exception:
+                pass
+
         return {"success": True, "is_new": True, "title": movie_title}
 
     def get_pending_requests(self, channel_username: Optional[str] = None, limit: int = 50) -> List[dict]:
@@ -599,6 +608,31 @@ class MetadataCache:
             })
         return results
 
+    def find_matching_requests(self, movie_title: str) -> List[dict]:
+        """Find pending requests that match the given movie title without altering database status."""
+        conn = self._conn()
+        self._ensure_requests_table(conn)
+        clean_t = re.sub(r'[^a-zA-Z0-9]', '', movie_title).lower()
+        if len(clean_t) < 3:
+            return []
+
+        query = "SELECT id, user_id, username, movie_title FROM movie_requests WHERE status = 'pending'"
+        cur = conn.execute(query)
+        requesters = []
+
+        for row in cur.fetchall():
+            r_id, u_id, u_name, req_t = row
+            req_clean = re.sub(r'[^a-zA-Z0-9]', '', req_t).lower()
+            if req_clean and (req_clean == clean_t or req_clean in clean_t or clean_t in req_clean):
+                requesters.append({
+                    "id": r_id,
+                    "user_id": u_id,
+                    "username": u_name,
+                    "requested_title": req_t
+                })
+
+        return requesters
+
     def fulfill_movie_requests(self, movie_title: str, channel_username: Optional[str] = None) -> List[dict]:
         conn = self._conn()
         self._ensure_requests_table(conn)
@@ -630,6 +664,14 @@ class MetadataCache:
                 matched_ids
             )
             conn.commit()
+
+            if self.cloud.is_enabled:
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.create_task(self.cloud.async_fulfill_requests(clean_t))
+                except Exception:
+                    pass
 
         return requesters
 

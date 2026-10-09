@@ -82,9 +82,16 @@ class CaptionGenerator:
         if vc:
             lines.append(f"💿 <b>Video :</b> {html.escape(str(vc))}")
 
-        if ac:
+        audio_preset = metadata.get("audio")
+        if audio_preset:
+            lines.append(f"🔊 <b>Audio :</b> {html.escape(str(audio_preset))}")
+        elif ac:
             audio_str = f"{ac} {ach}" if ach else ac
             lines.append(f"🔊 <b>Audio :</b> {html.escape(str(audio_str))}")
+
+        sub = metadata.get("subtitle")
+        if sub:
+            lines.append(f"💬 <b>Subtitle :</b> {html.escape(str(sub))}")
 
         if rg:
             lines.append(f"🏷️ <b>Release :</b> {html.escape(str(rg))}")

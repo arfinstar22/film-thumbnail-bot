@@ -123,11 +123,38 @@ class SupabaseSyncService:
             except Exception as e:
                 logger.debug(f"Hydrate ai_cache warning: {e}")
 
+            # 6. Pending Movie Requests
+            try:
+                s_cur.execute("""
+                    CREATE TABLE IF NOT EXISTS movie_requests (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER,
+                        username TEXT,
+                        movie_title TEXT,
+                        clean_title TEXT,
+                        channel_username TEXT,
+                        status TEXT DEFAULT 'pending',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        fulfilled_at TIMESTAMP
+                    )
+                """)
+                p_cur.execute(
+                    "SELECT user_id, username, movie_title, clean_title, channel_username, status FROM movie_requests WHERE status = 'pending'"
+                )
+                for row in p_cur.fetchall():
+                    s_cur.execute(
+                        "INSERT OR IGNORE INTO movie_requests (user_id, username, movie_title, clean_title, channel_username, status) VALUES (?, ?, ?, ?, ?, ?)",
+                        row
+                    )
+                    counts["requests"] += 1
+            except Exception as e:
+                logger.debug(f"Hydrate requests warning: {e}")
+
             sqlite_conn.commit()
             dur = (time.time() - start_t) * 1000
             logger.info(
                 f"🎉 Supabase Cloud -> SQLite Hydration Complete in {dur:.1f}ms! "
-                f"({counts['catalog']} films, {counts['settings']} settings, {counts['scheduled']} antrean restored)"
+                f"({counts['catalog']} films, {counts['settings']} settings, {counts['scheduled']} antrean, {counts['requests']} request restored)"
             )
             return counts
         except Exception as e:
@@ -240,3 +267,57 @@ class SupabaseSyncService:
                     conn.close()
                 except Exception:
                     pass
+
+    async def async_save_request(self, user_id: int, username: str, movie_title: str, clean_title: str, channel_username: str):
+        """Asynchronously syncs a new member request to Supabase."""
+        if not self._enabled:
+            return
+        await asyncio.to_thread(self._sync_write_request, user_id, username, movie_title, clean_title, channel_username)
+
+    def _sync_write_request(self, user_id: int, username: str, movie_title: str, clean_title: str, channel_username: str):
+        conn = None
+        try:
+            conn = self._get_connection()
+            if conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO movie_requests (user_id, username, movie_title, clean_title, channel_username, status)
+                           VALUES (%s, %s, %s, %s, %s, 'pending')""",
+                        (user_id, username or "", movie_title, clean_title, channel_username)
+                    )
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"Supabase async_save_request error: {e}")
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    async def async_fulfill_requests(self, clean_title: str):
+        """Asynchronously marks requests fulfilled in Supabase."""
+        if not self._enabled:
+            return
+        await asyncio.to_thread(self._sync_fulfill_requests, clean_title)
+
+    def _sync_fulfill_requests(self, clean_title: str):
+        conn = None
+        try:
+            conn = self._get_connection()
+            if conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE movie_requests SET status = 'fulfilled', fulfilled_at = NOW() WHERE status = 'pending' AND (clean_title = %s OR %s LIKE '%%' || clean_title || '%%' OR clean_title LIKE '%%' || %s || '%%')",
+                        (clean_title, clean_title, clean_title)
+                    )
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"Supabase async_fulfill_requests error: {e}")
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
