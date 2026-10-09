@@ -198,11 +198,12 @@ def test_thumbnail_generator():
         if os.path.exists(out_path):
             os.remove(out_path)
 
-    # Check keyboard has thumbmenu button
+    # Check keyboard has post_banner and post_video buttons
     kb = get_caption_kb(12345, "@film_indonesia1")
-    has_thumb_btn = any(btn.callback_data == "thumbmenu:12345" for row in kb.inline_keyboard for btn in row)
-    assert has_thumb_btn, "Thumbnail menu button missing in get_caption_kb"
-    print("✅ ThumbnailGenerator: Branded thumbnail, watermark pill, and buttons verified!")
+    has_post_banner = any(btn.callback_data == "post_banner:12345" for row in kb.inline_keyboard for btn in row)
+    has_post_video = any(btn.callback_data == "post_video:12345" for row in kb.inline_keyboard for btn in row)
+    assert has_post_banner and has_post_video, "Post + Banner or Post Video buttons missing in get_caption_kb"
+    print("✅ ThumbnailGenerator: Branded thumbnail, watermark pill, and posting choice buttons verified!")
 
 
 def test_supabase_cloud_sync():

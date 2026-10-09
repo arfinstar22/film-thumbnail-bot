@@ -741,16 +741,16 @@ def get_caption_kb(message_id: int, watermark: str):
 
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🚀 Posting ke Channel", callback_data=f"post:{message_id}"),
-            InlineKeyboardButton("📢 Buka Channel", url=channel_url)
+            InlineKeyboardButton("🚀 Posting + Banner HD", callback_data=f"post_banner:{message_id}"),
+            InlineKeyboardButton("🎬 Posting Video Saja", callback_data=f"post_video:{message_id}")
         ],
         [
             InlineKeyboardButton("⏰ Jadwal Prime-Time", callback_data=f"sched:{message_id}"),
-            InlineKeyboardButton("🎨 Banner Promosi", callback_data=f"banner:{message_id}")
+            InlineKeyboardButton("🎨 Lihat Banner HD", callback_data=f"banner:{message_id}")
         ],
         [
-            InlineKeyboardButton("🖼️ Cover / Thumbnail", callback_data=f"thumbmenu:{message_id}"),
-            InlineKeyboardButton("🔊 Audio & Sub", callback_data=f"audiosub:{message_id}")
+            InlineKeyboardButton("🔊 Audio & Sub", callback_data=f"audiosub:{message_id}"),
+            InlineKeyboardButton("📢 Buka Channel", url=channel_url)
         ],
         [
             InlineKeyboardButton("✏️ Edit Caption", callback_data=f"edit:{message_id}"),
@@ -4197,7 +4197,8 @@ async def publish_video_to_channel(
     metadata: dict,
     watermark: str,
     update_pin: bool = True,
-    thumb_path: Optional[str] = None
+    thumb_path: Optional[str] = None,
+    with_banner: Optional[bool] = None
 ) -> Optional[Message]:
     """Publishes a video post to the channel with buttons, divider sticker, cache update, and pinned catalog refresh."""
     clean_wm = watermark.lstrip("@").strip()
@@ -4265,9 +4266,10 @@ async def publish_video_to_channel(
     protect_flag = _engine.cache.get_protect_content(chat_id)
 
     banner_mode = _engine.cache.get_setting("banner_post_mode", "on")
+    use_banner = (with_banner is True) or (with_banner is None and banner_mode != "off")
     sent_banner = None
 
-    if banner_mode != "off":
+    if use_banner:
         banner_path = None
         try:
             poster_src = meta.get("poster_url") or meta.get("poster_path") or meta.get("thumb_path")
@@ -5382,11 +5384,14 @@ async def handle_setaudiosub_choice(client: Client, call: CallbackQuery):
     await call.answer(alert_text, show_alert=True)
 
 
-@app.on_callback_query(filters.regex(r"^post:"))
+@app.on_callback_query(filters.regex(r"^post(_banner|_video)?:(\d+)$"))
 async def handle_post_callback(client: Client, call: CallbackQuery):
     if not check_admin(call):
         await call.answer("⛔ Hanya Administrator yang dapat memposting ke channel!", show_alert=True)
         return
+
+    action_type = call.matches[0].group(1)  # "_banner", "_video", or None
+    with_banner = True if action_type == "_banner" else (False if action_type == "_video" else None)
 
     chat_id = call.message.chat.id
     job = _jobs.get(chat_id)
@@ -5409,7 +5414,8 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
         await call.answer("Channel belum diatur. Gunakan /setwatermark @namachannel", show_alert=True)
         return
 
-    await call.answer("🚀 Mengirim ke channel...")
+    progress_text = "🚀 Mengirim ke channel + Banner HD..." if with_banner else "🚀 Mengirim video ke channel..."
+    await call.answer(progress_text)
     try:
         meta = job.get("metadata", {})
         title_meta = meta.get("title") or job.get("filename") or "Film Ini"
@@ -5427,14 +5433,17 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
             caption_text=job["caption_text"],
             metadata=meta,
             watermark=wm,
-            thumb_path=job.get("thumb_path")
+            thumb_path=job.get("thumb_path"),
+            with_banner=with_banner
         )
 
         clean_wm = wm.lstrip("@").strip()
         post_link = f"https://t.me/{clean_wm}/{sent_channel.id}" if sent_channel else f"https://t.me/{clean_wm}"
+        mode_label = "bersama Foto Banner Sinematik HD" if (with_banner is True or (with_banner is None and _engine.cache.get_setting("banner_post_mode", "on") != "off")) else "1 Pesan Video Tunggal (tanpa banner)"
 
         await call.message.reply_text(
             f"✅ <b>Berhasil Diposting ke {wm}!</b>\n\n"
+            f"• Mode: <b>{mode_label}</b>\n"
             f"• Film sudah terbit lengkap dengan tombol [ Gabung ], [ Trailer ], [ Request ], dan [ Bagikan ]\n"
             f"• Film otomatis masuk ke katalog pencarian (<code>/cari {title_meta}</code>)\n"
             f"• Pinned Catalog A-Z di channel otomatis diperbarui!\n"
