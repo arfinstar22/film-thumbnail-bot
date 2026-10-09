@@ -794,7 +794,7 @@ def get_admin_request_panel(chat_id_or_user_id: int, user_id: int, first_name: s
     return prompt_text, kb
 
 
-def build_admin_dashboard_text(chat_id: int, user_id: int, first_name: str, username: str) -> str:
+def build_admin_dashboard_parts(chat_id: int, user_id: int, first_name: str, username: str) -> List[str]:
     wm = _get_user_watermark(chat_id)
     divider = _get_user_divider(chat_id)
     req_link = _get_user_request_link(chat_id)
@@ -809,7 +809,7 @@ def build_admin_dashboard_text(chat_id: int, user_id: int, first_name: str, user
     curr_vault = _engine.cache.get_vault_channel(chat_id, VAULT_CHANNEL)
 
     div_status = "Logo Custom Film Indonesia" if divider == "default" else ("Mati (Off)" if divider == "off" else "Stiker Pilihan Anda")
-    req_status = f"<code>{req_link}</code>" if req_link and req_link != "off" else ("Mati (Off)" if req_link == "off" else "<i>Belum diatur</i>")
+    req_status = f"<code>{html.escape(req_link)}</code>" if req_link and req_link != "off" else ("Mati (Off)" if req_link == "off" else "<i>Belum diatur</i>")
     syn_status = "Aktif (On)" if syn_val != "off" else "Mati (Off)"
     autojoin_status = "Aktif (On)" if autojoin_val != "off" else "Mati (Off)"
     if autopost_val == "schedule":
@@ -820,14 +820,17 @@ def build_admin_dashboard_text(chat_id: int, user_id: int, first_name: str, user
         autopost_status = "✋ Manual (Pratinjau Dulu)"
     protect_status = "🛡️ Aktif (On)" if protect_val else "🔓 Mati (Off)"
     hl_status = "Aktif (On)" if hl_val == "on" else "Mati (Off)"
-    vault_status = f"<code>{curr_vault}</code>" if curr_vault else "<i>Belum diatur (Off)</i>"
+    vault_status = f"<code>{html.escape(curr_vault)}</code>" if curr_vault else "<i>Belum diatur (Off)</i>"
     fsub_val = _engine.cache.get_fsub_status()
     fsub_status = "🔒 Wajib Join Channel" if fsub_val else "🔓 Bebas Akses"
     sched_posts = _engine.cache.get_pending_scheduled_posts()
     sched_status = f"{len(sched_posts)} Film Dijadwalkan" if sched_posts else "Kosong"
 
+    safe_first = html.escape(first_name or "Sobat Film")
+    safe_user = html.escape(username or "")
+
     if is_owner(user_id, username):
-        uname_label = f"@{username}" if username else f"ID: {user_id}"
+        uname_label = f"@{safe_user}" if safe_user else f"ID: {user_id}"
         header_text = (
             "👑 <b>DASHBOARD TUAN DARFIN (CREATOR & ABSOLUTE OWNER)</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
@@ -837,10 +840,10 @@ def build_admin_dashboard_text(chat_id: int, user_id: int, first_name: str, user
         header_text = (
             "🎬 <b>FILM CLEANER & PUBLISHER BOT (ADMIN DASHBOARD)</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            f"Selamat datang, <b>{first_name}</b>! Bot ini otomatis membersihkan watermark lama, mengekstrak rating & genre resmi, merapikan sinopsis lipat, mendeteksi duplikat, dan menerbitkan film langsung ke channel Telegram Anda.\n\n"
+            f"Selamat datang, <b>{safe_first}</b>! Bot ini otomatis membersihkan watermark lama, mengekstrak rating & genre resmi, merapikan sinopsis lipat, mendeteksi duplikat, dan menerbitkan film langsung ke channel Telegram Anda.\n\n"
         )
 
-    text = header_text + (
+    part1 = header_text + (
         "📌 <b>DAFTAR PERINTAH (COMMANDS):</b>\n\n"
         "🚀 <b>PENGATURAN & UPLOAD CHANNEL:</b>\n"
         "• <code>/autopost</code>\n"
@@ -875,7 +878,11 @@ def build_admin_dashboard_text(chat_id: int, user_id: int, first_name: str, user
         f"  <i>Stiker aktif:</i> <b>{div_status}</b>\n\n"
         "• <code>/setsynopsis on / off</code>\n"
         "  Mengatur sinopsis lipat otomatis dari Wikipedia Indonesia.\n"
-        f"  <i>Status sinopsis:</i> <b>{syn_status}</b>\n\n"
+        f"  <i>Status sinopsis:</i> <b>{syn_status}</b>"
+    )
+
+    part2 = (
+        "📌 <b>BUKU PANDUAN PERINTAH LENGKAP:</b>\n\n"
         "📚 <b>PENCARIAN & KATALOG PINNED:</b>\n"
         "• <code>/cari &lt;judul film&gt;</code>\n"
         "  Cari film di katalog channel dengan link tonton langsung.\n"
@@ -934,7 +941,44 @@ def build_admin_dashboard_text(chat_id: int, user_id: int, first_name: str, user
         "2. Bot otomatis memproses antrean dan merapikan caption.\n"
         "3. Tekan tombol <b>🚀 Posting ke Channel</b> (atau gunakan /autopost on untuk otomatis terbit)!"
     )
-    return text
+    return [part1, part2]
+
+
+def build_admin_dashboard_text(chat_id: int, user_id: int, first_name: str, username: str) -> str:
+    """Returns the full dashboard text joined by double newlines."""
+    parts = build_admin_dashboard_parts(chat_id, user_id, first_name, username)
+    return "\n\n".join(parts)
+
+
+async def send_admin_dashboard(client: Client, target, chat_id: int, user_id: int, first_name: str, username: str):
+    """Safely sends the full administrative dashboard split into parts under 4000 characters
+    so Telegram never rejects it with MESSAGE_TOO_LONG.
+    """
+    parts = build_admin_dashboard_parts(chat_id, user_id, first_name, username)
+    clean_wm = (_get_user_watermark(chat_id) or "@film_indonesia1").lstrip("@").strip()
+    channel_url = f"https://t.me/{clean_wm}"
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("⏰ Cek Antrean Tayang", callback_data="sched_refresh"),
+            InlineKeyboardButton("📋 Kelola Request Member", callback_data="adm_view_requests")
+        ],
+        [
+            InlineKeyboardButton("🎬 Input Judul Film", callback_data="adm_input_movie"),
+            InlineKeyboardButton("🔄 Refresh Dashboard", callback_data="adm_dashboard")
+        ],
+        [
+            InlineKeyboardButton("🔍 Cari Film Instan", switch_inline_query_current_chat=""),
+            InlineKeyboardButton(f"📢 Buka @{clean_wm}", url=channel_url)
+        ]
+    ])
+
+    for i, part in enumerate(parts):
+        reply_markup = kb if i == len(parts) - 1 else None
+        if hasattr(target, "reply_text"):
+            await target.reply_text(part, parse_mode=ParseMode.HTML, reply_markup=reply_markup, disable_web_page_preview=True)
+        else:
+            await client.send_message(chat_id, part, parse_mode=ParseMode.HTML, reply_markup=reply_markup, disable_web_page_preview=True)
 
 
 @app.on_message(filters.command("start"))
@@ -1172,8 +1216,7 @@ async def help_dashboard_cmd(client: Client, msg: Message):
     username = msg.from_user.username if msg.from_user else ""
 
     if is_admin(user_id, username):
-        text = build_admin_dashboard_text(msg.chat.id, user_id, first_name, username)
-        await msg.reply_text(text, parse_mode=ParseMode.HTML)
+        await send_admin_dashboard(client, msg, msg.chat.id, user_id, first_name, username)
     else:
         wm = _get_user_watermark(msg.chat.id)
         clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
@@ -1432,7 +1475,6 @@ async def cb_adm_view_requests(client: Client, query: CallbackQuery):
 
 @app.on_callback_query(filters.regex(r"^adm_dashboard$"))
 async def cb_adm_dashboard(client: Client, query: CallbackQuery):
-    await query.answer()
     user_id = query.from_user.id if query.from_user else query.message.chat.id
     username = query.from_user.username if query.from_user else ""
     first_name = query.from_user.first_name if query.from_user else "Sobat Film"
@@ -1440,9 +1482,13 @@ async def cb_adm_dashboard(client: Client, query: CallbackQuery):
         await query.answer("⛔ Khusus Administrator!", show_alert=True)
         return
 
+    await query.answer("Membuka Dashboard...")
     chat_id = query.message.chat.id
-    text = build_admin_dashboard_text(chat_id, user_id, first_name, username)
-    await query.message.reply_text(text, parse_mode=ParseMode.HTML)
+    try:
+        await send_admin_dashboard(client, query.message, chat_id, user_id, first_name, username)
+    except Exception as e:
+        logger.error(f"Error opening dashboard: {e}")
+        await query.message.reply_text(f"❌ <b>Gagal membuka dashboard:</b> <code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
 
 
 @app.on_callback_query(filters.regex(r"^adm_input_movie$"))

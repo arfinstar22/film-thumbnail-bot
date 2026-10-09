@@ -95,6 +95,18 @@ def test_video_service_timestamp_parsing():
     print("✅ VideoService: Timestamp parser guarded against negative/empty inputs")
 
 
+def test_admin_dashboard_length():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    from bot.handlers import build_admin_dashboard_parts
+    parts = build_admin_dashboard_parts(12345, 1166479771, "Darfin & Co <VIP>", "dxstar22")
+    assert len(parts) >= 2, f"Expected at least 2 parts, got {len(parts)}"
+    for i, part in enumerate(parts):
+        assert len(part) <= 4000, f"Part {i+1} length {len(part)} exceeds 4000 limit!"
+        assert "& Co" not in part, f"Unescaped entity found in part {i+1}"
+    print(f"✅ Dashboard: Split into {len(parts)} parts, all strictly <= 4000 chars (safe from MESSAGE_TOO_LONG)")
+
+
 if __name__ == "__main__":
     test_caption_generator()
     test_rating_service_non_ascii()
@@ -102,4 +114,5 @@ if __name__ == "__main__":
     test_ai_refiner_json_parsing()
     test_cache_wal_and_busy_timeout()
     test_video_service_timestamp_parsing()
+    test_admin_dashboard_length()
     print("\n🎉 ALL AUDIT VERIFICATION CHECKS PASSED!")
