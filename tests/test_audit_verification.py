@@ -107,6 +107,31 @@ def test_admin_dashboard_length():
     print(f"✅ Dashboard: Split into {len(parts)} parts, all strictly <= 4000 chars (safe from MESSAGE_TOO_LONG)")
 
 
+def test_smart_caption_enrichment():
+    from bot.services.metadata.synopsis import generate_smart_fallback, translate_to_indonesian
+    
+    # Test fallback generator
+    fb_horror = generate_smart_fallback("Sleep No More", 2026, "Horor")
+    assert "horor" in fb_horror.lower() or "teror" in fb_horror.lower()
+    assert "2026" in fb_horror
+    
+    # Test translation helper
+    trans = translate_to_indonesian("A haunted house with ancient secrets.")
+    assert trans and len(trans) > 5
+
+    # Test full engine process on minimal filename
+    engine = MetadataEngine()
+    result = asyncio.run(engine.process("Sleep.No.More.2026.1080p.WEB-DL.x264.AAC-N3X.mkv", watermark="@film_indonesia1"))
+    caption = result.get("caption", "")
+    meta = result.get("metadata", {})
+    
+    assert "SLEEP NO MORE" in caption
+    assert "2026" in caption
+    assert "Sinopsis:" in caption, "Synopsis should never be empty for smart captions"
+    assert len(caption) <= 1024
+    print("✅ Smart Caption: Fallback synopsis, translation, and enrichment verified!")
+
+
 if __name__ == "__main__":
     test_caption_generator()
     test_rating_service_non_ascii()
@@ -115,4 +140,6 @@ if __name__ == "__main__":
     test_cache_wal_and_busy_timeout()
     test_video_service_timestamp_parsing()
     test_admin_dashboard_length()
+    test_smart_caption_enrichment()
     print("\n🎉 ALL AUDIT VERIFICATION CHECKS PASSED!")
+

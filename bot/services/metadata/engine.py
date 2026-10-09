@@ -42,7 +42,7 @@ class MetadataEngine:
         if title:
             tasks = []
             if enable_synopsis and not metadata.get("synopsis"):
-                tasks.append(self.synopsis_service.get_synopsis(title, year, is_series=is_series))
+                tasks.append(self.synopsis_service.get_synopsis(title, year, is_series=is_series, genre=metadata.get("genre")))
             else:
                 tasks.append(asyncio.sleep(0, result=""))
 
@@ -53,14 +53,29 @@ class MetadataEngine:
 
             syn_res, rate_res = await asyncio.gather(*tasks)
 
-            if syn_res and not metadata.get("synopsis"):
-                metadata["synopsis"] = syn_res
-
             if rate_res:
                 if rate_res.get("rating") and not metadata.get("rating"):
                     metadata["rating"] = rate_res["rating"]
                 if rate_res.get("genre") and not metadata.get("genre"):
                     metadata["genre"] = rate_res["genre"]
+                if rate_res.get("director") and not metadata.get("director"):
+                    metadata["director"] = rate_res["director"]
+                if rate_res.get("actors") and not metadata.get("actors"):
+                    metadata["actors"] = rate_res["actors"]
+                if rate_res.get("country") and not metadata.get("country"):
+                    metadata["country"] = rate_res["country"]
+
+            if syn_res and not metadata.get("synopsis"):
+                metadata["synopsis"] = syn_res
+            elif enable_synopsis and not metadata.get("synopsis"):
+                if rate_res and rate_res.get("plot"):
+                    translated_plot = self.synopsis_service.translate_if_needed(rate_res["plot"])
+                    if translated_plot:
+                        metadata["synopsis"] = translated_plot
+                if not metadata.get("synopsis"):
+                    metadata["synopsis"] = self.synopsis_service.get_fallback_synopsis(
+                        title, year, metadata.get("genre") or (rate_res.get("genre") if rate_res else None)
+                    )
 
         caption = self.caption_gen.generate(metadata, custom_watermark=watermark)
         self.cache.save_caption(filename, caption)
@@ -101,6 +116,21 @@ class MetadataEngine:
             if genre_match and not meta.get("genre"):
                 meta["genre"] = genre_match.group(1).strip()
 
+            # Country
+            country_match = re.search(r"(?:Negara|Country|🌍)\s*[:：]?\s*([^\n|]+)", clean, re.IGNORECASE)
+            if country_match and not meta.get("country"):
+                meta["country"] = country_match.group(1).strip()
+
+            # Director
+            dir_match = re.search(r"(?:Sutradara|Director)\s*[:：]?\s*([^\n|]+)", clean, re.IGNORECASE)
+            if dir_match and not meta.get("director"):
+                meta["director"] = dir_match.group(1).strip()
+
+            # Actors
+            act_match = re.search(r"(?:Pemeran|Aktor|Bintang|Cast|Actors|👥)\s*[:：]?\s*([^\n|]+)", clean, re.IGNORECASE)
+            if act_match and not meta.get("actors"):
+                meta["actors"] = act_match.group(1).strip()
+
             # Synopsis
             syn_match = re.search(r"(?:Sinopsis|Storyline|Deskripsi)\s*[:：]?\s*\n*(.*?)(?=\n\n|\Z)", clean, re.IGNORECASE | re.DOTALL)
             if syn_match and not meta.get("synopsis"):
@@ -119,7 +149,7 @@ class MetadataEngine:
 
         tasks = []
         if not meta.get("synopsis") and title:
-            tasks.append(self.synopsis_service.get_synopsis(title, year, is_series=is_series))
+            tasks.append(self.synopsis_service.get_synopsis(title, year, is_series=is_series, genre=meta.get("genre")))
         else:
             tasks.append(asyncio.sleep(0, result=""))
 
@@ -129,12 +159,29 @@ class MetadataEngine:
             tasks.append(asyncio.sleep(0, result={}))
 
         syn_res, rate_res = await asyncio.gather(*tasks)
-        if syn_res and not meta.get("synopsis"):
-            meta["synopsis"] = syn_res
+
         if rate_res:
             if rate_res.get("rating") and not meta.get("rating"):
                 meta["rating"] = rate_res["rating"]
             if rate_res.get("genre") and not meta.get("genre"):
                 meta["genre"] = rate_res["genre"]
+            if rate_res.get("director") and not meta.get("director"):
+                meta["director"] = rate_res["director"]
+            if rate_res.get("actors") and not meta.get("actors"):
+                meta["actors"] = rate_res["actors"]
+            if rate_res.get("country") and not meta.get("country"):
+                meta["country"] = rate_res["country"]
+
+        if syn_res and not meta.get("synopsis"):
+            meta["synopsis"] = syn_res
+        elif not meta.get("synopsis") and title:
+            if rate_res and rate_res.get("plot"):
+                translated_plot = self.synopsis_service.translate_if_needed(rate_res["plot"])
+                if translated_plot:
+                    meta["synopsis"] = translated_plot
+            if not meta.get("synopsis"):
+                meta["synopsis"] = self.synopsis_service.get_fallback_synopsis(
+                    title, year, meta.get("genre") or (rate_res.get("genre") if rate_res else None)
+                )
 
         return meta

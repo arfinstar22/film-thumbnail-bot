@@ -34,9 +34,35 @@ GENRE_MAP = {
     "western": "Western"
 }
 
+COUNTRY_MAP = {
+    "united states": "Amerika Serikat",
+    "usa": "Amerika Serikat",
+    "united kingdom": "Inggris",
+    "uk": "Inggris",
+    "indonesia": "Indonesia",
+    "south korea": "Korea Selatan",
+    "korea": "Korea Selatan",
+    "japan": "Jepang",
+    "china": "Tiongkok",
+    "hong kong": "Hong Kong",
+    "thailand": "Thailand",
+    "india": "India",
+    "france": "Prancis",
+    "germany": "Jerman",
+    "spain": "Spanyol",
+    "italy": "Italia",
+    "canada": "Kanada",
+    "australia": "Australia",
+    "russia": "Rusia",
+    "turkey": "Turki",
+    "taiwan": "Taiwan",
+    "malaysia": "Malaysia",
+    "philippines": "Filipina"
+}
+
 
 class MovieRatingService:
-    """Zero-cost movie rating and genre fetcher using IMDb Suggest & OMDB."""
+    """Zero-cost movie rating, genre, plot, director, and cast fetcher using IMDb Suggest & OMDB."""
 
     def __init__(self, cache: Optional[MetadataCache] = None):
         self.cache = cache or MetadataCache()
@@ -51,12 +77,19 @@ class MovieRatingService:
         translated = [GENRE_MAP.get(p.lower(), p) for p in parts]
         return ", ".join(translated)
 
+    def _translate_countries(self, country_str: str) -> str:
+        if not country_str or country_str == "N/A":
+            return ""
+        parts = [c.strip() for c in country_str.split(",") if c.strip()]
+        translated = [COUNTRY_MAP.get(p.lower(), p) for p in parts]
+        return ", ".join(translated)
+
     def _sync_fetch(self, title: str, year: Optional[int] = None) -> Dict[str, str]:
         if not title:
             return {}
 
         clean_title = re.sub(r"[^\w\s]", "", title).strip()
-        cache_key = f"rating_v1_{clean_title.lower()}_{year}" if year else f"rating_v1_{clean_title.lower()}"
+        cache_key = f"rating_v2_{clean_title.lower()}_{year}" if year else f"rating_v2_{clean_title.lower()}"
         cached_raw = self.cache.get_setting(cache_key, "")
         if cached_raw:
             try:
@@ -110,8 +143,18 @@ class MovieRatingService:
                         res = {}
                         if rating and rating != "N/A":
                             res["rating"] = f"{rating} / 10 • IMDb"
+                        elif data.get("Rated") and data["Rated"] != "N/A":
+                            res["rating"] = f"Rated {data['Rated']} • IMDb"
                         if genre:
                             res["genre"] = genre
+                        if data.get("Director") and data["Director"] != "N/A":
+                            res["director"] = data["Director"]
+                        if data.get("Actors") and data["Actors"] != "N/A":
+                            res["actors"] = data["Actors"]
+                        if data.get("Country") and data["Country"] != "N/A":
+                            res["country"] = self._translate_countries(data["Country"])
+                        if data.get("Plot") and data["Plot"] != "N/A":
+                            res["plot"] = data["Plot"]
                         if res:
                             self.cache.set_setting(cache_key, json.dumps(res))
                             return res

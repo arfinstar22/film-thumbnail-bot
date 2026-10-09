@@ -12,6 +12,60 @@ from .cache import MetadataCache
 logger = logging.getLogger(__name__)
 
 
+def translate_to_indonesian(text: str) -> str:
+    """Translates text to Indonesian using Google Translate public endpoint with fallback."""
+    if not text or not text.strip():
+        return ""
+    clean_text = text.strip()
+    try:
+        url = "https://translate.googleapis.com/translate_a/single?" + urllib.parse.urlencode({
+            "client": "gtx",
+            "sl": "auto",
+            "tl": "id",
+            "dt": "t",
+            "q": clean_text
+        })
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+        with urllib.request.urlopen(req, timeout=3.5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            if data and isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
+                translated_parts = [segment[0] for segment in data[0] if segment and len(segment) > 0 and segment[0]]
+                translated = "".join(translated_parts).strip()
+                if translated:
+                    return translated
+    except Exception as e:
+        logger.debug(f"Translation error: {e}")
+    return clean_text
+
+
+def generate_smart_fallback(title: str, year: Optional[int] = None, genre: Optional[str] = None) -> str:
+    """Generates engaging, context-aware Indonesian teaser synopsis based on genre and year."""
+    y_str = f" rilisan tahun {year}" if year else ""
+    g_lower = (genre or "").lower()
+    if "horor" in g_lower or "horror" in g_lower:
+        return f"Film horor misterius{y_str}. Mengisahkan teror mencekam dan ancaman tak terduga yang menguji keberanian serta batas ketakutan terdalam para karakternya."
+    elif "aksi" in g_lower or "action" in g_lower:
+        return f"Film aksi mendebarkan{y_str}. Menyajikan rangkaian pertempuran sengit dan misi berbahaya penuh adrenalin yang memacu ketegangan dari awal hingga akhir."
+    elif "animasi" in g_lower or "animation" in g_lower:
+        return f"Petualangan animasi memukau{y_str}. Membawa penonton menyelami dunia imajinatif penuh warna, kehangatan persahabatan, dan pesan inspiratif mendalam."
+    elif "komedi" in g_lower or "comedy" in g_lower:
+        return f"Film komedi menghibur{y_str}. Menghadirkan rentetan peristiwa kocak, kesalahpahaman tak terduga, dan gelak tawa yang menyegarkan suasana."
+    elif "romantis" in g_lower or "romance" in g_lower:
+        return f"Kisah drama romantis menyentuh hati{y_str}. Mengikuti dinamika hubungan dan perjalanan cinta penuh liku yang menggetarkan perasaan."
+    elif "sci-fi" in g_lower or "fantasi" in g_lower or "fantasy" in g_lower:
+        return f"Kisah fiksi ilmiah dan fantasi spektakuler{y_str}. Menjelajahi misteri di luar nalar dan tantangan luar biasa yang melampaui batas realitas."
+    elif "thriller" in g_lower or "misteri" in g_lower or "mystery" in g_lower:
+        return f"Film thriller penuh teka-teki{y_str}. Menyuguhkan plot misterius dan ketegangan psikologis yang memikat penonton untuk mengungkap rahasia kelam di baliknya."
+    elif "drama" in g_lower:
+        return f"Karya drama emosional mendalam{y_str}. Mengangkat kisah kehidupan penuh pergulatan batin, konflik moral, dan pencarian jati diri yang sarat makna."
+    elif genre:
+        return f"Film bergenre {genre}{y_str}. Menyajikan alur cerita menarik dan dinamika konflik memikat yang layak untuk disaksikan bersama."
+    else:
+        return f"Sebuah tayangan film menarik{y_str} dengan alur cerita memikat dan dinamika sinematik yang patut dinikmati."
+
+
 class WikipediaSynopsisService:
     """Smart Zero-AI Synopsis Extractor for Movies and TV Series.
     Extracts authentic story plots and avoids encyclopedic fluff or actor biographies."""
@@ -229,28 +283,31 @@ class WikipediaSynopsisService:
 
         return text[:max_chars].rstrip() + "..."
 
-    def _sync_fetch(self, title: str, year: Optional[int] = None, is_series: bool = False) -> str:
-        if not title:
-            return ""
-
-        cache_key = f"synopsis_v3_{title.lower()}_{year}_{is_series}" if year else f"synopsis_v3_{title.lower()}_{is_series}"
-        cached = self.cache.get_setting(cache_key, "")
-        if cached:
-            return "" if cached == "none" else cached
-
-        # Build prioritized queries: exact title first!
-        queries = [title]
-        if is_series:
-            queries.append(f"{title} seri televisi")
-            queries.append(f"{title} drama")
+    def _fetch_from_wikipedia(self, lang: str, title: str, year: Optional[int] = None, is_series: bool = False) -> str:
+        base_url = f"https://{lang}.wikipedia.org/w/api.php?"
+        queries = []
+        if lang == "id":
+            queries.append(title)
+            if is_series:
+                queries.append(f"{title} seri televisi")
+                queries.append(f"{title} drama")
+            else:
+                if year:
+                    queries.append(f"{title} {year} film")
+                queries.append(f"{title} film")
+            sec_keywords = ["sinopsis", "alur cerita", "alur", "plot", "premis", "ringkasan cerita"]
         else:
             if year:
+                queries.append(f"{title} ({year} film)")
                 queries.append(f"{title} {year} film")
+            queries.append(f"{title} (film)")
             queries.append(f"{title} film")
+            queries.append(title)
+            sec_keywords = ["plot", "synopsis", "premise", "storyline", "overview", "summary"]
 
         for query in queries:
             try:
-                search_url = "https://id.wikipedia.org/w/api.php?" + urllib.parse.urlencode({
+                search_url = base_url + urllib.parse.urlencode({
                     "action": "query",
                     "list": "search",
                     "srsearch": query,
@@ -264,7 +321,6 @@ class WikipediaSynopsisService:
                     if not results:
                         continue
 
-                    # Filter and score candidates
                     candidates = []
                     for r in results:
                         sc = self._score_page(r.get("title", ""), r.get("snippet", ""), title, year, is_series)
@@ -277,8 +333,8 @@ class WikipediaSynopsisService:
                     candidates.sort(key=lambda x: x[0], reverse=True)
                     best_page = candidates[0][1]
 
-                # Strategy 1: Dedicated Section (Sinopsis, Alur cerita, Plot, Premis)
-                sec_url = "https://id.wikipedia.org/w/api.php?" + urllib.parse.urlencode({
+                # Strategy 1: Dedicated Section
+                sec_url = base_url + urllib.parse.urlencode({
                     "action": "parse",
                     "page": best_page,
                     "prop": "sections",
@@ -292,12 +348,12 @@ class WikipediaSynopsisService:
                 target_section_idx = None
                 for s in secs:
                     line = s.get("line", "").lower()
-                    if any(k in line for k in ["sinopsis", "alur cerita", "alur", "plot", "premis", "ringkasan cerita"]):
+                    if any(k in line for k in sec_keywords):
                         target_section_idx = s.get("index")
                         break
 
                 if target_section_idx:
-                    p_url = "https://id.wikipedia.org/w/api.php?" + urllib.parse.urlencode({
+                    p_url = base_url + urllib.parse.urlencode({
                         "action": "parse",
                         "page": best_page,
                         "prop": "wikitext",
@@ -310,12 +366,12 @@ class WikipediaSynopsisService:
                         wt = p_data.get("parse", {}).get("wikitext", {}).get("*", "")
                         clean = self._clean_wikitext(wt)
                         if clean and len(clean) > 35 and not self._is_biography(clean):
-                            result = self._truncate_smart(clean)
-                            self.cache.set_setting(cache_key, result)
-                            return result
+                            if lang == "en":
+                                clean = translate_to_indonesian(clean)
+                            return self._truncate_smart(clean)
 
-                # Strategy 2: Smart Lead Extractor (for pages without section headers)
-                ext_url = "https://id.wikipedia.org/w/api.php?" + urllib.parse.urlencode({
+                # Strategy 2: Lead Extractor
+                ext_url = base_url + urllib.parse.urlencode({
                     "action": "query",
                     "prop": "extracts",
                     "explaintext": "1",
@@ -333,17 +389,67 @@ class WikipediaSynopsisService:
                     lead = raw_ext.split("==")[0].strip()
                     story = self._extract_storyline_from_lead(lead)
                     if story and len(story) > 35 and not self._is_biography(story):
-                        result = self._truncate_smart(story)
-                        self.cache.set_setting(cache_key, result)
-                        return result
+                        if lang == "en":
+                            story = translate_to_indonesian(story)
+                        return self._truncate_smart(story)
 
             except Exception as e:
-                logger.debug(f"Wikipedia synopsis fetch error for '{query}': {e}")
+                logger.debug(f"Wikipedia ({lang}) synopsis fetch error for '{query}': {e}")
                 continue
 
-        # Mark as not found to avoid redundant queries
-        self.cache.set_setting(cache_key, "none")
         return ""
 
-    async def get_synopsis(self, title: str, year: Optional[int] = None, is_series: bool = False) -> str:
-        return await asyncio.to_thread(self._sync_fetch, title, year, is_series)
+    def _sync_fetch(self, title: str, year: Optional[int] = None, is_series: bool = False, genre: Optional[str] = None) -> str:
+        if not title:
+            return ""
+
+        cache_key = f"synopsis_v4_{title.lower()}_{year}_{is_series}" if year else f"synopsis_v4_{title.lower()}_{is_series}"
+        cached = self.cache.get_setting(cache_key, "")
+        if cached:
+            return "" if cached == "none" else cached
+
+        # Tier 1: Indonesian Wikipedia
+        syn = self._fetch_from_wikipedia("id", title, year, is_series)
+        if syn:
+            self.cache.set_setting(cache_key, syn)
+            return syn
+
+        # Tier 2: English Wikipedia (Auto-translated to Indonesian)
+        syn = self._fetch_from_wikipedia("en", title, year, is_series)
+        if syn:
+            self.cache.set_setting(cache_key, syn)
+            return syn
+
+        # Tier 3: OMDb API Plot (Auto-translated to Indonesian)
+        try:
+            omdb_url = f"http://www.omdbapi.com/?t={urllib.parse.quote(title)}&apikey=trilogy"
+            if year:
+                omdb_url += f"&y={year}"
+            req_omdb = urllib.request.Request(omdb_url, headers=self.headers)
+            with urllib.request.urlopen(req_omdb, timeout=2.5) as resp_omdb:
+                o_data = json.loads(resp_omdb.read().decode("utf-8"))
+                if o_data.get("Response") == "True" and o_data.get("Plot") and o_data["Plot"] != "N/A":
+                    raw_plot = o_data["Plot"]
+                    translated_plot = translate_to_indonesian(raw_plot)
+                    if translated_plot:
+                        syn = self._truncate_smart(translated_plot)
+                        self.cache.set_setting(cache_key, syn)
+                        return syn
+        except Exception as e:
+            logger.debug(f"OMDb plot fetch error for '{title}': {e}")
+
+        # Tier 4: Smart Contextual Fallback (Never leave caption empty)
+        fallback = generate_smart_fallback(title, year, genre)
+        self.cache.set_setting(cache_key, fallback)
+        return fallback
+
+    def translate_if_needed(self, text: str) -> str:
+        """Translates text to Indonesian if it is in English."""
+        return translate_to_indonesian(text)
+
+    def get_fallback_synopsis(self, title: str, year: Optional[int] = None, genre: Optional[str] = None) -> str:
+        """Generates smart contextual fallback synopsis."""
+        return generate_smart_fallback(title, year, genre)
+
+    async def get_synopsis(self, title: str, year: Optional[int] = None, is_series: bool = False, genre: Optional[str] = None) -> str:
+        return await asyncio.to_thread(self._sync_fetch, title, year, is_series, genre)

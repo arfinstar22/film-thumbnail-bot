@@ -57,6 +57,18 @@ class CaptionGenerator:
         if genre:
             lines.append(f"🎭 <b>Genre :</b> {html.escape(str(genre))}")
 
+        country = metadata.get("country")
+        if country:
+            lines.append(f"🌍 <b>Negara :</b> {html.escape(str(country))}")
+
+        director = metadata.get("director")
+        if director:
+            lines.append(f"🎬 <b>Sutradara :</b> {html.escape(str(director))}")
+
+        actors = metadata.get("actors")
+        if actors:
+            lines.append(f"👥 <b>Pemeran :</b> {html.escape(str(actors))}")
+
         if res:
             res_display = {
                 "2160p": "2160p • 4K UHD",
