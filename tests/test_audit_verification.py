@@ -293,6 +293,36 @@ def test_audiosub_and_request_match():
     print("✅ Audio/Sub Preset & Member Request Matching: Verified successfully!")
 
 
+def test_website_prefix_cleaner():
+    from bot.services.metadata.parser import FilenameParser
+    from bot.services.metadata.normalizer import Normalizer
+
+    parser = FilenameParser()
+
+    # Test 1: User screenshot file
+    res1 = parser.parse("NGEFILM21.PW.Gampang.Cuan.2023.WEB.DL.1080p.mp4")
+    assert res1["title"] == "Gampang Cuan", f"Expected 'Gampang Cuan', got {res1['title']}"
+    assert res1["year"] == 2023
+
+    # Test 2: idlix21 file
+    res2 = parser.parse("idlix21.Laskar.Pelangi.1080p.mkv")
+    assert res2["title"] == "Laskar Pelangi", f"Expected 'Laskar Pelangi', got {res2['title']}"
+
+    # Test 3: Standalone 21 in real movie title preserved
+    res3 = parser.parse("21 Jump Street 2012 1080p.mkv")
+    assert res3["title"] == "21 Jump Street", f"Expected '21 Jump Street', got {res3['title']}"
+
+    # Test 4: Bracketed site prefix
+    res4 = parser.parse("[NGEFILM21.PW] Gampang.Cuan.2023.mp4")
+    assert res4["title"] == "Gampang Cuan", f"Expected 'Gampang Cuan', got {res4['title']}"
+
+    # Test 5: Domain with preposition preserved
+    res5 = parser.parse("Melongfilm.site_Miracle.in.Cell.No.7.2022.mkv")
+    assert res5["title"] == "Miracle In Cell No 7", f"Expected 'Miracle In Cell No 7', got {res5['title']}"
+
+    print("✅ Website & Uploader Prefix Cleaner: 100% verified across all test cases!")
+
+
 if __name__ == "__main__":
     test_caption_generator()
     test_rating_service_non_ascii()
@@ -306,7 +336,9 @@ if __name__ == "__main__":
     test_thumbnail_generator()
     test_supabase_cloud_sync()
     test_audiosub_and_request_match()
+    test_website_prefix_cleaner()
     print("\n🎉 ALL AUDIT VERIFICATION CHECKS PASSED!")
+
 
 
 

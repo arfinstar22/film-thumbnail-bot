@@ -109,6 +109,17 @@ class FilenameParser:
 
         # Extract title tokens
         title_tokens = tokens[:boundary]
+        while title_tokens:
+            first_w = title_tokens[0].lower()
+            if (
+                Normalizer.is_pirate_brand(title_tokens[0])
+                or first_w in Normalizer.PROMO_NOISE_TOKENS
+                or Normalizer.is_homoglyph_or_decorative(title_tokens[0])
+            ):
+                title_tokens.pop(0)
+            else:
+                break
+
         if title_tokens:
             cleaned_words = []
             for w in title_tokens:

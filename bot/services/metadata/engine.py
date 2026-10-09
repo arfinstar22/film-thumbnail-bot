@@ -58,6 +58,17 @@ class MetadataEngine:
             syn_res, rate_res = await asyncio.gather(*tasks)
 
             if rate_res:
+                verified_t = rate_res.get("verified_title")
+                if verified_t and verified_t.lower() != title.lower():
+                    logger.info(f"Verified movie title corrected: '{title}' -> '{verified_t}'")
+                    title = verified_t
+                    metadata["title"] = title
+                    if not syn_res and enable_synopsis:
+                        try:
+                            syn_res = await self.synopsis_service.get_synopsis(title, year, is_series=is_series, genre=metadata.get("genre"))
+                        except Exception:
+                            pass
+
                 if rate_res.get("rating") and not metadata.get("rating"):
                     metadata["rating"] = rate_res["rating"]
                 if rate_res.get("genre") and not metadata.get("genre"):

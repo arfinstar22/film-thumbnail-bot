@@ -51,7 +51,7 @@ class MovieRatingService:
         translated = [GENRE_MAP.get(p.lower(), p) for p in parts]
         return ", ".join(translated)
 
-    def _sync_fetch(self, title: str, year: Optional[int] = None) -> Dict[str, str]:
+    def _sync_fetch(self, title: str, year: Optional[int] = None, _depth: int = 0) -> Dict[str, str]:
         if not title:
             return {}
 
@@ -65,6 +65,7 @@ class MovieRatingService:
                 pass
 
         imdb_id = None
+        suggested_title = None
 
         # Step 1: IMDb Suggest API
         try:
@@ -84,9 +85,11 @@ class MovieRatingService:
                     if it_id.startswith("tt"):
                         if year and it.get("y") and abs(it["y"] - year) <= 1:
                             imdb_id = it_id
+                            suggested_title = it.get("l")
                             break
                         elif not imdb_id:
                             imdb_id = it_id
+                            suggested_title = it.get("l")
         except Exception as e:
             logger.debug(f"IMDb suggest error: {e}")
 
@@ -122,11 +125,26 @@ class MovieRatingService:
                             res["plot"] = data["Plot"]
                         if data.get("Poster") and data["Poster"] != "N/A" and data["Poster"].startswith("http"):
                             res["poster_url"] = data["Poster"]
+
+                        verified = data.get("Title") or suggested_title
+                        if verified:
+                            res["verified_title"] = verified
+
                         if res:
                             self.cache.set_setting(cache_key, json.dumps(res))
                             return res
             except Exception:
                 continue
+
+        # Step 3: Fallback query attempt - if 0 results, test stripping potential unknown prefix word
+        words = title.split()
+        if _depth < 2 and len(words) > 1:
+            sub_title = " ".join(words[1:])
+            sub_res = self._sync_fetch(sub_title, year, _depth=_depth + 1)
+            if sub_res and (sub_res.get("director") or sub_res.get("poster_url") or sub_res.get("rating")):
+                # Cache under original key too to save future lookups
+                self.cache.set_setting(cache_key, json.dumps(sub_res))
+                return sub_res
 
         # Save empty result to avoid re-fetching failed queries
         self.cache.set_setting(cache_key, json.dumps({}))
