@@ -26,10 +26,17 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
 
 def run_health_server():
-    port = int(os.getenv("PORT", "8080"))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    logging.info("Health check server active on port %s", port)
-    server.serve_forever()
+    try:
+        port = int(os.getenv("PORT", "8080").strip())
+    except (ValueError, AttributeError):
+        port = 8080
+    try:
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        logging.info("Health check server active on port %s", port)
+        server.serve_forever()
+    except Exception as e:
+        logging.warning("Could not start health check server on port %s: %s", port, e)
+
 
 
 async def start_with_hydration():

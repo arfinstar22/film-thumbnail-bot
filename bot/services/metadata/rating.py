@@ -68,9 +68,13 @@ class MovieRatingService:
 
         # Step 1: IMDb Suggest API
         try:
+            first_char = "a"
+            for ch in clean_title.lower():
+                if ch.isascii() and ch.isalnum():
+                    first_char = ch
+                    break
             slug = urllib.parse.quote(clean_title.lower().replace(" ", "_"))
-            first = clean_title.lower()[0] if clean_title else "a"
-            url_suggest = f"https://v3.sg.media-imdb.com/suggestion/{first}/{slug}.json"
+            url_suggest = f"https://v3.sg.media-imdb.com/suggestion/{first_char}/{slug}.json"
             req = urllib.request.Request(url_suggest, headers=self.headers)
             with urllib.request.urlopen(req, timeout=2.5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))

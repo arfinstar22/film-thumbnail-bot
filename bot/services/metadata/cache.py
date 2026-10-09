@@ -31,7 +31,12 @@ class MetadataCache:
 
     def _conn(self):
         if not hasattr(self._local, "conn"):
-            self._local.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._local.conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
+            try:
+                self._local.conn.execute("PRAGMA journal_mode=WAL")
+                self._local.conn.execute("PRAGMA busy_timeout=10000")
+            except Exception:
+                pass
             self._local.conn.execute("""
                 CREATE TABLE IF NOT EXISTS ai_cache (
                     query TEXT PRIMARY KEY,
@@ -185,7 +190,7 @@ class MetadataCache:
         except Exception as e:
             logger.error(f"Save movie catalog error: {e}")
 
-    def delete_movie_posts(self, message_ids: List[int]) -> List[str]:
+    def delete_movie_posts(self, message_ids: List[int], channel_username: Optional[str] = None) -> List[str]:
         """Delete records from movie_catalog by message_ids and return affected channel usernames."""
         if not message_ids:
             return []
@@ -194,11 +199,26 @@ class MetadataCache:
             conn = self._conn()
             self._ensure_catalog_table(conn)
             placeholders = ",".join("?" for _ in message_ids)
-            cur = conn.execute(f"SELECT DISTINCT channel_username FROM movie_catalog WHERE message_id IN ({placeholders})", list(message_ids))
-            affected_channels = [r[0] for r in cur.fetchall() if r[0]]
+            clean_chan = (channel_username or "").lstrip("@").strip().lower()
+            if clean_chan:
+                cur = conn.execute(
+                    f"SELECT DISTINCT channel_username FROM movie_catalog WHERE message_id IN ({placeholders}) AND LOWER(channel_username) = ?",
+                    list(message_ids) + [clean_chan]
+                )
+                affected_channels = [r[0] for r in cur.fetchall() if r[0]]
+                if affected_channels:
+                    conn.execute(
+                        f"DELETE FROM movie_catalog WHERE message_id IN ({placeholders}) AND LOWER(channel_username) = ?",
+                        list(message_ids) + [clean_chan]
+                    )
+                    conn.commit()
+            else:
+                cur = conn.execute(f"SELECT DISTINCT channel_username FROM movie_catalog WHERE message_id IN ({placeholders})", list(message_ids))
+                affected_channels = [r[0] for r in cur.fetchall() if r[0]]
+                if affected_channels:
+                    conn.execute(f"DELETE FROM movie_catalog WHERE message_id IN ({placeholders})", list(message_ids))
+                    conn.commit()
             if affected_channels:
-                conn.execute(f"DELETE FROM movie_catalog WHERE message_id IN ({placeholders})", list(message_ids))
-                conn.commit()
                 logger.info(f"Deleted {len(message_ids)} message IDs from catalog, affected channels: {affected_channels}")
         except Exception as e:
             logger.error(f"Delete movie posts error: {e}")

@@ -95,6 +95,8 @@ async def photo_thumbnail(src: str, jpg_path: str):
             src,
             "-vf",
             "scale='min(320,iw)':'min(320,ih)':force_original_aspect_ratio=decrease",
+            "-pix_fmt",
+            "yuvj420p",
             "-q:v",
             "2",
             jpg_path,
@@ -159,6 +161,8 @@ async def parse_ts_to_seconds(t: str) -> float:
     """Parse timestamp 'HH:MM:SS' or 'MM:SS' or angka detik."""
     t = t.strip()
     t = t.replace(",", ".")
+    if not t:
+        raise ValueError("Timestamp tidak boleh kosong")
     if t.isdigit():
         return float(t)
     parts = t.split(":")
@@ -166,6 +170,8 @@ async def parse_ts_to_seconds(t: str) -> float:
         p = [float(x) for x in parts]
     except ValueError:
         raise ValueError(f"Format timestamp tidak valid: {t}")
+    if any(x < 0 for x in p):
+        raise ValueError("Timestamp tidak boleh negatif")
     if len(parts) == 3:
         return p[0] * 3600 + p[1] * 60 + p[2]
     if len(parts) == 2:

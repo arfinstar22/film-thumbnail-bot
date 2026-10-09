@@ -1,3 +1,4 @@
+import html
 import os
 import re
 from typing import Dict, Any
@@ -7,7 +8,7 @@ class CaptionGenerator:
         self.watermark = watermark or os.getenv("CHANNEL_WATERMARK", "@film_indonesia1").strip()
 
     def generate(self, metadata: Dict[str, Any], custom_watermark: str = None) -> str:
-        title = metadata.get("title") or "Film"
+        title = (metadata.get("title") or "Film").strip()
         year = metadata.get("year")
         res = metadata.get("resolution")
         src = metadata.get("source")
@@ -21,20 +22,20 @@ class CaptionGenerator:
         file_size = metadata.get("fileSize")
         duration = metadata.get("duration")
 
-        wm = custom_watermark or self.watermark
-        clean_wm = wm.lstrip("@").strip() if wm else ""
+        wm = (custom_watermark or self.watermark or "").strip()
+        clean_wm = wm.lstrip("@").strip()
         channel_url = f"https://t.me/{clean_wm}" if clean_wm else "https://t.me"
 
         # Tampilan Header Judul & Tahun (+ Watermark)
-        title_upper = title.upper()
-        header = f"🎬 <b>{title_upper}</b>"
+        title_escaped = html.escape(title.upper())
+        header = f"🎬 <b>{title_escaped}</b>"
         if season is not None and episode is not None:
             header += f" (S{season:02d}E{episode:02d})"
         elif year:
             header += f" ({year})"
 
         if wm:
-            header += f" • <a href=\"{channel_url}\"><b>{wm}</b></a>"
+            header += f" • <a href=\"{html.escape(channel_url, quote=True)}\"><b>{html.escape(wm)}</b></a>"
 
         lines = [
             header,
@@ -50,11 +51,11 @@ class CaptionGenerator:
 
         rating = metadata.get("rating")
         if rating:
-            lines.append(f"⭐ <b>Rating :</b> {rating}")
+            lines.append(f"⭐ <b>Rating :</b> {html.escape(str(rating))}")
 
         genre = metadata.get("genre")
         if genre:
-            lines.append(f"🎭 <b>Genre :</b> {genre}")
+            lines.append(f"🎭 <b>Genre :</b> {html.escape(str(genre))}")
 
         if res:
             res_display = {
@@ -64,34 +65,36 @@ class CaptionGenerator:
                 "720p": "720p • HD",
                 "480p": "480p • SD"
             }.get(res, res)
-            lines.append(f"🎞️ <b>Kualitas :</b> {res_display}")
+            lines.append(f"🎞️ <b>Kualitas :</b> {html.escape(res_display)}")
 
         if src:
             src_str = f"{src} ({platform})" if platform else src
-            lines.append(f"📡 <b>Source :</b> {src_str}")
+            lines.append(f"📡 <b>Source :</b> {html.escape(src_str)}")
 
         if vc:
-            lines.append(f"💿 <b>Video :</b> {vc}")
+            lines.append(f"💿 <b>Video :</b> {html.escape(str(vc))}")
 
         if ac:
             audio_str = f"{ac} {ach}" if ach else ac
-            lines.append(f"🔊 <b>Audio :</b> {audio_str}")
+            lines.append(f"🔊 <b>Audio :</b> {html.escape(str(audio_str))}")
 
         if rg:
-            lines.append(f"🏷️ <b>Release :</b> {rg}")
+            lines.append(f"🏷️ <b>Release :</b> {html.escape(str(rg))}")
 
         if file_size:
-            lines.append(f"📦 <b>Ukuran :</b> {file_size}")
+            lines.append(f"📦 <b>Ukuran :</b> {html.escape(str(file_size))}")
 
         if duration:
-            lines.append(f"⏱️ <b>Durasi :</b> {duration}")
+            lines.append(f"⏱️ <b>Durasi :</b> {html.escape(str(duration))}")
 
         lines.append("━━━━━━━━━━━━━━━━━━")
 
-        synopsis = metadata.get("synopsis")
+        synopsis = (metadata.get("synopsis") or "").strip()
+        synopsis_idx = None
         if synopsis:
             lines.append("📖 <b>Sinopsis:</b>")
-            lines.append(f"<blockquote expandable>{synopsis}</blockquote>")
+            synopsis_idx = len(lines)
+            lines.append(f"<blockquote expandable>{html.escape(synopsis)}</blockquote>")
             lines.append("━━━━━━━━━━━━━━━━━━")
 
         # Auto Hashtags
@@ -112,22 +115,35 @@ class CaptionGenerator:
             if tag_wm:
                 hashtags.append(f"#{tag_wm}")
 
+        hashtag_idx = None
         if hashtags:
+            hashtag_idx = len(lines)
             lines.append(f"🔍 <i>{' '.join(hashtags)}</i>")
             lines.append("")
 
         if wm:
-            lines.append(f"🍿 <b>Channel Resmi:</b> <a href=\"{channel_url}\">{wm}</a>")
+            lines.append(f"🍿 <b>Channel Resmi:</b> <a href=\"{html.escape(channel_url, quote=True)}\">{html.escape(wm)}</a>")
 
         result_text = "\n".join(lines)
-        if len(result_text) > 980 and synopsis:
+
+        # Telegram strict max 1024 characters check
+        if len(result_text) > 980 and synopsis and synopsis_idx is not None:
             excess = len(result_text) - 980
-            trimmed = synopsis[:max(50, len(synopsis) - excess - 3)].rstrip() + "..."
-            for i, line in enumerate(lines):
-                if line.startswith("<blockquote expandable>"):
-                    lines[i] = f"<blockquote expandable>{trimmed}</blockquote>"
-                    break
+            trimmed_len = max(40, len(synopsis) - excess - 15)
+            trimmed = synopsis[:trimmed_len].rstrip() + "..."
+            lines[synopsis_idx] = f"<blockquote expandable>{html.escape(trimmed)}</blockquote>"
             result_text = "\n".join(lines)
 
+        # Final guarantee to never exceed 1024 characters
+        if len(result_text) > 1020:
+            if hashtag_idx is not None and hashtag_idx < len(lines):
+                lines.pop(hashtag_idx)
+                result_text = "\n".join([line for line in lines if line.strip() != "🔍 <i></i>"])
+            if len(result_text) > 1020 and synopsis_idx is not None:
+                short_syn = synopsis[:60].rstrip() + "..."
+                lines[synopsis_idx] = f"<blockquote expandable>{html.escape(short_syn)}</blockquote>"
+                result_text = "\n".join(lines)
+
         return result_text
+
 

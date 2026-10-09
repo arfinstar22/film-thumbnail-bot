@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import logging
 import re
@@ -61,8 +62,12 @@ class WikipediaSynopsisService:
         # 4. Remove reference tags
         text = re.sub(r"<ref[^>]*>.*?</ref>", "", text, flags=re.DOTALL)
         text = re.sub(r"<ref[^>]*/>", "", text)
-        # 5. Remove templates {{...}}
-        text = re.sub(r"\{\{[^}]*\}\}", "", text)
+        # 5. Remove templates {{...}} (including nested)
+        while "{{" in text and "}}" in text:
+            new_text = re.sub(r"\{\{[^{}]*\}\}", "", text)
+            if new_text == text:
+                break
+            text = new_text
         # 6. Resolve internal links [[Target|Anchor]] -> Anchor, [[Target]] -> Target
         text = re.sub(r"\[\[(?:[^|\]]*\|)?([^\]]+)\]\]", r"\1", text)
         # 7. Remove footnote markers [1], [catatan 1]
@@ -71,7 +76,9 @@ class WikipediaSynopsisService:
         text = re.sub(r"\'\'\'?", "", text)
         # 9. Strip any stray HTML tags
         text = re.sub(r"<[^>]+>", "", text)
-        # 10. Normalize spaces
+        # 10. Unescape HTML entities
+        text = html.unescape(text)
+        # 11. Normalize spaces
         return re.sub(r"\s+", " ", text).strip()
 
     def _is_biography(self, text: str) -> bool:

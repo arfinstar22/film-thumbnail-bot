@@ -132,6 +132,28 @@ def publish_or_update_telegraph_catalog(
         path_key = f"telegraph_path_{clean_channel}"
         cached_path = cache.get_setting(path_key, "")
 
+        # Telegraph 64KB content limit safeguard: switch to compact format if content exceeds 60KB
+        content_json = json.dumps(nodes)
+        if len(content_json.encode("utf-8")) > 60000:
+            compact_nodes = [nodes[0], nodes[1], nodes[2], nodes[3]]
+            for char in sorted_keys:
+                char_items = []
+                for m in groups[char]:
+                    title = (m.get("title") or "Film").strip()
+                    year = m.get("year")
+                    msg_id = m.get("message_id")
+                    post_url = f"https://t.me/{clean_channel}/{msg_id}"
+                    t_str = f"{title} ({year})" if year else title
+                    char_items.append({
+                        "tag": "li",
+                        "children": [{"tag": "b", "children": [{"tag": "a", "attrs": {"href": post_url}, "children": [f"🎬 {t_str}"]}]}]
+                    })
+                compact_nodes.append({"tag": "h4", "children": [f"📁 [ {char} ] — {len(groups[char])} Koleksi"]})
+                compact_nodes.append({"tag": "ul", "children": char_items})
+                compact_nodes.append({"tag": "hr"})
+            compact_nodes.append(nodes[-1])
+            nodes = compact_nodes
+
         page_title = f"🍿 KATALOG FILM @{clean_channel.upper()}"
 
         if cached_path:

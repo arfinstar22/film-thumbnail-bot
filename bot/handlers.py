@@ -1,8 +1,10 @@
 import asyncio
 import datetime
+import html
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import tempfile
@@ -236,7 +238,8 @@ def format_queue_dashboard(pending_posts: list, watermark: str) -> Tuple[str, In
         "📋 <b>Daftar Lengkap Antrean Tayang:</b>"
     ]
 
-    for idx, item in enumerate(pending_posts, 1):
+    display_posts = pending_posts[:25]
+    for idx, item in enumerate(display_posts, 1):
         sched_dt = datetime.datetime.fromtimestamp(item["scheduled_timestamp"], WIB)
         if sched_dt.date() == now.date():
             time_label = sched_dt.strftime("Hari ini, %H:%M WIB")
@@ -245,8 +248,11 @@ def format_queue_dashboard(pending_posts: list, watermark: str) -> Tuple[str, In
         else:
             time_label = sched_dt.strftime("%d %b, %H:%M WIB")
 
-        title = item.get("title") or "Film"
+        title = html.escape(item.get("title") or "Film")
         lines.append(f"<b>#{idx}.</b> 🕒 <code>[{time_label}]</code> 🎬 <b>{title}</b>")
+
+    if len(pending_posts) > 25:
+        lines.append(f"\n<i>...dan {len(pending_posts) - 25} film lainnya dalam antrean.</i>")
 
     lines.append("\n<i>✨ Setiap film yang selesai diterbitkan otomatis akan langsung hilang dari antrean ini secara real-time!</i>")
 
@@ -278,7 +284,8 @@ def format_schedule_announcement(pending_posts: list, watermark: str, bot_userna
         "Halo Sobat Film! Berikut adalah daftar film yang akan tayang di channel kami sesuai jadwal prime-time:\n"
     ]
 
-    for idx, item in enumerate(pending_posts, 1):
+    display_posts = pending_posts[:15]
+    for idx, item in enumerate(display_posts, 1):
         sched_dt = datetime.datetime.fromtimestamp(item["scheduled_timestamp"], WIB)
         if sched_dt.date() == now.date():
             day_tag = "Hari ini"
@@ -289,17 +296,21 @@ def format_schedule_announcement(pending_posts: list, watermark: str, bot_userna
 
         time_str = sched_dt.strftime("%H:%M WIB")
         meta = item.get("metadata") or {}
-        title = item.get("title") or meta.get("title") or "Film"
+        raw_title = item.get("title") or meta.get("title") or "Film"
+        title = html.escape(raw_title)
         year = meta.get("year")
         year_str = f" ({year})" if year else ""
         genre = meta.get("genre")
-        genre_str = f" | 🎭 <i>{genre}</i>" if genre and str(genre).strip() not in ("-", "None", "") else ""
+        genre_str = f" | 🎭 <i>{html.escape(str(genre))}</i>" if genre and str(genre).strip() not in ("-", "None", "") else ""
         rating = meta.get("rating")
-        rating_str = f" | ⭐ <b>{rating}</b>" if rating and str(rating).strip() not in ("-", "None", "") else ""
+        rating_str = f" | ⭐ <b>{html.escape(str(rating))}</b>" if rating and str(rating).strip() not in ("-", "None", "") else ""
 
         lines.append(f"⏰ <b>{time_str}</b> ({day_tag})")
         lines.append(f"🎬 <b>{title}{year_str}</b>{genre_str}{rating_str}")
         lines.append("")
+
+    if len(pending_posts) > 15:
+        lines.append(f"<i>...dan {len(pending_posts) - 15} film seru lainnya yang siap tayang!</i>\n")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append("🔔 <i>Nyalakan notifikasi channel agar langsung dapat menonton saat film rilis!</i>")
@@ -550,7 +561,7 @@ def ensure_scheduler_worker(client: Client):
 
 async def _apply_expandable_caption(chat_id: Union[int, str], message_id: int, caption: str, reply_markup=None):
     """Enforce native Telegram expandable blockquote via Bot API HTTP endpoint."""
-    if not caption or "<blockquote expandable>" not in caption:
+    if not BOT_TOKEN or not caption or "<blockquote expandable>" not in caption:
         return
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageCaption"
@@ -2860,17 +2871,6 @@ async def cb_sched_recover(client: Client, call: CallbackQuery):
         parse_mode=ParseMode.HTML
     )
 
-    wm = _get_user_watermark(chat_id)
-    pending = _engine.cache.get_pending_scheduled_posts()
-    text, kb = format_queue_dashboard(pending, wm)
-
-    alert_text = f"✅ Berhasil memulihkan {imported} film!" if imported > 0 else "ℹ️ Tidak ada video baru untuk dipulihkan."
-    await call.answer(alert_text, show_alert=True)
-    try:
-        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-    except Exception:
-        pass
-
 
 @app.on_callback_query(filters.regex(r"^sched_clear_all$"))
 async def cb_sched_clear_all(client: Client, call: CallbackQuery):
@@ -3103,10 +3103,9 @@ async def healthcheck_cmd(client: Client, msg: Message):
                 fetched = await client.get_messages(clean_wm, message_ids=batch)
                 if not isinstance(fetched, list):
                     fetched = [fetched]
-                for ch_m in fetched:
+                for req_id, ch_m in zip(batch, fetched):
                     if not ch_m or getattr(ch_m, "empty", False):
-                        if ch_m and getattr(ch_m, "id", None):
-                            dead_ids.append(ch_m.id)
+                        dead_ids.append(req_id)
             except Exception as be:
                 logger.warning(f"Healthcheck batch error: {be}")
             await asyncio.sleep(0.05)
@@ -3552,6 +3551,9 @@ async def auto_hydrate_channel_catalog(
                         caption=info["caption"],
                         file_id=info.get("file_id")
                     )
+        except FloodWait as fw:
+            logger.warning(f"FloodWait during catalog hydration: {fw.value}s")
+            await asyncio.sleep(fw.value + 1)
         except Exception as be:
             logger.debug(f"Hydration batch fetch error: {be}")
         await asyncio.sleep(0.02)
@@ -3734,6 +3736,7 @@ async def send_or_update_backup_document(
     if not clean_wm:
         return None
 
+    temp_path = None
     try:
         movies = _engine.cache.get_deduplicated_catalog(clean_wm)
         if not movies:
@@ -3776,15 +3779,16 @@ async def send_or_update_backup_document(
         if sent_doc:
             _engine.cache.set_setting(f"last_backup_msg_{chat_id}_{clean_wm}", str(sent_doc.id))
 
-        try:
-            os.remove(temp_path)
-        except Exception:
-            pass
-
         return sent_doc
     except Exception as e:
         logger.warning(f"Error in send_or_update_backup_document: {e}")
         return None
+    finally:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
 
 @app.on_message(filters.command(["synckatalog", "scanchannel"]))
@@ -3974,12 +3978,15 @@ async def _update_previous_episode_post(
         ]
 
     updated_kb = InlineKeyboardMarkup([nav_row, row1, row2])
-    await client.edit_message_reply_markup(
-        chat_id=watermark,
-        message_id=prev_mid,
-        reply_markup=updated_kb
-    )
-    logger.info(f"Updated in-place post for {title_meta} Eps {prev_ep} (mid={prev_mid}) with forward link to Eps {next_ep} (mid={next_mid})")
+    try:
+        await client.edit_message_reply_markup(
+            chat_id=watermark,
+            message_id=prev_mid,
+            reply_markup=updated_kb
+        )
+        logger.info(f"Updated in-place post for {title_meta} Eps {prev_ep} (mid={prev_mid}) with forward link to Eps {next_ep} (mid={next_mid})")
+    except Exception as e:
+        logger.warning(f"Failed to update previous episode post {prev_mid}: {e}")
 
 
 async def publish_video_to_channel(
@@ -4250,14 +4257,11 @@ async def restore_channel_cmd(client: Client, msg: Message):
             return
         target_channel = args[0]
         status_msg = await msg.reply_text("📥 <b>Membaca file backup JSON...</b>", parse_mode=ParseMode.HTML)
+        downloaded = None
         try:
             downloaded = await client.download_media(reply.document)
             with open(downloaded, "r", encoding="utf-8") as f:
                 content = f.read()
-            try:
-                os.remove(downloaded)
-            except Exception:
-                pass
 
             data = json.loads(content)
             movies = data.get("movies", [])
@@ -4268,6 +4272,12 @@ async def restore_channel_cmd(client: Client, msg: Message):
         except Exception as je:
             await status_msg.edit_text(f"❌ <b>File JSON tidak valid:</b> <code>{je}</code>", parse_mode=ParseMode.HTML)
             return
+        finally:
+            if downloaded:
+                try:
+                    os.remove(downloaded)
+                except Exception:
+                    pass
     else:
         # Mode 2: User restores from database
         if len(args) == 1:
@@ -4883,10 +4893,11 @@ async def handle_edit_callback(client: Client, call: CallbackQuery):
     _jobs[chat_id]["state"] = "waiting_edit"
     _jobs[chat_id]["edit_timeout"] = time.time() + 300  # 5 menit
 
+    safe_caption = html.escape(caption)
     await call.message.reply_text(
         "✏️ <b>Mode Edit Caption</b> (5 menit)\n\n"
         "Salin, edit bagian yang mau diubah, lalu kirim balik:\n\n"
-        f"<code>{caption}</code>",
+        f"<code>{safe_caption}</code>",
         parse_mode=ParseMode.HTML
     )
     await call.answer("Mode edit aktif (5 menit)")
@@ -5046,9 +5057,10 @@ async def handle_incoming_text(client: Client, msg: Message):
                 [InlineKeyboardButton("🍿 Tonton Sekarang", url=ex_link)],
                 [InlineKeyboardButton("💬 Request Film Lain", callback_data="btn_start_request")]
             ])
+            safe_ex_disp = html.escape(ex_disp)
             await msg.reply_text(
                 f"🎉 <b>Film yang Kamu Cari Sudah Tersedia!</b>\n\n"
-                f"🎬 <b>{ex_disp}</b>\n"
+                f"🎬 <b>{safe_ex_disp}</b>\n"
                 f"📢 Channel: @{clean_wm}\n\n"
                 f"Kamu tidak perlu menunggu, film ini sudah bisa langsung ditonton!\n\n"
                 f"👉 <a href=\"{ex_link}\">Klik di sini untuk langsung menonton di channel</a>",
@@ -5064,10 +5076,11 @@ async def handle_incoming_text(client: Client, msg: Message):
             [InlineKeyboardButton("💬 Request Film Lain", callback_data="btn_start_request")],
             [InlineKeyboardButton("🔍 Cari Film Lain", switch_inline_query_current_chat="")]
         ])
+        safe_query = html.escape(query)
         if res.get("is_new"):
             await msg.reply_text(
                 f"✅ <b>Permintaan Film Berhasil Dicatat!</b>\n\n"
-                f"🎬 <b>Judul:</b> {query}\n"
+                f"🎬 <b>Judul:</b> {safe_query}\n"
                 f"📢 <b>Target Channel:</b> @{clean_wm}\n\n"
                 f"<i>Permintaanmu sudah masuk antrean admin. Begitu film ini diunggah ke channel, bot akan otomatis mengirimkan notifikasi kepadamu lewat DM! 🔔🍿</i>",
                 parse_mode=ParseMode.HTML,
@@ -5076,7 +5089,7 @@ async def handle_incoming_text(client: Client, msg: Message):
         else:
             await msg.reply_text(
                 f"ℹ️ <b>Permintaan Sudah Terdaftar Sebelumnya:</b>\n\n"
-                f"Kamu sudah pernah me-request film <b>{query}</b>.\n"
+                f"Kamu sudah pernah me-request film <b>{safe_query}</b>.\n"
                 f"Permintaanmu masih aktif dan bot akan tetap mengirimkan notifikasi saat film sudah diunggah. Mohon ditunggu ya! 🙏",
                 parse_mode=ParseMode.HTML,
                 reply_markup=kb
@@ -5090,15 +5103,17 @@ async def handle_incoming_text(client: Client, msg: Message):
             wm = _get_user_watermark(chat_id)
             clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
             results = _engine.cache.search_catalog(query, limit=5)
+            safe_query = html.escape(query)
             if results:
-                lines = [f"🔍 <b>Hasil Pencarian untuk '{query}':</b>\n"]
+                lines = [f"🔍 <b>Hasil Pencarian untuk '{safe_query}':</b>\n"]
                 kb_rows = []
                 for item in results:
                     t = item["title"]
+                    safe_t = html.escape(t)
                     y = f" ({item['year']})" if item.get("year") else ""
                     m_id = item.get("message_id")
                     url = f"https://t.me/{clean_wm}/{m_id}" if m_id else f"https://t.me/{clean_wm}"
-                    lines.append(f"• 🎬 <a href=\"{url}\"><b>{t}{y}</b></a>")
+                    lines.append(f"• 🎬 <a href=\"{url}\"><b>{safe_t}{y}</b></a>")
                     if len(kb_rows) < 3 and m_id:
                         kb_rows.append([InlineKeyboardButton(f"🍿 Tonton {t[:20]}", url=url)])
                 kb_rows.append([InlineKeyboardButton("💬 Request Film Lain", callback_data="btn_start_request")])
@@ -5106,13 +5121,13 @@ async def handle_incoming_text(client: Client, msg: Message):
                 await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb_rows), disable_web_page_preview=True)
                 return
             else:
-                clean_q = query[:40]
+                clean_q = query.encode("utf-8")[:40].decode("utf-8", "ignore")
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("💬 Ya, Request Film Ini", callback_data=f"auto_req:{clean_q}")],
                     [InlineKeyboardButton("🔍 Cari Judul Lain", switch_inline_query_current_chat="")]
                 ])
                 await msg.reply_text(
-                    f"🔍 Film <b>{query}</b> belum ditemukan di channel @{clean_wm}.\n\n"
+                    f"🔍 Film <b>{safe_query}</b> belum ditemukan di channel @{clean_wm}.\n\n"
                     f"Apakah kamu ingin me-request film ini ke admin?",
                     parse_mode=ParseMode.HTML,
                     reply_markup=kb
@@ -5138,10 +5153,14 @@ async def inline_search_handler(client: Client, query: InlineQuery):
         msg_id = item["message_id"]
         post_url = f"https://t.me/{channel}/{msg_id}"
 
+        safe_full_title = html.escape(full_title)
+        safe_rating = html.escape(str(item.get('rating') or '-'))
+        safe_genre = html.escape(str(item.get('genre') or '-'))
+
         msg_content = (
-            f"🎬 <b>{full_title}</b>\n\n"
-            f"⭐ Rating: {item.get('rating') or '-'}\n"
-            f"🎭 Genre: {item.get('genre') or '-'}\n"
+            f"🎬 <b>{safe_full_title}</b>\n\n"
+            f"⭐ Rating: {safe_rating}\n"
+            f"🎭 Genre: {safe_genre}\n"
             f"📢 Channel: @{channel}\n\n"
             f"👉 <a href='{post_url}'>Klik di sini untuk menonton film</a>"
         )
@@ -5163,13 +5182,16 @@ async def inline_search_handler(client: Client, query: InlineQuery):
             )
         )
 
-    await query.answer(
-        results=articles,
-        cache_time=5,
-        is_personal=True,
-        switch_pm_text="🔍 Cari Film di Bot" if not articles else None,
-        switch_pm_parameter="search" if not articles else None
-    )
+    try:
+        await query.answer(
+            results=articles,
+            cache_time=5,
+            is_personal=True,
+            switch_pm_text="🔍 Cari Film di Bot" if not articles else None,
+            switch_pm_parameter="search" if not articles else None
+        )
+    except Exception as e:
+        logger.debug(f"Inline query answer error: {e}")
 
 
 @app.on_chat_join_request()

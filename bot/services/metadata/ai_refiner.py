@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from typing import Dict, Any, Optional
 from groq import AsyncGroq
 
@@ -57,13 +58,15 @@ class AIRefiner:
                 max_tokens=150,
             )
             content = response.choices[0].message.content.strip()
-            # Clean possible markdown wrapping ```json ... ```
-            if content.startswith("```"):
-                content = content.strip("`")
-                if content.startswith("json"):
-                    content = content[4:].strip()
-
-            result = json.loads(content)
+            json_match = re.search(r"\{[^{}]*\}", content)
+            if json_match:
+                result = json.loads(json_match.group(0))
+            else:
+                if content.startswith("```"):
+                    content = content.strip("`")
+                    if content.startswith("json"):
+                        content = content[4:].strip()
+                result = json.loads(content)
             if "title" in result and result["title"]:
                 metadata["title"] = result["title"]
             if "year" in result and result["year"]:
