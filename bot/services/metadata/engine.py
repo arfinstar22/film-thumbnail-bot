@@ -62,8 +62,6 @@ class MetadataEngine:
                     metadata["director"] = rate_res["director"]
                 if rate_res.get("actors") and not metadata.get("actors"):
                     metadata["actors"] = rate_res["actors"]
-                if rate_res.get("country") and not metadata.get("country"):
-                    metadata["country"] = rate_res["country"]
 
             if syn_res and not metadata.get("synopsis"):
                 metadata["synopsis"] = syn_res
@@ -116,11 +114,6 @@ class MetadataEngine:
             if genre_match and not meta.get("genre"):
                 meta["genre"] = genre_match.group(1).strip()
 
-            # Country
-            country_match = re.search(r"(?:Negara|Country|🌍)\s*[:：]?\s*([^\n|]+)", clean, re.IGNORECASE)
-            if country_match and not meta.get("country"):
-                meta["country"] = country_match.group(1).strip()
-
             # Director
             dir_match = re.search(r"(?:Sutradara|Director)\s*[:：]?\s*([^\n|]+)", clean, re.IGNORECASE)
             if dir_match and not meta.get("director"):
@@ -169,8 +162,6 @@ class MetadataEngine:
                 meta["director"] = rate_res["director"]
             if rate_res.get("actors") and not meta.get("actors"):
                 meta["actors"] = rate_res["actors"]
-            if rate_res.get("country") and not meta.get("country"):
-                meta["country"] = rate_res["country"]
 
         if syn_res and not meta.get("synopsis"):
             meta["synopsis"] = syn_res

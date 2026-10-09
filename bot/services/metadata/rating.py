@@ -34,32 +34,6 @@ GENRE_MAP = {
     "western": "Western"
 }
 
-COUNTRY_MAP = {
-    "united states": "Amerika Serikat",
-    "usa": "Amerika Serikat",
-    "united kingdom": "Inggris",
-    "uk": "Inggris",
-    "indonesia": "Indonesia",
-    "south korea": "Korea Selatan",
-    "korea": "Korea Selatan",
-    "japan": "Jepang",
-    "china": "Tiongkok",
-    "hong kong": "Hong Kong",
-    "thailand": "Thailand",
-    "india": "India",
-    "france": "Prancis",
-    "germany": "Jerman",
-    "spain": "Spanyol",
-    "italy": "Italia",
-    "canada": "Kanada",
-    "australia": "Australia",
-    "russia": "Rusia",
-    "turkey": "Turki",
-    "taiwan": "Taiwan",
-    "malaysia": "Malaysia",
-    "philippines": "Filipina"
-}
-
 
 class MovieRatingService:
     """Zero-cost movie rating, genre, plot, director, and cast fetcher using IMDb Suggest & OMDB."""
@@ -75,13 +49,6 @@ class MovieRatingService:
             return ""
         parts = [g.strip() for g in genre_str.split(",") if g.strip()]
         translated = [GENRE_MAP.get(p.lower(), p) for p in parts]
-        return ", ".join(translated)
-
-    def _translate_countries(self, country_str: str) -> str:
-        if not country_str or country_str == "N/A":
-            return ""
-        parts = [c.strip() for c in country_str.split(",") if c.strip()]
-        translated = [COUNTRY_MAP.get(p.lower(), p) for p in parts]
         return ", ".join(translated)
 
     def _sync_fetch(self, title: str, year: Optional[int] = None) -> Dict[str, str]:
@@ -151,8 +118,6 @@ class MovieRatingService:
                             res["director"] = data["Director"]
                         if data.get("Actors") and data["Actors"] != "N/A":
                             res["actors"] = data["Actors"]
-                        if data.get("Country") and data["Country"] != "N/A":
-                            res["country"] = self._translate_countries(data["Country"])
                         if data.get("Plot") and data["Plot"] != "N/A":
                             res["plot"] = data["Plot"]
                         if res:
