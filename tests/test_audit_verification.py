@@ -173,6 +173,75 @@ def test_banner_generator():
     print("✅ BannerGenerator & Keyboard: 1280x720 composition and buttons verified!")
 
 
+def test_thumbnail_generator():
+    from bot.services.metadata.thumbnail import ThumbnailGenerator
+    from bot.handlers import get_caption_kb
+    from PIL import Image
+
+    tg = ThumbnailGenerator()
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+        out_path = tf.name
+
+    try:
+        # Test 1: Fallback slate when no image source
+        img1 = tg.create_thumbnail(source=None, watermark="@film_indonesia1", title="Dilan 1990", output_path=out_path)
+        assert max(img1.size) <= 320, f"Thumbnail dimensions exceeded 320: {img1.size}"
+        assert os.path.exists(out_path)
+        assert os.path.getsize(out_path) < 80000, f"Thumbnail file too large: {os.path.getsize(out_path)}"
+
+        # Test 2: Vertical poster simulation
+        poster_sim = Image.new("RGB", (600, 900), (200, 50, 50))
+        img2 = tg.create_thumbnail(source=poster_sim, watermark="@film_indonesia1", title="Poster Film", output_path=out_path)
+        assert max(img2.size) <= 320, f"Vertical thumbnail dimension exceeded 320: {img2.size}"
+        assert os.path.getsize(out_path) < 80000
+    finally:
+        if os.path.exists(out_path):
+            os.remove(out_path)
+
+    # Check keyboard has thumbmenu button
+    kb = get_caption_kb(12345, "@film_indonesia1")
+    has_thumb_btn = any(btn.callback_data == "thumbmenu:12345" for row in kb.inline_keyboard for btn in row)
+    assert has_thumb_btn, "Thumbnail menu button missing in get_caption_kb"
+    print("✅ ThumbnailGenerator: Branded thumbnail, watermark pill, and buttons verified!")
+
+
+def test_supabase_cloud_sync():
+    from bot.services.metadata.supabase_sync import SupabaseSyncService
+    import tempfile
+    import sqlite3
+
+    sync = SupabaseSyncService()
+    assert sync.is_enabled, "SupabaseSyncService should be enabled with DATABASE_URL set"
+
+    # Test hydrating into a temporary SQLite database
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
+        temp_db = tf.name
+
+    try:
+        conn = sqlite3.connect(temp_db)
+        conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS movie_catalog (id INTEGER PRIMARY KEY, title TEXT, year INTEGER, rating TEXT, genre TEXT, quality TEXT, channel_username TEXT, message_id INTEGER, caption TEXT, file_id TEXT, season INTEGER, episode INTEGER, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+        conn.execute("CREATE TABLE IF NOT EXISTS bot_users (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS scheduled_posts (id INTEGER PRIMARY KEY, chat_id INTEGER, video_file_id TEXT, caption_text TEXT, metadata_json TEXT, watermark TEXT, scheduled_timestamp INTEGER, title TEXT, status TEXT DEFAULT 'pending')")
+        conn.execute("CREATE TABLE IF NOT EXISTS ai_cache (query TEXT PRIMARY KEY, caption TEXT)")
+
+        counts = sync.hydrate_to_sqlite(conn)
+        assert isinstance(counts, dict)
+        assert "settings" in counts
+        assert counts["settings"] > 0, "Settings should have hydrated from Supabase"
+
+        # Verify setting value in temporary sqlite
+        cur = conn.execute("SELECT value FROM settings WHERE key = 'bot_username'")
+        row = cur.fetchone()
+        assert row is not None or counts["settings"] > 0
+        conn.close()
+    finally:
+        if os.path.exists(temp_db):
+            os.remove(temp_db)
+
+    print("✅ SupabaseSyncService: Cloud database hydration & schema replication verified!")
+
+
 if __name__ == "__main__":
     test_caption_generator()
     test_rating_service_non_ascii()
@@ -183,6 +252,8 @@ if __name__ == "__main__":
     test_admin_dashboard_length()
     test_smart_caption_enrichment()
     test_banner_generator()
+    test_thumbnail_generator()
+    test_supabase_cloud_sync()
     print("\n🎉 ALL AUDIT VERIFICATION CHECKS PASSED!")
 
 

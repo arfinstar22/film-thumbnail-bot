@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import json
 import logging
@@ -6,6 +7,8 @@ import re
 import sqlite3
 import threading
 from typing import Dict, Any, Optional, List
+
+from .supabase_sync import SupabaseSyncService
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +31,13 @@ class MetadataCache:
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = db_path or os.path.join(os.path.dirname(__file__), "..", "films.db")
         self._local = threading.local()
+        self.cloud = SupabaseSyncService()
+
+    def hydrate_from_cloud(self) -> Dict[str, int]:
+        """Pulls persistent data from Supabase Cloud to local SQLite cache on startup."""
+        if self.cloud.is_enabled:
+            return self.cloud.hydrate_to_sqlite(self._conn())
+        return {}
 
     def _conn(self):
         if not hasattr(self._local, "conn"):
@@ -109,6 +119,13 @@ class MetadataCache:
             self._conn().commit()
         except Exception as e:
             logger.error(f"Set setting error: {e}")
+        else:
+            if self.cloud.is_enabled:
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.cloud.async_save_setting(key, value))
+                except RuntimeError:
+                    pass
 
     def _ensure_catalog_table(self, conn):
         conn.execute("""
@@ -189,6 +206,18 @@ class MetadataCache:
             conn.commit()
         except Exception as e:
             logger.error(f"Save movie catalog error: {e}")
+        else:
+            if self.cloud.is_enabled:
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.cloud.async_save_catalog({
+                        "title": clean_title, "year": year, "rating": rating,
+                        "genre": genre, "quality": quality, "channel_username": clean_channel,
+                        "message_id": message_id, "caption": caption, "file_id": file_id,
+                        "season": season, "episode": episode
+                    }))
+                except RuntimeError:
+                    pass
 
     def delete_movie_posts(self, message_ids: List[int], channel_username: Optional[str] = None) -> List[str]:
         """Delete records from movie_catalog by message_ids and return affected channel usernames."""
@@ -924,6 +953,17 @@ class MetadataCache:
         conn.commit()
         row_id = cur.lastrowid
         self.reschedule_pending_posts()
+        if self.cloud.is_enabled:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.cloud.async_save_scheduled_post({
+                    "chat_id": chat_id, "video_file_id": video_file_id,
+                    "caption_text": caption_text, "metadata_json": json.dumps(meta),
+                    "watermark": watermark, "scheduled_timestamp": int(scheduled_timestamp),
+                    "title": clean_title, "status": "pending"
+                }))
+            except RuntimeError:
+                pass
         return row_id
 
     def get_pending_scheduled_posts(self) -> List[Dict[str, Any]]:

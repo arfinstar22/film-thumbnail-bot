@@ -8,6 +8,7 @@ from .cache import MetadataCache
 from .synopsis import WikipediaSynopsisService
 from .rating import MovieRatingService
 from .banner import BannerGenerator
+from .thumbnail import ThumbnailGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ class MetadataEngine:
         self.parser = FilenameParser()
         self.caption_gen = CaptionGenerator()
         self.banner_gen = BannerGenerator()
+        self.thumb_gen = ThumbnailGenerator()
         self.cache = MetadataCache()
         self.synopsis_service = WikipediaSynopsisService(cache=self.cache)
         self.rating_service = MovieRatingService(cache=self.cache)

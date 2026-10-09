@@ -25,6 +25,10 @@ ABSOLUTE_ADMIN_USERNAMES = {
     *[u.strip().lower().lstrip("@") for u in os.getenv("ADMIN_USERNAMES", "").split(",") if u.strip()]
 }
 
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
+
 
 if not BOT_TOKEN and not SESSION_STRING:
     raise RuntimeError("BOT_TOKEN atau SESSION_STRING harus diisi. Lihat .env.example")

@@ -3,3 +3,4 @@ python-dotenv
 aiofiles
 groq
 Pillow
+psycopg2-binary

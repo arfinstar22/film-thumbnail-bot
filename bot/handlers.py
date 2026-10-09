@@ -721,10 +721,11 @@ def get_caption_kb(message_id: int, watermark: str):
             InlineKeyboardButton("🎨 Banner Promosi", callback_data=f"banner:{message_id}")
         ],
         [
-            InlineKeyboardButton("✏️ Edit Caption", callback_data=f"edit:{message_id}"),
-            InlineKeyboardButton("📋 Salin Teks", callback_data=f"copy:{message_id}")
+            InlineKeyboardButton("🖼️ Cover / Thumbnail", callback_data=f"thumbmenu:{message_id}"),
+            InlineKeyboardButton("✏️ Edit Caption", callback_data=f"edit:{message_id}")
         ],
         [
+            InlineKeyboardButton("📋 Salin Teks", callback_data=f"copy:{message_id}"),
             InlineKeyboardButton("🔄 Format Ulang", callback_data=f"info:{message_id}")
         ]
     ])
@@ -4163,7 +4164,8 @@ async def publish_video_to_channel(
     caption_text: str,
     metadata: dict,
     watermark: str,
-    update_pin: bool = True
+    update_pin: bool = True,
+    thumb_path: Optional[str] = None
 ) -> Optional[Message]:
     """Publishes a video post to the channel with buttons, divider sticker, cache update, and pinned catalog refresh."""
     clean_wm = watermark.lstrip("@").strip()
@@ -4285,15 +4287,44 @@ async def publish_video_to_channel(
     else:
         video_caption = caption_text
 
-    sent_channel = await client.send_video(
-        chat_id=watermark,
-        video=video_file_id,
-        caption=video_caption,
-        parse_mode=ParseMode.HTML,
-        supports_streaming=True,
-        protect_content=protect_flag,
-        reply_markup=channel_kb
-    )
+    # Ensure thumbnail exists (branded poster or custom thumb)
+    final_thumb = thumb_path
+    cleanup_thumb = False
+    if not final_thumb or not os.path.exists(final_thumb):
+        poster_src = meta.get("poster_url") or meta.get("poster_path") or meta.get("thumb_path")
+        if poster_src:
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+                    final_thumb = tf.name
+                _engine.thumb_gen.create_thumbnail(
+                    source=poster_src,
+                    watermark=watermark,
+                    title=title_display,
+                    output_path=final_thumb
+                )
+                cleanup_thumb = True
+            except Exception as te:
+                logger.debug(f"Failed to auto-generate thumb for channel post: {te}")
+                final_thumb = None
+
+    try:
+        sent_channel = await client.send_video(
+            chat_id=watermark,
+            video=video_file_id,
+            caption=video_caption,
+            parse_mode=ParseMode.HTML,
+            thumb=final_thumb if (final_thumb and os.path.exists(final_thumb)) else None,
+            supports_streaming=True,
+            protect_content=protect_flag,
+            reply_markup=channel_kb
+        )
+    finally:
+        if cleanup_thumb and final_thumb and os.path.exists(final_thumb):
+            try:
+                os.remove(final_thumb)
+            except Exception:
+                pass
+
     if sent_channel and not sent_banner:
         await _apply_expandable_caption(watermark, sent_channel.id, caption_text, channel_kb)
 
@@ -4702,26 +4733,39 @@ async def _process_video_task(client: Client, msg: Message):
 
     tmp = tempfile.mkdtemp()
     thumb_path = None
+    raw_thumb_path = None
+    meta = result.get("metadata", {})
+    poster_src = meta.get("poster_url") or meta.get("poster_path")
+    title_meta = meta.get("title") or filename
     try:
         if getattr(media, "thumbs", None):
-            raw = os.path.join(tmp, "raw_auto")
-            await client.download_media(media.thumbs[0].file_id, file_name=raw)
-            thumb_path = os.path.join(tmp, "thumb.jpg")
-            await photo_thumbnail(raw, thumb_path)
-        else:
-            thumb_path = os.path.join(tmp, "black.jpg")
-            await asyncio.create_subprocess_exec(
-                "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=black:s=320x240",
-                "-frames:v", "1", thumb_path,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            try:
+                raw_auto = os.path.join(tmp, "raw_auto.jpg")
+                await client.download_media(media.thumbs[0].file_id, file_name=raw_auto)
+                raw_thumb_path = raw_auto
+            except Exception as dte:
+                logger.debug(f"Failed to download video original thumb: {dte}")
+
+        thumb_path = os.path.join(tmp, "thumb.jpg")
+        # Priority: 1. Official movie poster, 2. Original video thumb, 3. Branded gradient slate
+        active_thumb_src = poster_src if poster_src else raw_thumb_path
+        try:
+            _engine.thumb_gen.create_thumbnail(
+                source=active_thumb_src,
+                watermark=wm,
+                title=title_meta,
+                output_path=thumb_path
             )
+        except Exception as gte:
+            logger.debug(f"Thumbnail generator fallback: {gte}")
+            thumb_path = None
 
         sent = await client.send_video(
             chat_id=chat_id,
             video=media.file_id,
             caption=caption,
             parse_mode=ParseMode.HTML,
-            thumb=thumb_path,
+            thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,
             supports_streaming=True,
             reply_markup=get_caption_kb(msg.id, wm)
         )
@@ -4734,7 +4778,12 @@ async def _process_video_task(client: Client, msg: Message):
             "caption_text": caption,
             "extra": extra,
             "watermark": wm,
-            "metadata": result.get("metadata", {})
+            "metadata": meta,
+            "thumb_path": thumb_path,
+            "raw_thumb_path": raw_thumb_path,
+            "poster_url": poster_src,
+            "temp_dir": tmp,
+            "video_msg": msg
         }
 
         # DUPE ALERT: Check if movie already exists in channel catalog
@@ -4995,6 +5044,130 @@ async def handle_copy_callback(client: Client, call: CallbackQuery):
     )
 
 
+@app.on_callback_query(filters.regex(r"^thumbmenu:(\d+)$"))
+async def handle_thumbmenu_callback(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Hanya Administrator!", show_alert=True)
+        return
+
+    chat_id = call.message.chat.id
+    job = _jobs.get(chat_id)
+    msg_id = call.matches[0].group(1)
+
+    has_poster = bool(job and job.get("poster_url"))
+    buttons = []
+    if has_poster:
+        buttons.append([InlineKeyboardButton("🌟 Pasang Poster Resmi Bioskop", callback_data=f"setthumb:poster:{msg_id}")])
+    buttons.append([InlineKeyboardButton("🎬 Pasang Snapshot Video Bawaan", callback_data=f"setthumb:orig:{msg_id}")])
+    buttons.append([InlineKeyboardButton("🔙 Tutup Menu", callback_data=f"thumbback:{msg_id}")])
+
+    await call.message.reply_text(
+        "🖼️ <b>Menu Pengaturan Cover / Thumbnail Video:</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Pilih cover yang ingin ditampilkan saat video tayang di channel:\n\n"
+        "• <b>Poster Resmi:</b> Ambil poster film bioskop HD dari database.\n"
+        "• <b>Snapshot Video:</b> Pakai thumbnail bawaan video.\n"
+        "• <b>Custom Foto:</b> <i>Reply pesan ini atau kirim foto apa saja ke bot untuk pasang gambar pilihan Anda sendiri!</i>\n\n"
+        "✨ <i>Semua cover otomatis diberi badge watermark resmi channel!</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+    await call.answer()
+
+
+@app.on_callback_query(filters.regex(r"^thumbback:(\d+)$"))
+async def handle_thumbback_callback(client: Client, call: CallbackQuery):
+    await call.answer("Ditutup")
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
+
+@app.on_callback_query(filters.regex(r"^setthumb:(poster|orig):(\d+)$"))
+async def handle_setthumb_choice(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Hanya Administrator!", show_alert=True)
+        return
+
+    choice = call.matches[0].group(1)
+    chat_id = call.message.chat.id
+    job = _jobs.get(chat_id)
+    if not job:
+        await call.answer("Job film kadaluarsa. Kirim ulang videonya.", show_alert=True)
+        return
+
+    wm = job.get("watermark") or _get_user_watermark(chat_id)
+    title = job.get("metadata", {}).get("title") or job.get("filename") or "Film"
+    tmp = job.get("temp_dir") or tempfile.mkdtemp()
+    new_thumb = os.path.join(tmp, f"thumb_{choice}.jpg")
+
+    if choice == "poster":
+        poster_src = job.get("poster_url")
+        if not poster_src:
+            await call.answer("Poster resmi tidak tersedia untuk judul ini.", show_alert=True)
+            return
+        _engine.thumb_gen.create_thumbnail(source=poster_src, watermark=wm, title=title, output_path=new_thumb)
+        job["thumb_path"] = new_thumb
+        await call.answer("✅ Cover diubah ke Poster Resmi Bioskop!", show_alert=True)
+    else:
+        orig_src = job.get("raw_thumb_path")
+        _engine.thumb_gen.create_thumbnail(source=orig_src, watermark=wm, title=title, output_path=new_thumb)
+        job["thumb_path"] = new_thumb
+        await call.answer("✅ Cover diubah ke Snapshot Video Bawaan!", show_alert=True)
+
+    await call.message.edit_text(
+        f"✅ <b>Cover Berhasil Diperbarui:</b>\n"
+        f"Pilihan: <b>{'Poster Resmi Bioskop' if choice == 'poster' else 'Snapshot Video Bawaan'}</b>\n"
+        f"Watermark: <code>{wm}</code>\n\n"
+        f"Cover ini akan otomatis disematkan saat film diposting ke channel.",
+        parse_mode=ParseMode.HTML
+    )
+
+
+@app.on_message(filters.photo)
+async def handle_custom_photo_thumbnail(client: Client, msg: Message):
+    user_id = msg.from_user.id if msg.from_user else msg.chat.id
+    username = msg.from_user.username if msg.from_user else ""
+    if not is_admin(user_id, username):
+        return
+
+    chat_id = msg.chat.id
+    job = _jobs.get(chat_id)
+    if not job:
+        await msg.reply_text(
+            "ℹ️ <b>Tidak ada video yang sedang aktif.</b>\n"
+            "Kirimkan video film terlebih dahulu, lalu kirim atau reply foto ini untuk mengganti cover/thumbnail video tersebut.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    status = await msg.reply_text("⏳ <i>Sedang mengunduh foto & menambahkan watermark badge...</i>", parse_mode=ParseMode.HTML)
+    try:
+        tmp = job.get("temp_dir") or tempfile.mkdtemp()
+        photo_raw = os.path.join(tmp, "custom_photo_raw.jpg")
+        await client.download_media(msg.photo.file_id, file_name=photo_raw)
+
+        wm = job.get("watermark") or _get_user_watermark(chat_id)
+        title = job.get("metadata", {}).get("title") or job.get("filename") or "Film"
+        new_thumb = os.path.join(tmp, "thumb_custom.jpg")
+
+        _engine.thumb_gen.create_thumbnail(source=photo_raw, watermark=wm, title=title, output_path=new_thumb)
+        job["thumb_path"] = new_thumb
+
+        await status.edit_text(
+            f"🎉 <b>[COVER CUSTOM BERHASIL DIPASANG]</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎬 Film: <b>{html.escape(title)}</b>\n"
+            f"🏷️ Badge Watermark: <code>{html.escape(wm)}</code>\n\n"
+            f"✅ Foto Anda telah dioptimasi (< 50 KB) dan siap dijadikan cover utama saat diposting ke channel!",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as pe:
+        logger.exception("Error processing custom photo thumbnail")
+        await status.edit_text(f"❌ Gagal memproses foto: <code>{pe}</code>", parse_mode=ParseMode.HTML)
+
+
 @app.on_callback_query(filters.regex(r"^post:"))
 async def handle_post_callback(client: Client, call: CallbackQuery):
     if not check_admin(call):
@@ -5039,7 +5212,8 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
             video_file_id=video_fid,
             caption_text=job["caption_text"],
             metadata=meta,
-            watermark=wm
+            watermark=wm,
+            thumb_path=job.get("thumb_path")
         )
 
         clean_wm = wm.lstrip("@").strip()
@@ -5564,6 +5738,15 @@ async def auto_delete_channel_service_messages(client: Client, msg: Message):
 async def on_bot_startup(client: Client):
     """Background startup task: automatically sets bot commands, hydrates the channel catalog and restores the pinned message."""
     try:
+        # 1. Supabase Cloud Database Hydration (Zero data loss on Render Free restarts)
+        if _engine.cache.cloud.is_enabled:
+            try:
+                logger.info("⚡ Memeriksa & memulihkan database dari Supabase Cloud...")
+                hydrated = _engine.cache.hydrate_from_cloud()
+                logger.info(f"⚡ Supabase Cloud hydration result: {hydrated}")
+            except Exception as se:
+                logger.warning(f"Supabase hydration warning: {se}")
+
         # Cache bot username for deep-link request button
         try:
             me = getattr(client, "me", None) or await client.get_me()
@@ -5580,7 +5763,7 @@ async def on_bot_startup(client: Client):
         except Exception as ce:
             logger.warning(f"Could not register bot commands on startup: {ce}")
 
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
         clean_wm = (CHANNEL_WATERMARK or "@film_indonesia1").lstrip("@").strip().lower()
         if clean_wm:
             curr_movies = _engine.cache.get_deduplicated_catalog(clean_wm)
