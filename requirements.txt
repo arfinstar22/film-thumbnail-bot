@@ -2,3 +2,5 @@ pyrogram
 python-dotenv
 aiofiles
 groq
+Pillow
+tgcrypto
