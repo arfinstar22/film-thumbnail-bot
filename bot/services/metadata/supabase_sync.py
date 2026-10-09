@@ -20,7 +20,15 @@ class SupabaseSyncService:
     keeping local SQLite access blazing fast (0.1ms)."""
 
     def __init__(self, db_url: Optional[str] = None):
-        self.db_url = db_url or os.getenv("DATABASE_URL", "").strip()
+        raw_url = (
+            db_url
+            or os.getenv("DATABASE_URL", "").strip()
+            or os.getenv("SUPABASE_DATABASE_URL", "").strip()
+            or os.getenv("SUPABASE_DB_URL", "").strip()
+        )
+        if raw_url.startswith("postgres://"):
+            raw_url = "postgresql://" + raw_url[11:]
+        self.db_url = raw_url
         self._enabled = bool(self.db_url and HAS_PSYCOPG2)
         if not HAS_PSYCOPG2 and self.db_url:
             logger.warning("psycopg2 is not installed. Supabase cloud sync disabled.")

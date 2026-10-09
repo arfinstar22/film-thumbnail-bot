@@ -39,6 +39,24 @@ if SESSION_STRING:
 else:
     app = Client("thumb_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
+# Defense-in-depth: Safely handle expired callback query answers across all handlers
+_orig_cb_answer = CallbackQuery.answer
+
+
+async def _safe_callback_answer(self, *args, **kwargs):
+    try:
+        return await _orig_cb_answer(self, *args, **kwargs)
+    except Exception as e:
+        err_msg = str(e)
+        if "QUERY_ID_INVALID" in err_msg or "query id is invalid" in err_msg.lower():
+            logger.debug(f"CallbackQuery.answer expired safely ignored: {err_msg}")
+            return False
+        logger.debug(f"CallbackQuery.answer suppressed: {err_msg}")
+        return False
+
+
+CallbackQuery.answer = _safe_callback_answer
+
 _jobs = {}
 _user_states: Dict[int, str] = {}
 _engine = MetadataEngine()
@@ -3691,16 +3709,18 @@ async def auto_hydrate_channel_catalog(
 
     max_id = 0
     try:
-        probe = await client.send_message(channel_username, "🔄", disable_notification=True)
-        max_id = probe.id
-        await probe.delete()
-    except Exception as pe:
-        logger.warning(f"Could not probe max message id in {channel_username}: {pe}")
+        async for m in client.get_chat_history(channel_username, limit=1):
+            max_id = m.id
+            break
+    except Exception:
+        pass
+
+    if not max_id:
         stored_pin = _engine.cache.get_setting(f"pinned_catalog_{clean_channel}", "")
         max_id = int(stored_pin) if stored_pin and stored_pin.isdigit() else 2000
 
     start_id = max(1, max_id - scan_limit)
-    batch_size = 100
+    batch_size = 50
     scanned_movies = 0
 
     for batch_start in range(start_id, max_id + 1, batch_size):
@@ -3737,7 +3757,7 @@ async def auto_hydrate_channel_catalog(
             await asyncio.sleep(fw.value + 1)
         except Exception as be:
             logger.debug(f"Hydration batch fetch error: {be}")
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.25)
 
     _engine.cache.set_setting(f"synced_{clean_channel}", "yes")
     return scanned_movies
@@ -3760,11 +3780,10 @@ async def update_pinned_catalog(
     movies = _engine.cache.get_deduplicated_catalog(clean_channel)
 
     # AUTO-HYDRATION SAFEGUARD:
-    # If cache has fewer than 50 movies or has never been hydrated on this container instance,
-    # automatically scan channel history so we NEVER overwrite the catalog with just a few films!
+    # Only hydrate if database has never been synced AND has 0 movies to avoid redundant scans
     has_synced = _engine.cache.get_setting(f"synced_{clean_channel.lower()}", "no")
-    if has_synced != "yes" or len(movies) < 50:
-        logger.info(f"Channel @{clean_channel} has only {len(movies)} movies in local DB (synced={has_synced}). Auto-hydrating...")
+    if has_synced != "yes" and not movies:
+        logger.info(f"Channel @{clean_channel} has 0 movies in local DB (synced={has_synced}). Auto-hydrating...")
         try:
             await auto_hydrate_channel_catalog(client, clean_channel)
             movies = _engine.cache.get_deduplicated_catalog(clean_channel)
@@ -5131,6 +5150,9 @@ async def handle_setthumb_choice(client: Client, call: CallbackQuery):
         await call.answer("Job film kadaluarsa. Kirim ulang videonya.", show_alert=True)
         return
 
+    # Acknowledge immediately to dismiss Telegram client spinner and avoid timeout
+    await call.answer("⏳ Memperbarui cover film...")
+
     wm = job.get("watermark") or _get_user_watermark(chat_id)
     title = job.get("metadata", {}).get("title") or job.get("filename") or "Film"
     tmp = job.get("temp_dir")
@@ -5154,13 +5176,16 @@ async def handle_setthumb_choice(client: Client, call: CallbackQuery):
         job["thumb_path"] = new_thumb
         await call.answer("✅ Cover diubah ke Snapshot Video Bawaan!", show_alert=True)
 
-    await call.message.edit_text(
-        f"✅ <b>Cover Berhasil Diperbarui:</b>\n"
-        f"Pilihan: <b>{'Poster Resmi Bioskop' if choice == 'poster' else 'Snapshot Video Bawaan'}</b>\n"
-        f"Watermark: <code>{wm}</code>\n\n"
-        f"Cover ini akan otomatis disematkan saat film diposting ke channel.",
-        parse_mode=ParseMode.HTML
-    )
+    try:
+        await call.message.edit_text(
+            f"✅ <b>Cover Berhasil Diperbarui:</b>\n"
+            f"Pilihan: <b>{'Poster Resmi Bioskop' if choice == 'poster' else 'Snapshot Video Bawaan'}</b>\n"
+            f"Watermark: <code>{wm}</code>\n\n"
+            f"Cover ini akan otomatis disematkan saat film diposting ke channel.",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as ee:
+        logger.debug(f"Failed to edit message text: {ee}")
 
 
 @app.on_message(filters.photo)
@@ -5930,16 +5955,23 @@ async def on_bot_startup(client: Client):
         except Exception as ce:
             logger.warning(f"Could not register bot commands on startup: {ce}")
 
-        await asyncio.sleep(2)
         clean_wm = (CHANNEL_WATERMARK or "@film_indonesia1").lstrip("@").strip().lower()
-        if clean_wm:
-            curr_movies = _engine.cache.get_deduplicated_catalog(clean_wm)
-            has_synced = _engine.cache.get_setting(f"synced_{clean_wm}", "no")
-            if has_synced != "yes" or len(curr_movies) < 50:
-                logger.info(f"Bot startup: Auto-hydrating channel catalog for @{clean_wm}...")
-                await auto_hydrate_channel_catalog(client, clean_wm)
-                await update_pinned_catalog(client, clean_wm)
-                logger.info(f"Bot startup: Catalog for @{clean_wm} successfully restored and pinned!")
+
+        async def _background_startup_hydration():
+            try:
+                await asyncio.sleep(5)
+                if clean_wm:
+                    curr_movies = _engine.cache.get_deduplicated_catalog(clean_wm)
+                    has_synced = _engine.cache.get_setting(f"synced_{clean_wm}", "no")
+                    if has_synced != "yes" and not curr_movies:
+                        logger.info(f"Bot startup: Auto-hydrating channel catalog for @{clean_wm}...")
+                        await auto_hydrate_channel_catalog(client, clean_wm)
+                        await update_pinned_catalog(client, clean_wm)
+                        logger.info(f"Bot startup: Catalog for @{clean_wm} successfully restored and pinned!")
+            except Exception as bge:
+                logger.warning(f"Background startup hydration error: {bge}")
+
+        asyncio.create_task(_background_startup_hydration())
 
         # Start background daily highlight worker
         asyncio.create_task(_daily_highlight_worker(client))
