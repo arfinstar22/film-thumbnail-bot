@@ -231,16 +231,18 @@ def test_supabase_cloud_sync():
         assert "settings" in counts
         assert counts["settings"] > 0, "Settings should have hydrated from Supabase"
 
-        # Verify setting value in temporary sqlite
-        cur = conn.execute("SELECT value FROM settings WHERE key = 'bot_username'")
-        row = cur.fetchone()
-        assert row is not None or counts["settings"] > 0
+        # Verify keepalive ping functionality
+        keepalive_res = sync.ping_keepalive()
+        assert isinstance(keepalive_res, dict)
+        assert keepalive_res["success"] is True, f"Keepalive ping failed: {keepalive_res}"
+        assert len(keepalive_res["methods"]) > 0, "At least one keepalive method should succeed"
+
         conn.close()
     finally:
         if os.path.exists(temp_db):
             os.remove(temp_db)
 
-    print("✅ SupabaseSyncService: Cloud database hydration & schema replication verified!")
+    print("✅ SupabaseSyncService: Cloud database hydration, schema replication & keepalive ping verified!")
 
 
 def test_audiosub_and_request_match():
@@ -287,6 +289,56 @@ def test_audiosub_and_request_match():
         fulfilled = cache.fulfill_movie_requests("Avenger Endgame")
         assert len(fulfilled) == 1
         assert len(cache.get_pending_requests()) == 0
+
+        # Test new features: delete_request_by_id, answer_movie_requests, clear_all_pending_requests
+        res2 = cache.add_movie_request(445566, "darfin_fan", "Agak Laen", "@film_indonesia1")
+        assert res2["id"] is not None
+        req_obj = cache.get_request_by_id(res2["id"])
+        assert req_obj is not None
+        assert req_obj["movie_title"] == "Agak Laen"
+        assert req_obj["status"] == "pending"
+
+        # Test answering request
+        ans_recs = cache.answer_movie_requests(res2["id"], "Masih Tayang di Bioskop")
+        assert len(ans_recs) == 1
+        assert ans_recs[0]["user_id"] == 445566
+        # Ensure it is no longer pending
+        assert len(cache.get_pending_requests()) == 0
+
+        # Test deleting request
+        res3 = cache.add_movie_request(778899, "action_lover", "The Raid", "@film_indonesia1")
+        assert len(cache.get_pending_requests()) == 1
+        deleted = cache.delete_request_by_id(res3["id"])
+        assert deleted > 0
+        assert len(cache.get_pending_requests()) == 0
+
+        # Test clear all pending requests
+        cache.add_movie_request(1, "user1", "Movie A", "@film_indonesia1")
+        cache.add_movie_request(2, "user2", "Movie B", "@film_indonesia1")
+        assert len(cache.get_pending_requests()) == 2
+        cleared = cache.clear_all_pending_requests()
+        assert cleared == 2
+        assert len(cache.get_pending_requests()) == 0
+
+        # Test build_admin_requests_panel
+        from bot.handlers import build_admin_requests_panel
+        text_empty, kb_empty = build_admin_requests_panel(1166479771, "@film_indonesia1")
+        assert "belum ada permintaan film" in text_empty
+
+        # Temporarily wire cache for handler panel test
+        from bot import handlers
+        orig_cache = handlers._engine.cache
+        handlers._engine.cache = cache
+        try:
+            cache.add_movie_request(1166479771, "dxstar22", "Pengabdi Setan", "@film_indonesia1")
+            text_with_req, kb_with_req = build_admin_requests_panel(1166479771, "@film_indonesia1")
+            assert "Pengabdi Setan" in text_with_req
+            btn_callbacks = [btn.callback_data for row in kb_with_req.inline_keyboard for btn in row if btn.callback_data]
+            assert any("ans_req_menu:" in cb for cb in btn_callbacks)
+            assert any("del_req:" in cb for cb in btn_callbacks)
+            assert "clear_req_all_ask" in btn_callbacks
+        finally:
+            handlers._engine.cache = orig_cache
     finally:
         if os.path.exists(temp_db):
             os.remove(temp_db)

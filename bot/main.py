@@ -16,6 +16,19 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path in ("/keepalive", "/ping-supabase"):
+            import json
+            from .handlers import _engine
+            res = {"success": False, "error": "Engine not ready"}
+            if _engine and hasattr(_engine, "cache"):
+                res = _engine.cache.ping_supabase_keepalive()
+            code = 200 if res.get("success") else 500
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+            return
+
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()

@@ -16,5 +16,11 @@ services:
         sync: false
       - key: PORT
         value: 10000
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
     healthCheckPath: /
     autoDeploy: true

@@ -796,7 +796,8 @@ BOT_COMMANDS_LIST = [
     BotCommand("protect", "Aktif/matikan proteksi konten (Anti-Forward/Save)"),
     BotCommand("banner", "Buat gambar banner promosi sinematik film"),
     BotCommand("setbanner", "Atur banner otomatis terbit (on/off)"),
-    BotCommand("broadcast", "Kirim pengumuman ke seluruh member bot")
+    BotCommand("broadcast", "Kirim pengumuman ke seluruh member bot"),
+    BotCommand("pingsupabase", "Cek koneksi & keepalive anti-jeda Supabase")
 ]
 
 
@@ -933,6 +934,8 @@ def build_admin_dashboard_parts(chat_id: int, user_id: int, first_name: str, use
         "  Statistik analitik: Total film, sebaran genre, era tahun, dan resolusi.\n\n"
         "• <code>/healthcheck</code>\n"
         "  Audit link mati: Bersihkan postingan yang terhapus/takedown dari katalog.\n\n"
+        "• <code>/pingsupabase</code>\n"
+        "  Keepalive Supabase Cloud anti-jeda 7 hari (auto-ping tiap 24 jam).\n\n"
         "• <code>/retarget</code>\n"
         "  Update tombol massal pada semua postingan lama channel tanpa re-upload.\n\n"
         "• <code>/backup</code>\n"
@@ -1468,9 +1471,63 @@ async def cb_btn_start_request(client: Client, query: CallbackQuery):
     await query.message.reply_text(prompt_text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
-@app.on_callback_query(filters.regex(r"^adm_view_requests$"))
+def build_admin_requests_panel(chat_id: int, clean_wm: str):
+    clean_chan = (clean_wm or "@film_indonesia1").lstrip("@").strip().lower()
+    reqs = _engine.cache.get_pending_requests(clean_chan, limit=25)
+    if not reqs:
+        text = (
+            f"📋 <b>DAFTAR PERMINTAAN FILM MEMBER</b>\n"
+            f"📢 Channel: @{clean_chan}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<i>Saat ini belum ada permintaan film yang tertunda dari member. Semua beres! 🎉</i>"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗑️ Bersihkan Riwayat Selesai", callback_data="clear_requests")],
+            [InlineKeyboardButton("🔄 Segarkan (Refresh)", callback_data="refresh_requests")],
+            [InlineKeyboardButton("🔙 Menu Utama", callback_data="adm_dashboard")]
+        ])
+        return text, kb
+
+    lines = [
+        f"📋 <b>DAFTAR PERMINTAAN FILM MEMBER ({len(reqs)})</b>",
+        f"📢 Channel: @{clean_chan}",
+        f"━━━━━━━━━━━━━━━━━━━━"
+    ]
+
+    kb_rows = []
+    for idx, r in enumerate(reqs[:8], 1):
+        t = r["title"]
+        c = r["count"]
+        cnt_str = f"({c}x diminta)" if c > 1 else ""
+        req_id = r["ids"][0] if r.get("ids") else 0
+        u_list = ", ".join(f"@{u}" for u in r.get("requesters", [])[:2])
+        user_info = f" — <i>{u_list}</i>" if u_list else ""
+        lines.append(f"{idx}. <b>{html.escape(t)}</b> {cnt_str}{user_info}")
+
+        if req_id:
+            short_t = (t[:10] + "..") if len(t) > 10 else t
+            kb_rows.append([
+                InlineKeyboardButton(f"💬 Jawab #{idx} ({short_t})", callback_data=f"ans_req_menu:{req_id}"),
+                InlineKeyboardButton(f"🗑️ Hapus #{idx}", callback_data=f"del_req:{req_id}")
+            ])
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("<i>💡 Tekan 'Jawab' untuk mengirim pesan resmi dari Darfin langsung ke pemohon, atau 'Hapus' untuk menghapus permintaan dari antrean.</i>")
+
+    kb_rows.append([
+        InlineKeyboardButton("🗑️ Hapus Semua Request", callback_data="clear_req_all_ask"),
+        InlineKeyboardButton("🔄 Segarkan", callback_data="refresh_requests")
+    ])
+    kb_rows.append([
+        InlineKeyboardButton("🗑️ Bersihkan Riwayat Selesai", callback_data="clear_requests"),
+        InlineKeyboardButton("🔙 Dashboard", callback_data="adm_dashboard")
+    ])
+
+    return "\n".join(lines), InlineKeyboardMarkup(kb_rows)
+
+
+@app.on_callback_query(filters.regex(r"^(adm_view_requests|refresh_requests)$"))
 async def cb_adm_view_requests(client: Client, query: CallbackQuery):
-    await query.answer()
     user_id = query.from_user.id if query.from_user else query.message.chat.id
     username = query.from_user.username if query.from_user else ""
     if not is_admin(user_id, username):
@@ -1481,33 +1538,12 @@ async def cb_adm_view_requests(client: Client, query: CallbackQuery):
     wm = _get_user_watermark(chat_id)
     clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
 
-    reqs = _engine.cache.get_pending_requests(clean_wm, limit=25)
-    if not reqs:
-        await query.message.reply_text(
-            f"📋 <b>Daftar Permintaan Film (@{clean_wm}):</b>\n\n"
-            f"<i>Saat ini belum ada permintaan film yang tertunda dari member.</i>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    lines = [
-        f"📋 <b>DAFTAR PERMINTAAN FILM MEMBER</b>",
-        f"📢 Channel: @{clean_wm}",
-        f"━━━━━━━━━━━━━━━━━━━━"
-    ]
-    for idx, r in enumerate(reqs, 1):
-        t = r["title"]
-        c = r["count"]
-        cnt_str = f"({c}x diminta)" if c > 1 else ""
-        lines.append(f"{idx}. <b>{t}</b> {cnt_str}")
-
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append("<i>💡 Saat Anda mengunggah film dengan judul di atas, bot akan otomatis mengirimkan notifikasi DM ke penonton yang me-request!</i>")
-
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🗑️ Bersihkan Riwayat Selesai", callback_data="clear_requests")]
-    ])
-    await query.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=kb)
+    text, kb = build_admin_requests_panel(chat_id, clean_wm)
+    await query.answer("Memperbarui daftar request...")
+    try:
+        await query.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    except Exception:
+        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
 @app.on_callback_query(filters.regex(r"^adm_dashboard$"))
@@ -1579,12 +1615,162 @@ async def cb_cancel_movie_request(client: Client, query: CallbackQuery):
         pass
 
 
+async def notify_admins_new_request(
+    client: Client,
+    req_id: int,
+    requester_user_id: int,
+    requester_username: str,
+    requester_name: str,
+    movie_title: str,
+    channel_wm: str
+):
+    """Sends an instant high-priority notification to Tuan Darfin and all admins when a member submits a movie request."""
+    try:
+        now_str = datetime.datetime.now(WIB).strftime("%d/%m/%Y %H:%M WIB")
+        u_display = f"@{requester_username}" if requester_username else f"ID: <code>{requester_user_id}</code>"
+        clean_chan = (channel_wm or "@film_indonesia1").lstrip("@").strip().lower()
+
+        text = (
+            f"🔔 <b>[PERMINTAAN FILM BARU MASUK]</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Salam Tuan Darfin! Ada member yang baru saja me-request judul film:\n\n"
+            f"👤 <b>Pemohon:</b> {html.escape(requester_name)} ({u_display})\n"
+            f"🎬 <b>Judul Film:</b> <b>{html.escape(movie_title)}</b>\n"
+            f"📢 <b>Target Channel:</b> @{clean_chan}\n"
+            f"⏰ <b>Waktu:</b> <code>{now_str}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Tekan tombol di bawah untuk langsung memberikan respon resmi ke pemohon atau mengelola request:</i>"
+        )
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("💬 Jawab Permintaan", callback_data=f"ans_req_menu:{req_id}"),
+                InlineKeyboardButton("🗑️ Hapus", callback_data=f"del_req:{req_id}")
+            ],
+            [
+                InlineKeyboardButton("📋 Kelola Semua Request", callback_data="adm_view_requests")
+            ]
+        ])
+
+        target_ids = set(ADMIN_USER_IDS) | {1166479771} | set(_ABSOLUTE_ADMIN_IDS)
+        for admin_id in target_ids:
+            try:
+                await client.send_message(
+                    chat_id=admin_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=kb,
+                    disable_web_page_preview=True
+                )
+            except Exception as se:
+                logger.debug(f"Failed to notify admin {admin_id} about new request: {se}")
+    except Exception as e:
+        logger.error(f"Error in notify_admins_new_request: {e}")
+
+
+async def send_official_answer_to_requesters(
+    client: Client,
+    query_or_msg,
+    req_id: int,
+    movie_title: str,
+    channel_wm: str,
+    body_text: str,
+    label_action: str
+):
+    """Sends the official response from Darfin directly to all matching requesters and resolves the request."""
+    requesters = _engine.cache.answer_movie_requests(req_id, label_action)
+    if not requesters:
+        req = _engine.cache.get_request_by_id(req_id)
+        if req:
+            requesters = [req]
+
+    clean_chan = (channel_wm or "film_indonesia1").lstrip("@").strip().lower()
+    bot_username = ""
+    try:
+        bot_me = await client.get_me()
+        bot_username = bot_me.username or ""
+    except Exception:
+        pass
+
+    user_dm_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"🍿 Kunjungi Channel @{clean_chan}", url=f"https://t.me/{clean_chan}")],
+        [InlineKeyboardButton("💬 Request Judul Lain", url=f"https://t.me/{bot_username}?start=request" if bot_username else f"https://t.me/{clean_chan}")]
+    ])
+
+    sent_count = 0
+    fail_count = 0
+    seen_users = set()
+
+    for r in requesters:
+        target_uid = r.get("user_id")
+        if not target_uid or target_uid in seen_users:
+            continue
+        seen_users.add(target_uid)
+
+        dm_text = (
+            f"👑 <b>TANGGAPAN RESMI DARI DARFIN</b>\n"
+            f"<i>(Absolute Owner & Pencipta @{clean_chan})</i>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Halo Sobat Film! 👋\n\n"
+            f"Permintaan film Anda telah ditinjau dan dijawab langsung oleh <b>Darfin</b>, Sang Absolute Owner & Pencipta Bot:\n\n"
+            f"🎬 <b>Judul Film:</b> <b>{html.escape(movie_title)}</b>\n"
+            f"📢 <b>Target Channel:</b> @{clean_chan}\n\n"
+            f"💬 <b>Tanggapan Resmi:</b>\n"
+            f"{body_text}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Terima kasih telah setia me-request film! Tetap pantau channel @{clean_chan} untuk update rilis film terbaru setiap hari. 🍿✨</i>"
+        )
+
+        try:
+            await client.send_message(
+                chat_id=target_uid,
+                text=dm_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=user_dm_kb,
+                disable_web_page_preview=True
+            )
+            sent_count += 1
+        except Exception as e:
+            logger.debug(f"Failed to DM user {target_uid}: {e}")
+            fail_count += 1
+
+    fail_info = f" (gagal DM ke {fail_count} user karena diblokir/privasi)" if fail_count > 0 else ""
+    success_msg = (
+        f"✅ <b>TANGGAPAN RESMI BERHASIL DIKIRIM!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎬 <b>Film:</b> <b>{html.escape(movie_title)}</b>\n"
+        f"🏷️ <b>Status:</b> {label_action}\n"
+        f"📬 <b>Terkirim ke:</b> <b>{sent_count} pemohon</b>{fail_info}\n"
+        f"📌 <b>Status Request:</b> Ditandai Selesai & Dihapus dari Antrean Aktif\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Pesan resmi atas nama Tuan Darfin telah berhasil diteruskan ke member.</i>"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Kelola Request Lain", callback_data="adm_view_requests")],
+        [InlineKeyboardButton("🔙 Dashboard", callback_data="adm_dashboard")]
+    ])
+
+    if hasattr(query_or_msg, "message") and hasattr(query_or_msg.message, "edit_text"):
+        try:
+            await query_or_msg.message.edit_text(success_msg, parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+        except Exception:
+            pass
+    if hasattr(query_or_msg, "edit_text"):
+        try:
+            await query_or_msg.edit_text(success_msg, parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+        except Exception:
+            pass
+    await query_or_msg.reply_text(success_msg, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
 @app.on_callback_query(filters.regex(r"^auto_req:(.+)$"))
 async def cb_auto_req(client: Client, query: CallbackQuery):
     await query.answer()
     title = query.matches[0].group(1).strip()
     user_id = query.from_user.id if query.from_user else query.message.chat.id
     username = query.from_user.username or query.from_user.first_name if query.from_user else "Member"
+    first_name = query.from_user.first_name if query.from_user else "Member"
     wm = _get_user_watermark(user_id)
     clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
 
@@ -1594,18 +1780,27 @@ async def cb_auto_req(client: Client, query: CallbackQuery):
         [InlineKeyboardButton("🔍 Cari Film Lain", switch_inline_query_current_chat="")]
     ])
     if res.get("is_new"):
+        asyncio.create_task(notify_admins_new_request(
+            client=client,
+            req_id=res.get("id", 0),
+            requester_user_id=user_id,
+            requester_username=query.from_user.username or "",
+            requester_name=first_name,
+            movie_title=title,
+            channel_wm=clean_wm
+        ))
         await query.message.edit_text(
             f"✅ <b>Permintaan Film Berhasil Dicatat!</b>\n\n"
-            f"🎬 <b>Judul:</b> {title}\n"
+            f"🎬 <b>Judul:</b> {html.escape(title)}\n"
             f"📢 <b>Target Channel:</b> @{clean_wm}\n\n"
-            f"<i>Permintaanmu sudah masuk antrean admin. Begitu film ini diunggah ke channel, bot akan otomatis mengirimkan notifikasi kepadamu lewat DM! 🔔🍿</i>",
+            f"<i>Permintaanmu sudah masuk antrean admin. Begitu film ini diunggah ke channel atau ditinjau admin, bot akan otomatis mengirimkan notifikasi kepadamu lewat DM! 🔔🍿</i>",
             parse_mode=ParseMode.HTML,
             reply_markup=kb
         )
     else:
         await query.message.edit_text(
             f"ℹ️ <b>Permintaan Sudah Terdaftar:</b>\n\n"
-            f"Kamu sudah pernah me-request film <b>{title}</b> sebelumnya. "
+            f"Kamu sudah pernah me-request film <b>{html.escape(title)}</b> sebelumnya. "
             f"Permintaanmu masih aktif dan bot akan mengirimkan notifikasi saat film sudah tayang! 🙏",
             parse_mode=ParseMode.HTML,
             reply_markup=kb
@@ -1674,7 +1869,7 @@ async def request_movie_cmd(client: Client, msg: Message):
         ])
         await msg.reply_text(
             f"🎉 <b>Film yang Kamu Cari Sudah Tersedia!</b>\n\n"
-            f"🎬 <b>{ex_disp}</b>\n"
+            f"🎬 <b>{html.escape(ex_disp)}</b>\n"
             f"📢 Channel: @{clean_wm}\n\n"
             f"👉 <a href=\"{ex_link}\">Klik di sini untuk langsung menonton di channel</a>\n\n"
             f"<i>Selamat menonton! 🍿</i>",
@@ -1691,18 +1886,27 @@ async def request_movie_cmd(client: Client, msg: Message):
         [InlineKeyboardButton("🔍 Cari Film Lain", switch_inline_query_current_chat="")]
     ])
     if res.get("is_new"):
+        asyncio.create_task(notify_admins_new_request(
+            client=client,
+            req_id=res.get("id", 0),
+            requester_user_id=user_id,
+            requester_username=raw_username,
+            requester_name=first_name,
+            movie_title=query,
+            channel_wm=clean_wm
+        ))
         await msg.reply_text(
             f"✅ <b>Permintaan Film Berhasil Dicatat!</b>\n\n"
-            f"🎬 <b>Judul:</b> {query}\n"
+            f"🎬 <b>Judul:</b> {html.escape(query)}\n"
             f"📢 <b>Target Channel:</b> @{clean_wm}\n\n"
-            f"<i>Bot telah memasukkan permintaanmu ke daftar tunggu admin. Kamu akan otomatis menerima pesan notifikasi di sini begitu film ini diunggah! 🔔🍿</i>",
+            f"<i>Bot telah memasukkan permintaanmu ke antrean admin. Begitu film ini diunggah atau ditinjau, bot akan otomatis mengirimkan notifikasi kepadamu lewat DM! 🔔🍿</i>",
             parse_mode=ParseMode.HTML,
             reply_markup=kb
         )
     else:
         await msg.reply_text(
             f"ℹ️ <b>Permintaan Sudah Terdaftar Sebelumnya:</b>\n\n"
-            f"Kamu sudah pernah me-request film <b>{query}</b>.\n"
+            f"Kamu sudah pernah me-request film <b>{html.escape(query)}</b>.\n"
             f"Permintaanmu masih aktif dan bot akan tetap mengirimkan notifikasi saat film sudah diunggah. Mohon ditunggu ya! 🙏",
             parse_mode=ParseMode.HTML,
             reply_markup=kb
@@ -1719,45 +1923,230 @@ async def list_requests_cmd(client: Client, msg: Message):
     wm = _get_user_watermark(chat_id)
     clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
 
-    reqs = _engine.cache.get_pending_requests(clean_wm, limit=25)
-    if not reqs:
-        await msg.reply_text(
-            f"📋 <b>Daftar Permintaan Film (@{clean_wm}):</b>\n\n"
-            f"<i>Saat ini belum ada permintaan film yang tertunda dari member.</i>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    lines = [
-        f"📋 <b>DAFTAR PERMINTAAN FILM MEMBER</b>",
-        f"📢 Channel: @{clean_wm}",
-        f"━━━━━━━━━━━━━━━━━━━━"
-    ]
-    for idx, r in enumerate(reqs, 1):
-        t = r["title"]
-        c = r["count"]
-        cnt_str = f"({c}x diminta)" if c > 1 else ""
-        lines.append(f"{idx}. <b>{t}</b> {cnt_str}")
-
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append("<i>💡 Saat Anda mengunggah film dengan judul di atas, bot akan otomatis mengirimkan notifikasi DM ke penonton yang me-request!</i>")
-
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🗑️ Bersihkan Riwayat Selesai", callback_data="clear_requests")]
-    ])
-    await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=kb)
+    text, kb = build_admin_requests_panel(chat_id, clean_wm)
+    await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
 @app.on_callback_query(filters.regex(r"^clear_requests$"))
 async def cb_clear_requests(client: Client, query: CallbackQuery):
-    user_id = query.from_user.id if query.from_user else query.message.chat.id
     if not check_admin(query):
         await query.answer("⛔ Khusus Administrator!", show_alert=True)
         return
 
     cnt = _engine.cache.clear_old_requests()
-    await query.answer(f"✅ {cnt} riwayat request dibersihkan!", show_alert=True)
-    await query.message.edit_reply_markup(reply_markup=None)
+    await query.answer(f"✅ {cnt} riwayat request selesai/terjawab dibersihkan!", show_alert=True)
+
+    chat_id = query.message.chat.id
+    wm = _get_user_watermark(chat_id)
+    clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
+    text, kb = build_admin_requests_panel(chat_id, clean_wm)
+    try:
+        await query.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    except Exception:
+        pass
+
+
+@app.on_callback_query(filters.regex(r"^clear_req_all_ask$"))
+async def cb_clear_req_all_ask(client: Client, query: CallbackQuery):
+    if not check_admin(query):
+        await query.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("⚠️ Ya, Hapus Semua", callback_data="clear_req_all_yes"),
+            InlineKeyboardButton("❌ Batal", callback_data="adm_view_requests")
+        ]
+    ])
+    await query.message.edit_text(
+        "⚠️ <b>KONFIRMASI HAPUS SEMUA REQUEST</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Apakah Anda yakin ingin <b>menghapus seluruh antrean permintaan film member</b> saat ini?\n\n"
+        "<i>Semua daftar permintaan pending akan dibersihkan dari database.</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb
+    )
+
+
+@app.on_callback_query(filters.regex(r"^clear_req_all_yes$"))
+async def cb_clear_req_all_yes(client: Client, query: CallbackQuery):
+    if not check_admin(query):
+        await query.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+
+    chat_id = query.message.chat.id
+    wm = _get_user_watermark(chat_id)
+    clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
+
+    cnt = _engine.cache.clear_all_pending_requests(clean_wm)
+    await query.answer(f"✅ {cnt} permintaan member berhasil dihapus bersih!", show_alert=True)
+    text, kb = build_admin_requests_panel(chat_id, clean_wm)
+    try:
+        await query.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    except Exception:
+        pass
+
+
+@app.on_callback_query(filters.regex(r"^del_req:(\d+)$"))
+async def cb_del_req(client: Client, query: CallbackQuery):
+    if not check_admin(query):
+        await query.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+
+    req_id = int(query.matches[0].group(1))
+    req = _engine.cache.get_request_by_id(req_id)
+    title = req.get("movie_title", "Film") if req else "Film"
+
+    _engine.cache.delete_request_by_id(req_id, delete_all_for_title=True)
+    await query.answer(f"🗑️ Permintaan '{title}' berhasil dihapus!", show_alert=True)
+
+    chat_id = query.message.chat.id
+    wm = _get_user_watermark(chat_id)
+    clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
+
+    msg_text = query.message.text or ""
+    if "PERMINTAAN FILM BARU" in msg_text or "PANEL TANGGAPAN" in msg_text:
+        await query.message.edit_text(
+            f"🗑️ <b>PERMINTAAN TELAH DIHAPUS</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎬 <b>Judul:</b> {html.escape(title)}\n"
+            f"<i>Permintaan telah dibersihkan dari antrean bot.</i>\n\n"
+            f"👇 <i>Kelola permintaan lainnya:</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📋 Kelola Semua Request", callback_data="adm_view_requests")]
+            ])
+        )
+    else:
+        text, kb = build_admin_requests_panel(chat_id, clean_wm)
+        try:
+            await query.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        except Exception:
+            pass
+
+
+@app.on_callback_query(filters.regex(r"^ans_req_menu:(\d+)$"))
+async def cb_ans_req_menu(client: Client, query: CallbackQuery):
+    if not check_admin(query):
+        await query.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+
+    req_id = int(query.matches[0].group(1))
+    req = _engine.cache.get_request_by_id(req_id)
+    if not req:
+        await query.answer("❌ Permintaan tidak ditemukan atau sudah diselesaikan.", show_alert=True)
+        return
+
+    title = req.get("movie_title", "Film")
+    u_name = req.get("username") or "Member"
+    clean_chan = (req.get("channel_username") or "film_indonesia1").lstrip("@").strip().lower()
+
+    text = (
+        f"👑 <b>PANEL TANGGAPAN OWNER (DARFIN)</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎬 <b>Film:</b> <b>{html.escape(title)}</b>\n"
+        f"👤 <b>Pemohon:</b> @{html.escape(u_name)} (<code>{req['user_id']}</code>)\n"
+        f"📢 <b>Channel:</b> @{clean_chan}\n\n"
+        f"Pilih tanggapan resmi yang ingin dikirimkan langsung dari bot ke pemohon:\n"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎬 Masih Tayang di Bioskop", callback_data=f"ans_act:{req_id}:bioskop")],
+        [InlineKeyboardButton("⏳ Belum Tersedia / Rilis Digital", callback_data=f"ans_act:{req_id}:belum_ada")],
+        [InlineKeyboardButton("🍿 Sudah Ada di Channel", callback_data=f"ans_act:{req_id}:sudah_ada")],
+        [InlineKeyboardButton("🔍 Judul Kurang Jelas / Butuh Info", callback_data=f"ans_act:{req_id}:info_kurang")],
+        [InlineKeyboardButton("✍️ Tulis Pesan Kustom Sendiri", callback_data=f"ans_act:{req_id}:custom")],
+        [
+            InlineKeyboardButton("🗑️ Hapus Request", callback_data=f"del_req:{req_id}"),
+            InlineKeyboardButton("🔙 Batal", callback_data=f"ans_cancel:{req_id}")
+        ]
+    ])
+    await query.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+@app.on_callback_query(filters.regex(r"^ans_cancel:(\d+)$"))
+async def cb_ans_cancel(client: Client, query: CallbackQuery):
+    user_id = query.from_user.id if query.from_user else query.message.chat.id
+    _user_states.pop(user_id, None)
+
+    chat_id = query.message.chat.id
+    wm = _get_user_watermark(chat_id)
+    clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
+
+    await query.answer("Dibatalkan.")
+    text, kb = build_admin_requests_panel(chat_id, clean_wm)
+    try:
+        await query.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    except Exception:
+        pass
+
+
+@app.on_callback_query(filters.regex(r"^ans_act:(\d+):([a-z_]+)$"))
+async def cb_ans_act(client: Client, query: CallbackQuery):
+    if not check_admin(query):
+        await query.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+
+    req_id = int(query.matches[0].group(1))
+    action = query.matches[0].group(2)
+    admin_user_id = query.from_user.id if query.from_user else query.message.chat.id
+
+    req = _engine.cache.get_request_by_id(req_id)
+    if not req:
+        await query.answer("❌ Permintaan tidak ditemukan atau sudah diselesaikan.", show_alert=True)
+        return
+
+    title = req.get("movie_title", "Film")
+    clean_chan = (req.get("channel_username") or "film_indonesia1").lstrip("@").strip().lower()
+
+    if action == "custom":
+        _user_states[admin_user_id] = f"waiting_custom_req_reply:{req_id}"
+        await query.message.edit_text(
+            f"✍️ <b>TULIS PESAN KUSTOM UNTUK PEMOHON</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎬 <b>Film:</b> <b>{html.escape(title)}</b>\n"
+            f"👤 <b>Pemohon:</b> {html.escape(req.get('username') or 'Member')} (<code>{req['user_id']}</code>)\n\n"
+            f"Silakan <b>ketik pesan Anda langsung di chat ini</b>.\n"
+            f"Bot akan menyampaikannya secara resmi & elegan atas nama <b>Darfin</b> (Sang Absolut Owner & Pencipta).\n\n"
+            f"<i>Ketik <code>/cancel</code> atau tekan tombol di bawah untuk membatalkan.</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Batal", callback_data=f"ans_cancel:{req_id}")]
+            ])
+        )
+        await query.answer()
+        return
+
+    if action == "bioskop":
+        body_text = (
+            f"🎬 <i>Saat ini film <b>{html.escape(title)}</b> masih dalam masa penayangan resmi di bioskop. "
+            f"Versi digital resmi (WEB-DL / HD) dengan kualitas audio & visual jernih belum dirilis.\n\n"
+            f"Mohon bersabar ya! Tim kami akan segera mengunggahnya ke channel @{clean_chan} begitu rilis digital resmi tersedia! 🍿</i>"
+        )
+        label_action = "Masih Tayang di Bioskop"
+    elif action == "belum_ada":
+        body_text = (
+            f"⏳ <i>Saat ini film <b>{html.escape(title)}</b> belum tersedia di platform digital resmi "
+            f"atau belum memiliki rilisan dengan kualitas audio-visual yang layak tonton.\n\n"
+            f"Tim kami terus memantau perkembangannya dan akan segera menghadirkannya saat sudah siap tayang! 🙏</i>"
+        )
+        label_action = "Belum Tersedia / Rilis"
+    elif action == "sudah_ada":
+        body_text = (
+            f"🍿 <b>Kabar Gembira!</b> <i>Film <b>{html.escape(title)}</b> sebenarnya sudah tersedia di channel kami!\n\n"
+            f"Silakan langsung gunakan fitur pencarian bot atau cari judulnya di channel @{clean_chan} untuk langsung menonton sekarang. Selamat menonton! 🎉</i>"
+        )
+        label_action = "Sudah Tersedia di Channel"
+    elif action == "info_kurang":
+        body_text = (
+            f"🔍 <i>Judul film <b>{html.escape(title)}</b> yang kamu ajukan kurang spesifik atau memiliki beberapa versi berbeda.\n\n"
+            f"Mohon ajukan request ulang dengan menyertakan tahun rilis, link referensi (IMDb/Google), atau nama pemeran utamanya agar kami dapat mencarikannya dengan tepat! 🎬</i>"
+        )
+        label_action = "Info Kurang Lengkap"
+    else:
+        await query.answer("Aksi tidak valid.", show_alert=True)
+        return
+
+    await send_official_answer_to_requesters(client, query, req_id, title, clean_chan, body_text, label_action)
 
 
 # ================= SECRET VAULT (MIRROR ARSIP) =================
@@ -3332,6 +3721,40 @@ async def healthcheck_cmd(client: Client, msg: Message):
         await status_msg.edit_text(f"❌ <b>Gagal menjalankan audit:</b> <code>{e}</code>", parse_mode=ParseMode.HTML)
 
 
+@app.on_message(filters.command(["pingsupabase", "keepalive"]))
+async def ping_supabase_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator.", parse_mode=ParseMode.HTML)
+        return
+
+    status_msg = await msg.reply_text("⏳ <i>Mengirim ping keepalive ke Supabase Cloud...</i>", parse_mode=ParseMode.HTML)
+    t0 = time.time()
+    res = await _engine.cache.async_ping_supabase_keepalive()
+    dur = (time.time() - t0) * 1000
+
+    if res.get("success"):
+        methods_str = ", ".join(res.get("methods", []))
+        ts = res.get("timestamp", "-")
+        text = (
+            "⚡ <b>SUPABASE KEEPALIVE BERHASIL!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>Status:</b> 🟢 Aktif & Terkoneksi\n"
+            f"• <b>Metode:</b> <code>{methods_str}</code>\n"
+            f"• <b>Latensi:</b> <code>{dur:.1f}ms</code>\n"
+            f"• <b>Waktu Ping:</b> <code>{ts}</code>\n\n"
+            "🛡️ <i>Database Supabase Anda diping otomatis setiap 24 jam agar <b>TIDAK PERNAH DIJEDA (PAUSE)</b> oleh sistem 7-hari Supabase Free Plan!</i>"
+        )
+    else:
+        err = res.get("error", "Koneksi tidak diaktifkan / konfigurasi belum lengkap")
+        text = (
+            "⚠️ <b>SUPABASE KEEPALIVE GAGAL</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>Penyebab:</b> <code>{html.escape(str(err))}</code>\n\n"
+            "💡 <i>Pastikan DATABASE_URL atau SUPABASE_URL & SUPABASE_KEY terpasang dengan benar di .env / Render environment!</i>"
+        )
+    await status_msg.edit_text(text, parse_mode=ParseMode.HTML)
+
+
 @app.on_message(filters.command(["retarget", "updateposts", "updatebuttons"]))
 async def retarget_posts_cmd(client: Client, msg: Message):
     if not check_admin(msg):
@@ -3609,6 +4032,28 @@ async def _daily_highlight_worker(client: Client):
                         _engine.cache.set_setting(f"last_highlight_ts_{clean_wm}", str(now_ts))
         except Exception as e:
             logger.debug(f"Daily highlight worker: {e}")
+
+
+async def _supabase_keepalive_worker():
+    """Background worker: automatically pings Supabase every 24 hours to prevent 7-day free tier pause."""
+    try:
+        await asyncio.sleep(20)  # Initial wait on boot
+        while True:
+            try:
+                if _engine.cache.cloud.is_enabled:
+                    res = await _engine.cache.async_ping_supabase_keepalive()
+                    if res.get("success"):
+                        logger.info("🛡️ Supabase auto-keepalive executed successfully (anti 7-day pause active).")
+                await asyncio.sleep(86400)  # Ping every 24 hours
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"Supabase keepalive worker loop warning: {e}")
+                await asyncio.sleep(3600)  # Retry in 1 hour on error
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.warning(f"Supabase keepalive worker fatal error: {e}")
 
 
 def parse_movie_from_channel_message(msg: Message) -> Optional[Dict[str, Any]]:
@@ -5653,6 +6098,29 @@ async def handle_incoming_text(client: Client, msg: Message):
         )
         return
 
+    # Handle custom request reply from admin
+    if _user_states.get(user_id, "").startswith("waiting_custom_req_reply:"):
+        state_val = _user_states.pop(user_id)
+        req_id_str = state_val.split(":", 1)[1]
+        req_id = int(req_id_str) if req_id_str.isdigit() else 0
+
+        custom_text = msg.text.strip()
+        if custom_text.lower() in ("batal", "cancel", "/batal", "/cancel", "tidak", "ga jadi"):
+            await msg.reply_text("❌ <b>Pengiriman balasan kustom dibatalkan.</b>", parse_mode=ParseMode.HTML)
+            return
+
+        req = _engine.cache.get_request_by_id(req_id)
+        if not req:
+            await msg.reply_text("❌ <b>Permintaan tidak ditemukan atau sudah diselesaikan sebelumnya.</b>", parse_mode=ParseMode.HTML)
+            return
+
+        title = req.get("movie_title", "Film")
+        clean_chan = (req.get("channel_username") or "film_indonesia1").lstrip("@").strip().lower()
+
+        body_text = f"✉️ <i>\"{html.escape(custom_text)}\"</i>"
+        await send_official_answer_to_requesters(client, msg, req_id, title, clean_chan, body_text, "Pesan Khusus Owner")
+        return
+
     # 2. Handle interactive admin movie input
     if _user_states.get(user_id) == "waiting_admin_movie_input":
         _user_states.pop(user_id, None)
@@ -5768,11 +6236,20 @@ async def handle_incoming_text(client: Client, msg: Message):
         ])
         safe_query = html.escape(query)
         if res.get("is_new"):
+            asyncio.create_task(notify_admins_new_request(
+                client=client,
+                req_id=res.get("id", 0),
+                requester_user_id=user_id,
+                requester_username=msg.from_user.username or "",
+                requester_name=first_name or "Member",
+                movie_title=query,
+                channel_wm=clean_wm
+            ))
             await msg.reply_text(
                 f"✅ <b>Permintaan Film Berhasil Dicatat!</b>\n\n"
                 f"🎬 <b>Judul:</b> {safe_query}\n"
                 f"📢 <b>Target Channel:</b> @{clean_wm}\n\n"
-                f"<i>Permintaanmu sudah masuk antrean admin. Begitu film ini diunggah ke channel, bot akan otomatis mengirimkan notifikasi kepadamu lewat DM! 🔔🍿</i>",
+                f"<i>Permintaanmu sudah masuk antrean admin. Begitu film ini diunggah ke channel atau ditinjau, bot akan otomatis mengirimkan notifikasi kepadamu lewat DM! 🔔🍿</i>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=kb
             )
@@ -6006,6 +6483,9 @@ async def on_bot_startup(client: Client):
 
         # Start background daily highlight worker
         asyncio.create_task(_daily_highlight_worker(client))
+
+        # Start background Supabase anti-pause keepalive worker (24h loop)
+        asyncio.create_task(_supabase_keepalive_worker())
 
         # Start prime-time scheduler worker (auto-restores queue from Telegram backup on startup)
         ensure_scheduler_worker(client)

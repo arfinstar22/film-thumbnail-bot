@@ -29,16 +29,18 @@ class SupabaseSyncService:
         if raw_url.startswith("postgres://"):
             raw_url = "postgresql://" + raw_url[11:]
         self.db_url = raw_url
-        self._enabled = bool(self.db_url and HAS_PSYCOPG2)
+        self.supabase_url = os.getenv("SUPABASE_URL", "").strip()
+        self.supabase_key = os.getenv("SUPABASE_KEY", "").strip()
+        self._enabled = bool((self.db_url and HAS_PSYCOPG2) or (self.supabase_url and self.supabase_key))
         if not HAS_PSYCOPG2 and self.db_url:
-            logger.warning("psycopg2 is not installed. Supabase cloud sync disabled.")
+            logger.warning("psycopg2 is not installed. Supabase direct DB sync disabled.")
 
     @property
     def is_enabled(self) -> bool:
         return self._enabled
 
     def _get_connection(self):
-        if not self._enabled:
+        if not (self.db_url and HAS_PSYCOPG2):
             return None
         return psycopg2.connect(self.db_url, connect_timeout=6)
 
@@ -328,4 +330,106 @@ class SupabaseSyncService:
                     conn.close()
                 except Exception:
                     pass
+
+    async def async_delete_requests(self, clean_title: str):
+        """Asynchronously deletes requests from Supabase."""
+        if not self._enabled:
+            return
+        await asyncio.to_thread(self._sync_delete_requests, clean_title)
+
+    def _sync_delete_requests(self, clean_title: str):
+        conn = None
+        try:
+            conn = self._get_connection()
+            if conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM movie_requests WHERE status = 'pending' AND clean_title = %s",
+                        (clean_title,)
+                    )
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"Supabase async_delete_requests error: {e}")
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def ping_keepalive(self) -> Dict[str, Any]:
+        """Pings Supabase to prevent the 7-day free tier inactivity pause.
+        Executes a PostgreSQL write and/or REST API request to reset inactivity counters.
+        """
+        now_iso = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+        res = {
+            "success": False,
+            "timestamp": now_iso,
+            "methods": [],
+            "error": None,
+        }
+
+        # 1. PostgreSQL Direct DB Ping
+        if self.db_url and HAS_PSYCOPG2:
+            conn = None
+            try:
+                conn = self._get_connection()
+                if conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            CREATE TABLE IF NOT EXISTS settings (
+                                key TEXT PRIMARY KEY,
+                                value TEXT
+                            );
+                        """)
+                        cur.execute(
+                            """INSERT INTO settings (key, value)
+                               VALUES ('supabase_last_keepalive', %s)
+                               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
+                            (now_iso,)
+                        )
+                    conn.commit()
+                    res["methods"].append("postgres_direct")
+                    res["success"] = True
+            except Exception as e:
+                logger.warning(f"Supabase direct PostgreSQL keepalive ping failed: {e}")
+                res["error"] = str(e)
+            finally:
+                if conn:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+        # 2. Supabase REST API Ping (fallback or dual keepalive)
+        if self.supabase_url and self.supabase_key:
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    f"{self.supabase_url.rstrip('/')}/rest/v1/settings?select=key&limit=1",
+                    headers={
+                        "apikey": self.supabase_key,
+                        "Authorization": f"Bearer {self.supabase_key}",
+                        "User-Agent": "FilmBot-Keepalive/1.0",
+                    }
+                )
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    if resp.status in (200, 206):
+                        res["methods"].append("rest_api")
+                        res["success"] = True
+            except Exception as e:
+                logger.warning(f"Supabase REST keepalive ping failed: {e}")
+                if not res["success"]:
+                    res["error"] = str(e)
+
+        if res["success"]:
+            logger.info(f"⚡ Supabase keepalive ping OK via {', '.join(res['methods'])} at {now_iso}")
+        else:
+            logger.warning(f"⚠️ Supabase keepalive ping failed: {res.get('error')}")
+
+        return res
+
+    async def async_ping_keepalive(self) -> Dict[str, Any]:
+        """Non-blocking async wrapper for ping_keepalive."""
+        return await asyncio.to_thread(self.ping_keepalive)
 

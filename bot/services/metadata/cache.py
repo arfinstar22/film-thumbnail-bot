@@ -39,6 +39,28 @@ class MetadataCache:
             return self.cloud.hydrate_to_sqlite(self._conn())
         return {}
 
+    def ping_supabase_keepalive(self) -> Dict[str, Any]:
+        """Triggers keepalive ping to Supabase and updates local cache setting."""
+        if not self.cloud.is_enabled:
+            return {"success": False, "error": "Supabase sync not enabled (missing DATABASE_URL/SUPABASE_URL)"}
+        res = self.cloud.ping_keepalive()
+        if res.get("success"):
+            self.set_setting("supabase_last_keepalive", res.get("timestamp", ""))
+        return res
+
+    async def async_ping_supabase_keepalive(self) -> Dict[str, Any]:
+        """Non-blocking async keepalive ping to Supabase."""
+        if not self.cloud.is_enabled:
+            return {"success": False, "error": "Supabase sync not enabled (missing DATABASE_URL/SUPABASE_URL)"}
+        res = await self.cloud.async_ping_keepalive()
+        if res.get("success"):
+            self.set_setting("supabase_last_keepalive", res.get("timestamp", ""))
+        return res
+
+    def get_supabase_last_keepalive(self) -> str:
+        """Returns the timestamp of the last successful Supabase keepalive ping."""
+        return self.get_setting("supabase_last_keepalive", "Belum pernah")
+
     def _conn(self):
         if not hasattr(self._local, "conn"):
             self._local.conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
@@ -551,16 +573,18 @@ class MetadataCache:
             "SELECT id FROM movie_requests WHERE user_id = ? AND clean_title = ? AND status = 'pending'",
             (user_id, clean_t)
         )
-        if cur.fetchone():
-            return {"success": True, "is_new": False, "title": movie_title}
+        row = cur.fetchone()
+        if row:
+            return {"success": True, "is_new": False, "title": movie_title, "id": row[0]}
 
-        conn.execute(
+        cur = conn.execute(
             """
             INSERT INTO movie_requests (user_id, username, movie_title, clean_title, channel_username)
             VALUES (?, ?, ?, ?, ?)
             """,
             (user_id, username or "", movie_title.strip(), clean_t, clean_chan)
         )
+        new_id = cur.lastrowid
         conn.commit()
 
         if self.cloud.is_enabled:
@@ -571,7 +595,7 @@ class MetadataCache:
             except Exception:
                 pass
 
-        return {"success": True, "is_new": True, "title": movie_title}
+        return {"success": True, "is_new": True, "title": movie_title, "id": new_id}
 
     def get_pending_requests(self, channel_username: Optional[str] = None, limit: int = 50) -> List[dict]:
         conn = self._conn()
@@ -579,7 +603,7 @@ class MetadataCache:
         if channel_username:
             clean_chan = channel_username.lstrip("@").strip().lower()
             query = """
-                SELECT movie_title, COUNT(*) as count, GROUP_CONCAT(username) as requesters, MIN(created_at) as earliest
+                SELECT movie_title, clean_title, COUNT(*) as count, GROUP_CONCAT(username) as requesters, GROUP_CONCAT(user_id) as user_ids, GROUP_CONCAT(id) as req_ids, MIN(created_at) as earliest
                 FROM movie_requests
                 WHERE status = 'pending' AND (channel_username = ? OR channel_username = '')
                 GROUP BY clean_title
@@ -589,7 +613,7 @@ class MetadataCache:
             cur = conn.execute(query, (clean_chan, limit))
         else:
             query = """
-                SELECT movie_title, COUNT(*) as count, GROUP_CONCAT(username) as requesters, MIN(created_at) as earliest
+                SELECT movie_title, clean_title, COUNT(*) as count, GROUP_CONCAT(username) as requesters, GROUP_CONCAT(user_id) as user_ids, GROUP_CONCAT(id) as req_ids, MIN(created_at) as earliest
                 FROM movie_requests
                 WHERE status = 'pending'
                 GROUP BY clean_title
@@ -602,11 +626,135 @@ class MetadataCache:
         for row in cur.fetchall():
             results.append({
                 "title": row[0],
-                "count": row[1],
-                "requesters": [r for r in (row[2] or "").split(",") if r],
-                "created_at": row[3]
+                "clean_title": row[1],
+                "count": row[2],
+                "requesters": [r for r in (row[3] or "").split(",") if r],
+                "user_ids": [int(uid) for uid in (row[4] or "").split(",") if uid.strip().lstrip("-").isdigit()],
+                "ids": [int(rid) for rid in (row[5] or "").split(",") if rid.strip().isdigit()],
+                "created_at": row[6]
             })
         return results
+
+    def get_request_by_id(self, req_id: int) -> Optional[dict]:
+        conn = self._conn()
+        self._ensure_requests_table(conn)
+        cur = conn.execute(
+            "SELECT id, user_id, username, movie_title, clean_title, channel_username, status, created_at, fulfilled_at FROM movie_requests WHERE id = ?",
+            (req_id,)
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "user_id": row[1],
+            "username": row[2],
+            "movie_title": row[3],
+            "clean_title": row[4],
+            "channel_username": row[5],
+            "status": row[6],
+            "created_at": row[7],
+            "fulfilled_at": row[8]
+        }
+
+    def delete_request_by_id(self, req_id: int, delete_all_for_title: bool = True) -> int:
+        conn = self._conn()
+        self._ensure_requests_table(conn)
+        req = self.get_request_by_id(req_id)
+        if not req:
+            return 0
+        clean_t = req.get("clean_title")
+        if delete_all_for_title and clean_t:
+            cur = conn.execute("DELETE FROM movie_requests WHERE clean_title = ?", (clean_t,))
+            count = cur.rowcount
+        else:
+            cur = conn.execute("DELETE FROM movie_requests WHERE id = ?", (req_id,))
+            count = cur.rowcount
+        conn.commit()
+
+        if self.cloud.is_enabled and clean_t:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self.cloud.async_delete_requests(clean_t))
+            except Exception:
+                pass
+        return count
+
+    def delete_requests_by_clean_title(self, clean_title: str) -> int:
+        conn = self._conn()
+        self._ensure_requests_table(conn)
+        cur = conn.execute("DELETE FROM movie_requests WHERE clean_title = ?", (clean_title,))
+        count = cur.rowcount
+        conn.commit()
+        if self.cloud.is_enabled:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self.cloud.async_delete_requests(clean_title))
+            except Exception:
+                pass
+        return count
+
+    def clear_all_pending_requests(self, channel_username: Optional[str] = None) -> int:
+        conn = self._conn()
+        self._ensure_requests_table(conn)
+        if channel_username:
+            clean_chan = channel_username.lstrip("@").strip().lower()
+            cur = conn.execute(
+                "DELETE FROM movie_requests WHERE status = 'pending' AND (channel_username = ? OR channel_username = '')",
+                (clean_chan,)
+            )
+        else:
+            cur = conn.execute("DELETE FROM movie_requests WHERE status = 'pending'")
+        count = cur.rowcount
+        conn.commit()
+        return count
+
+    def answer_movie_requests(self, req_id: int, answer_note: str = "") -> List[dict]:
+        """Marks pending requests for the same movie as answered and returns all affected requester info."""
+        conn = self._conn()
+        self._ensure_requests_table(conn)
+        req = self.get_request_by_id(req_id)
+        if not req:
+            return []
+        clean_t = req.get("clean_title")
+        if not clean_t:
+            return []
+
+        cur = conn.execute(
+            "SELECT id, user_id, username, movie_title, channel_username FROM movie_requests WHERE clean_title = ? AND status = 'pending'",
+            (clean_t,)
+        )
+        matched_ids = []
+        requesters = []
+        for row in cur.fetchall():
+            matched_ids.append(row[0])
+            requesters.append({
+                "id": row[0],
+                "user_id": row[1],
+                "username": row[2],
+                "movie_title": row[3],
+                "channel_username": row[4]
+            })
+
+        if matched_ids:
+            placeholders = ",".join("?" * len(matched_ids))
+            conn.execute(
+                f"UPDATE movie_requests SET status = 'answered', fulfilled_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})",
+                matched_ids
+            )
+            conn.commit()
+
+            if self.cloud.is_enabled:
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.create_task(self.cloud.async_fulfill_requests(clean_t))
+                except Exception:
+                    pass
+
+        return requesters
 
     def find_matching_requests(self, movie_title: str) -> List[dict]:
         """Find pending requests that match the given movie title without altering database status."""
@@ -678,7 +826,7 @@ class MetadataCache:
     def clear_old_requests(self) -> int:
         conn = self._conn()
         self._ensure_requests_table(conn)
-        cur = conn.execute("DELETE FROM movie_requests WHERE status = 'fulfilled'")
+        cur = conn.execute("DELETE FROM movie_requests WHERE status IN ('fulfilled', 'answered', 'rejected')")
         count = cur.rowcount
         conn.commit()
         return count
