@@ -58,6 +58,7 @@ async def _safe_callback_answer(self, *args, **kwargs):
 CallbackQuery.answer = _safe_callback_answer
 
 _jobs = {}
+_banner_sessions: Dict[int, Dict[str, Any]] = {}
 _user_states: Dict[int, str] = {}
 _engine = MetadataEngine()
 _video_queue: asyncio.Queue = asyncio.Queue()
@@ -757,7 +758,31 @@ def get_caption_kb(message_id: int, watermark: str):
             InlineKeyboardButton("📋 Salin Teks", callback_data=f"copy:{message_id}")
         ],
         [
-            InlineKeyboardButton("🔄 Format Ulang", callback_data=f"info:{message_id}")
+            InlineKeyboardButton("🔄 Format Ulang", callback_data=f"info:{message_id}"),
+            InlineKeyboardButton("🖼️ Perbaiki Poster", callback_data=f"fixbanner:{message_id}")
+        ]
+    ])
+
+
+def get_banner_action_kb(chat_id_or_msg_id: int):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔄 Perbaiki / Ganti Poster", callback_data=f"fixbanner:{chat_id_or_msg_id}"),
+            InlineKeyboardButton("🗑️ Tutup", callback_data=f"closebanner:{chat_id_or_msg_id}")
+        ]
+    ])
+
+
+def get_banner_fix_menu_kb(chat_id_or_msg_id: int):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔍 Cari Ulang Judul / Tahun", callback_data=f"fixb_search:{chat_id_or_msg_id}")
+        ],
+        [
+            InlineKeyboardButton("🖼️ Upload Foto Sendiri", callback_data=f"fixb_photo:{chat_id_or_msg_id}")
+        ],
+        [
+            InlineKeyboardButton("🔙 Batal", callback_data=f"fixb_cancel:{chat_id_or_msg_id}")
         ]
     ])
 
@@ -2857,11 +2882,21 @@ async def banner_cmd(client: Client, msg: Message):
             f"<i>Siap dibagikan ke channel atau media sosial untuk promosi!</i>"
         )
 
+        _banner_sessions[chat_id] = {
+            "metadata": meta,
+            "poster_url": poster_src,
+            "watermark": wm,
+            "query": query,
+            "source_type": "cmd",
+            "timestamp": time.time()
+        }
+
         await client.send_photo(
             chat_id=chat_id,
             photo=banner_path,
             caption=caption,
-            parse_mode=ParseMode.HTML
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_banner_action_kb(chat_id)
         )
         await status_msg.delete()
     except Exception as e:
@@ -5665,42 +5700,82 @@ async def handle_custom_photo_thumbnail(client: Client, msg: Message):
         return
 
     chat_id = msg.chat.id
-    job = _jobs.get(chat_id)
-    if not job:
+    is_waiting_fixb = _user_states.get(user_id, "").startswith("waiting_fixb_photo:")
+    if is_waiting_fixb:
+        state_val = _user_states.pop(user_id)
+        target_chat_str = state_val.split(":", 1)[1] if ":" in state_val else str(chat_id)
+        target_chat_id = int(target_chat_str) if target_chat_str.lstrip("-").isdigit() else chat_id
+    else:
+        target_chat_id = chat_id
+
+    job = _jobs.get(target_chat_id)
+    session = _banner_sessions.get(target_chat_id)
+    if not job and not session:
         await msg.reply_text(
-            "ℹ️ <b>Tidak ada video yang sedang aktif.</b>\n"
-            "Kirimkan video film terlebih dahulu, lalu kirim atau reply foto ini untuk mengganti cover/thumbnail video tersebut.",
+            "ℹ️ <b>Tidak ada video atau banner yang sedang aktif.</b>\n"
+            "Kirimkan video film atau gunakan <code>/banner Judul Film</code> terlebih dahulu, lalu kirim atau reply foto ini untuk mengganti cover/poster.",
             parse_mode=ParseMode.HTML
         )
         return
 
-    status = await msg.reply_text("⏳ <i>Sedang mengunduh foto & menambahkan watermark badge...</i>", parse_mode=ParseMode.HTML)
+    status = await msg.reply_text("⏳ <i>Sedang mengunduh foto & meracik cover serta banner baru...</i>", parse_mode=ParseMode.HTML)
     try:
-        tmp = job.get("temp_dir")
-        if not tmp or not os.path.isdir(tmp):
-            tmp = tempfile.mkdtemp()
+        tmp = (job.get("temp_dir") if job else None) or tempfile.mkdtemp()
+        if job:
             job["temp_dir"] = tmp
         os.makedirs(tmp, exist_ok=True)
         photo_raw = os.path.join(tmp, "custom_photo_raw.jpg")
         await client.download_media(msg.photo.file_id, file_name=photo_raw)
 
-        wm = job.get("watermark") or _get_user_watermark(chat_id)
-        title = job.get("metadata", {}).get("title") or job.get("filename") or "Film"
-        new_thumb = os.path.join(tmp, "thumb_custom.jpg")
+        wm = (job.get("watermark") if job else None) or (session.get("watermark") if session else None) or _get_user_watermark(target_chat_id)
+        meta = (job.get("metadata") if job else None) or (session.get("metadata") if session else {}) or {}
+        title = meta.get("title") or (job.get("filename") if job else "Film")
 
-        _engine.thumb_gen.create_thumbnail(source=photo_raw, watermark=wm, title=title, output_path=new_thumb)
-        job["thumb_path"] = new_thumb
+        # 1. Update Video Thumbnail if job exists
+        if job:
+            new_thumb = os.path.join(tmp, "thumb_custom.jpg")
+            _engine.thumb_gen.create_thumbnail(source=photo_raw, watermark=wm, title=title, output_path=new_thumb)
+            job["thumb_path"] = new_thumb
+            job["poster_url"] = photo_raw
 
-        await status.edit_text(
-            f"🎉 <b>[COVER CUSTOM BERHASIL DIPASANG]</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🎬 Film: <b>{html.escape(title)}</b>\n"
-            f"🏷️ Badge Watermark: <code>{html.escape(wm)}</code>\n\n"
-            f"✅ Foto Anda telah dioptimasi (< 50 KB) dan siap dijadikan cover utama saat diposting ke channel!",
-            parse_mode=ParseMode.HTML
+        # 2. Update Banner Session & Re-create Banner
+        banner_path = os.path.join(tmp, "banner_custom.jpg")
+        _engine.banner_gen.create_banner(
+            metadata=meta,
+            poster_source=photo_raw,
+            watermark=wm,
+            output_path=banner_path
         )
+
+        _banner_sessions[target_chat_id] = {
+            "metadata": meta,
+            "poster_url": photo_raw,
+            "watermark": wm,
+            "query": title,
+            "timestamp": time.time()
+        }
+
+        title_disp = meta.get("title") or title
+        year_disp = f" ({meta['year']})" if meta.get("year") else ""
+        caption = (
+            f"🎉 <b>[BANNER & COVER CUSTOM BERHASIL DIPASANG]</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎬 <b>{html.escape(title_disp)}{year_disp}</b>\n"
+            f"⭐ Rating: {html.escape(str(meta.get('rating') or 'Belum ada'))}\n"
+            f"🏷️ Badge Watermark: <code>{html.escape(wm)}</code>\n\n"
+            f"✅ <i>Foto kustom Anda telah dipasang ke Banner Promosi HD dan Cover Video!</i>"
+        )
+
+        await client.send_photo(
+            chat_id=target_chat_id,
+            photo=banner_path,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_banner_action_kb(target_chat_id)
+        )
+        await status.delete()
     except Exception as pe:
-        logger.exception("Error processing custom photo thumbnail")
+        logger.exception("Error processing custom photo thumbnail and banner")
         await status.edit_text(f"❌ Gagal memproses foto: <code>{pe}</code>", parse_mode=ParseMode.HTML)
 
 
@@ -5964,11 +6039,21 @@ async def handle_banner_callback(client: Client, call: CallbackQuery):
             f"<i>Banner ini otomatis dikirim di atas video saat memposting ke channel.</i>"
         )
 
+        _banner_sessions[chat_id] = {
+            "metadata": meta,
+            "poster_url": poster_src,
+            "watermark": wm,
+            "query": title,
+            "source_type": "job",
+            "timestamp": time.time()
+        }
+
         await client.send_photo(
             chat_id=chat_id,
             photo=banner_path,
             caption=caption,
-            parse_mode=ParseMode.HTML
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_banner_action_kb(chat_id)
         )
         await status_msg.delete()
     except Exception as e:
@@ -5980,6 +6065,95 @@ async def handle_banner_callback(client: Client, call: CallbackQuery):
                 os.remove(banner_path)
             except Exception:
                 pass
+
+
+@app.on_callback_query(filters.regex(r"^fixbanner:?(\d+)?$"))
+async def handle_fixbanner_callback(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Hanya Administrator!", show_alert=True)
+        return
+
+    chat_id = call.message.chat.id
+    session = _banner_sessions.get(chat_id)
+    job = _jobs.get(chat_id)
+    if not session and not job:
+        await call.answer("Sesi poster atau film tidak ditemukan atau sudah kadaluarsa.", show_alert=True)
+        return
+
+    meta = (session.get("metadata") if session else None) or (job.get("metadata") if job else {})
+    title = meta.get("title") or (job.get("filename") if job else "Film")
+
+    await call.answer("🛠️ Menu Perbaikan Poster")
+    await call.message.reply_text(
+        f"🎨 <b>Menu Perbaikan & Generate Ulang Poster:</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎬 Film: <b>{html.escape(title)}</b>\n\n"
+        f"Pilih metode perbaikan:\n"
+        f"• <b>🔍 Cari Ulang Judul:</b> Masukkan judul atau tahun baru untuk mengambil poster resmi baru secara otomatis dari database IMDb/OMDB.\n"
+        f"• <b>🖼️ Upload Foto Sendiri:</b> Kirimkan gambar poster pilihan Anda sendiri langsung ke bot.\n\n"
+        f"<i>Setelah diperbaiki, banner HD dan cover film akan otomatis diracik ulang!</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_banner_fix_menu_kb(chat_id)
+    )
+
+
+@app.on_callback_query(filters.regex(r"^fixb_search:?(\d+)?$"))
+async def handle_fixb_search_callback(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Hanya Administrator!", show_alert=True)
+        return
+
+    chat_id = call.message.chat.id
+    user_id = call.from_user.id if call.from_user else chat_id
+    _user_states[user_id] = f"waiting_fixb_title:{chat_id}"
+
+    await call.answer()
+    await call.message.reply_text(
+        "🔍 <b>Mode Cari Ulang Judul & Poster Film:</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Ketik <b>Judul Film (Tahun)</b> yang benar di bawah ini:\n"
+        "<i>Contoh:</i>\n"
+        "• <code>Avatar: The Way of Water (2022)</code>\n"
+        "• <code>Pengabdi Setan 2 (2022)</code>\n"
+        "• <code>Interstellar (2014)</code>\n\n"
+        "👉 <i>Bot akan mencari ulang poster resmi & metadata di IMDb/OMDB.</i>\n"
+        "<i>(Ketik <code>/cancel</code> untuk membatalkan)</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+
+@app.on_callback_query(filters.regex(r"^fixb_photo:?(\d+)?$"))
+async def handle_fixb_photo_callback(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Hanya Administrator!", show_alert=True)
+        return
+
+    chat_id = call.message.chat.id
+    user_id = call.from_user.id if call.from_user else chat_id
+    _user_states[user_id] = f"waiting_fixb_photo:{chat_id}"
+
+    await call.answer()
+    await call.message.reply_text(
+        "🖼️ <b>Mode Upload Foto Poster Sendiri:</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Silakan <b>kirim atau reply foto poster</b> yang ingin Anda gunakan ke bot ini sekarang.\n\n"
+        "✨ <i>Bot akan otomatis memotong, meracik banner sinematik HD, dan memperbarui cover film dengan foto Anda!</i>\n"
+        "<i>(Ketik <code>/cancel</code> untuk membatalkan)</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+
+@app.on_callback_query(filters.regex(r"^(fixb_cancel|closebanner):?(\d+)?$"))
+async def handle_fixb_cancel_callback(client: Client, call: CallbackQuery):
+    chat_id = call.message.chat.id
+    user_id = call.from_user.id if call.from_user else chat_id
+    if _user_states.get(user_id, "").startswith(("waiting_fixb_title:", "waiting_fixb_photo:")):
+        _user_states.pop(user_id, None)
+    await call.answer("Ditutup")
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
 
 
 @app.on_callback_query(filters.regex(r"^info:"))
@@ -6081,6 +6255,94 @@ async def handle_incoming_text(client: Client, msg: Message):
         except Exception as e:
             logger.exception("Edit caption error")
             await msg.reply_text(f"❌ Gagal: {str(e)[:100]}")
+        return
+
+    # 2. Handle interactive fix banner / poster search state
+    if _user_states.get(user_id, "").startswith("waiting_fixb_title:"):
+        state_val = _user_states.pop(user_id)
+        target_chat_str = state_val.split(":", 1)[1] if ":" in state_val else str(chat_id)
+        target_chat_id = int(target_chat_str) if target_chat_str.lstrip("-").isdigit() else chat_id
+
+        query = msg.text.strip()
+        if query.lower() in ("batal", "cancel", "/batal", "/cancel", "tidak", "ga jadi", "nggak"):
+            await msg.reply_text("❌ <b>Pencarian ulang judul dibatalkan.</b>", parse_mode=ParseMode.HTML)
+            return
+
+        status_msg = await msg.reply_text(f"⏳ <i>Mencari poster resmi & metadata untuk: <b>{html.escape(query)}</b>...</i>", parse_mode=ParseMode.HTML)
+        banner_path = None
+        try:
+            wm = _get_user_watermark(target_chat_id)
+            parsed = _engine.parser.parse(query)
+            meta = await _engine.enrich_metadata(parsed, query=query)
+            poster_src = meta.get("poster_url")
+
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+                banner_path = tf.name
+
+            _engine.banner_gen.create_banner(
+                metadata=meta,
+                poster_source=poster_src,
+                watermark=wm,
+                output_path=banner_path
+            )
+
+            # Update banner session
+            _banner_sessions[target_chat_id] = {
+                "metadata": meta,
+                "poster_url": poster_src,
+                "watermark": wm,
+                "query": query,
+                "timestamp": time.time()
+            }
+
+            # Sync with video job if active in target_chat_id
+            job = _jobs.get(target_chat_id)
+            if job:
+                job["metadata"].update(meta)
+                if poster_src:
+                    job["poster_url"] = poster_src
+                    tmp = job.get("temp_dir") or tempfile.mkdtemp()
+                    job["temp_dir"] = tmp
+                    new_thumb = os.path.join(tmp, "thumb_poster.jpg")
+                    try:
+                        _engine.thumb_gen.create_thumbnail(
+                            source=poster_src,
+                            watermark=wm,
+                            title=meta.get("title") or query,
+                            output_path=new_thumb
+                        )
+                        job["thumb_path"] = new_thumb
+                    except Exception as te:
+                        logger.debug(f"Thumb update error on fixb: {te}")
+
+            title_disp = meta.get("title") or query
+            year_disp = f" ({meta['year']})" if meta.get("year") else ""
+            caption = (
+                f"🎨 <b>Banner Promosi Sinematik HD (1280x720) [DIPERBARUI]</b>\n\n"
+                f"🎬 <b>{html.escape(title_disp)}{year_disp}</b>\n"
+                f"⭐ Rating: {html.escape(str(meta.get('rating') or 'Belum ada'))}\n"
+                f"🎭 Genre: {html.escape(str(meta.get('genre') or 'Film'))}\n"
+                f"📢 Channel: {html.escape(wm)}\n\n"
+                f"<i>Poster & metadata berhasil diperbarui dan siap diposting!</i>"
+            )
+
+            await client.send_photo(
+                chat_id=target_chat_id,
+                photo=banner_path,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_banner_action_kb(target_chat_id)
+            )
+            await status_msg.delete()
+        except Exception as e:
+            logger.exception("Fix banner title error")
+            await status_msg.edit_text(f"❌ <b>Gagal memperbarui banner:</b> {html.escape(str(e))}", parse_mode=ParseMode.HTML)
+        finally:
+            if banner_path and os.path.exists(banner_path):
+                try:
+                    os.remove(banner_path)
+                except Exception:
+                    pass
         return
 
     # Handle interactive waiting queue backup state (when user sends text instead of json file)

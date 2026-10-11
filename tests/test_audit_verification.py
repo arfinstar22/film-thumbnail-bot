@@ -376,6 +376,45 @@ def test_website_prefix_cleaner():
     print("✅ Website & Uploader Prefix Cleaner: 100% verified across all test cases!")
 
 
+def test_poster_regeneration():
+    from bot.handlers import (
+        get_caption_kb,
+        get_banner_action_kb,
+        get_banner_fix_menu_kb,
+        _banner_sessions
+    )
+
+    # 1. Test Banner Action Keyboard
+    act_kb = get_banner_action_kb(9999)
+    act_btns = [btn.callback_data for row in act_kb.inline_keyboard for btn in row]
+    assert "fixbanner:9999" in act_btns, "fixbanner button missing in get_banner_action_kb"
+    assert "closebanner:9999" in act_btns, "closebanner button missing in get_banner_action_kb"
+
+    # 2. Test Banner Fix Menu Keyboard
+    menu_kb = get_banner_fix_menu_kb(9999)
+    menu_btns = [btn.callback_data for row in menu_kb.inline_keyboard for btn in row]
+    assert "fixb_search:9999" in menu_btns, "fixb_search button missing in get_banner_fix_menu_kb"
+    assert "fixb_photo:9999" in menu_btns, "fixb_photo button missing in get_banner_fix_menu_kb"
+    assert "fixb_cancel:9999" in menu_btns, "fixb_cancel button missing in get_banner_fix_menu_kb"
+
+    # 3. Test Video Caption Keyboard contains fixbanner button
+    cap_kb = get_caption_kb(9999, "@film_indonesia1")
+    cap_btns = [btn.callback_data for row in cap_kb.inline_keyboard for btn in row]
+    assert "fixbanner:9999" in cap_btns, "fixbanner button missing in get_caption_kb"
+
+    # 4. Test Session tracking dictionary
+    _banner_sessions[9999] = {
+        "metadata": {"title": "Test Movie", "year": 2024},
+        "poster_url": "https://example.com/poster.jpg",
+        "watermark": "@film_indonesia1"
+    }
+    assert 9999 in _banner_sessions
+    assert _banner_sessions[9999]["metadata"]["title"] == "Test Movie"
+    del _banner_sessions[9999]
+
+    print("✅ Poster Regeneration & Fix Menu: Keyboards, callbacks & sessions verified!")
+
+
 if __name__ == "__main__":
     test_caption_generator()
     test_rating_service_non_ascii()
@@ -387,6 +426,7 @@ if __name__ == "__main__":
     test_smart_caption_enrichment()
     test_banner_generator()
     test_thumbnail_generator()
+    test_poster_regeneration()
     test_supabase_cloud_sync()
     test_audiosub_and_request_match()
     test_website_prefix_cleaner()
