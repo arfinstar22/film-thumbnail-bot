@@ -4678,7 +4678,9 @@ async def publish_video_to_channel(
     watermark: str,
     update_pin: bool = True,
     thumb_path: Optional[str] = None,
-    with_banner: Optional[bool] = None
+    with_banner: Optional[bool] = None,
+    poster_source: Optional[str] = None,
+    pregenerated_banner_path: Optional[str] = None
 ) -> Optional[Message]:
     """Publishes a video post to the channel with buttons, divider sticker, cache update, and pinned catalog refresh."""
     clean_wm = watermark.lstrip("@").strip()
@@ -4751,17 +4753,29 @@ async def publish_video_to_channel(
 
     if use_banner:
         banner_path = None
+        cleanup_banner = False
         try:
-            poster_src = meta.get("poster_url") or meta.get("poster_path") or meta.get("thumb_path")
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as banner_tmp:
-                banner_path = banner_tmp.name
+            if pregenerated_banner_path and os.path.exists(pregenerated_banner_path):
+                banner_path = pregenerated_banner_path
+                cleanup_banner = False
+            else:
+                poster_src = (
+                    poster_source
+                    or meta.get("poster_url")
+                    or meta.get("poster_path")
+                    or meta.get("thumb_path")
+                    or thumb_path
+                )
+                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as banner_tmp:
+                    banner_path = banner_tmp.name
+                cleanup_banner = True
 
-            _engine.banner_gen.create_banner(
-                metadata=meta,
-                poster_source=poster_src,
-                watermark=watermark,
-                output_path=banner_path
-            )
+                _engine.banner_gen.create_banner(
+                    metadata=meta,
+                    poster_source=poster_src,
+                    watermark=watermark,
+                    output_path=banner_path
+                )
 
             sent_banner = await client.send_photo(
                 chat_id=watermark,
@@ -4776,7 +4790,7 @@ async def publish_video_to_channel(
             logger.warning(f"Failed to publish banner photo to {watermark}: {be}")
             sent_banner = None
         finally:
-            if banner_path and os.path.exists(banner_path):
+            if cleanup_banner and banner_path and os.path.exists(banner_path):
                 try:
                     os.remove(banner_path)
                 except Exception:
@@ -5731,15 +5745,22 @@ async def handle_custom_photo_thumbnail(client: Client, msg: Message):
         meta = (job.get("metadata") if job else None) or (session.get("metadata") if session else {}) or {}
         title = meta.get("title") or (job.get("filename") if job else "Film")
 
-        # 1. Update Video Thumbnail if job exists
+        # 1. Update Video Thumbnail and Metadata if job exists
         if job:
             new_thumb = os.path.join(tmp, "thumb_custom.jpg")
             _engine.thumb_gen.create_thumbnail(source=photo_raw, watermark=wm, title=title, output_path=new_thumb)
             job["thumb_path"] = new_thumb
             job["poster_url"] = photo_raw
+            if "metadata" not in job:
+                job["metadata"] = {}
+            job["metadata"]["poster_url"] = photo_raw
+            job["metadata"]["poster_path"] = photo_raw
 
         # 2. Update Banner Session & Re-create Banner
         banner_path = os.path.join(tmp, "banner_custom.jpg")
+        meta["poster_url"] = photo_raw
+        meta["poster_path"] = photo_raw
+
         _engine.banner_gen.create_banner(
             metadata=meta,
             poster_source=photo_raw,
@@ -5747,9 +5768,13 @@ async def handle_custom_photo_thumbnail(client: Client, msg: Message):
             output_path=banner_path
         )
 
+        if job:
+            job["banner_path"] = banner_path
+
         _banner_sessions[target_chat_id] = {
             "metadata": meta,
             "poster_url": photo_raw,
+            "banner_path": banner_path,
             "watermark": wm,
             "query": title,
             "timestamp": time.time()
@@ -5946,6 +5971,25 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
             await call.message.reply_text("❌ Video tidak ditemukan dalam job.")
             return
 
+        session = _banner_sessions.get(chat_id)
+        latest_poster = (
+            job.get("poster_url")
+            or (session.get("poster_url") if session else None)
+            or meta.get("poster_url")
+            or meta.get("poster_path")
+            or job.get("thumb_path")
+        )
+        if latest_poster:
+            meta["poster_url"] = latest_poster
+            meta["poster_path"] = latest_poster
+            if "metadata" in job:
+                job["metadata"]["poster_url"] = latest_poster
+                job["metadata"]["poster_path"] = latest_poster
+
+        banner_file = job.get("banner_path") or (session.get("banner_path") if session else None)
+        if banner_file and not os.path.exists(banner_file):
+            banner_file = None
+
         sent_channel = await publish_video_to_channel(
             client=client,
             chat_id=chat_id,
@@ -5954,7 +5998,9 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
             metadata=meta,
             watermark=wm,
             thumb_path=job.get("thumb_path"),
-            with_banner=with_banner
+            with_banner=with_banner,
+            poster_source=latest_poster,
+            pregenerated_banner_path=banner_file
         )
 
         clean_wm = wm.lstrip("@").strip()
@@ -6286,24 +6332,36 @@ async def handle_incoming_text(client: Client, msg: Message):
                 output_path=banner_path
             )
 
+            # Update persistent banner file
+            job = _jobs.get(target_chat_id)
+            job_tmp = (job.get("temp_dir") if job else None) or tempfile.gettempdir()
+            banner_save_path = os.path.join(job_tmp, "banner_repaired.jpg")
+            try:
+                shutil.copy2(banner_path, banner_save_path)
+            except Exception:
+                banner_save_path = banner_path
+
             # Update banner session
             _banner_sessions[target_chat_id] = {
                 "metadata": meta,
                 "poster_url": poster_src,
+                "banner_path": banner_save_path,
                 "watermark": wm,
                 "query": query,
                 "timestamp": time.time()
             }
 
             # Sync with video job if active in target_chat_id
-            job = _jobs.get(target_chat_id)
             if job:
                 job["metadata"].update(meta)
+                job["banner_path"] = banner_save_path
                 if poster_src:
                     job["poster_url"] = poster_src
-                    tmp = job.get("temp_dir") or tempfile.mkdtemp()
-                    job["temp_dir"] = tmp
-                    new_thumb = os.path.join(tmp, "thumb_poster.jpg")
+                    job["metadata"]["poster_url"] = poster_src
+                    job["metadata"]["poster_path"] = poster_src
+                    job_tmp = job.get("temp_dir") or tempfile.mkdtemp()
+                    job["temp_dir"] = job_tmp
+                    new_thumb = os.path.join(job_tmp, "thumb_poster.jpg")
                     try:
                         _engine.thumb_gen.create_thumbnail(
                             source=poster_src,

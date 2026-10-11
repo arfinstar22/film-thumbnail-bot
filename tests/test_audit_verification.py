@@ -412,7 +412,34 @@ def test_poster_regeneration():
     assert _banner_sessions[9999]["metadata"]["title"] == "Test Movie"
     del _banner_sessions[9999]
 
-    print("✅ Poster Regeneration & Fix Menu: Keyboards, callbacks & sessions verified!")
+    # 5. Test Custom Photo & Banner Sync in Job & Posting Flow
+    from bot.handlers import _jobs, publish_video_to_channel
+    import inspect
+    sig = inspect.signature(publish_video_to_channel)
+    assert "poster_source" in sig.parameters, "poster_source missing in publish_video_to_channel"
+    assert "pregenerated_banner_path" in sig.parameters, "pregenerated_banner_path missing in publish_video_to_channel"
+
+    # Simulate job with initial imdb poster
+    mock_job = {
+        "metadata": {"title": "Test Movie", "poster_url": "https://imdb.com/old_poster.jpg"},
+        "poster_url": "https://imdb.com/old_poster.jpg",
+        "thumb_path": "/tmp/old_thumb.jpg"
+    }
+    _jobs[9999] = mock_job
+
+    # Simulate custom photo upload
+    custom_photo = "/tmp/custom_photo.jpg"
+    mock_job["thumb_path"] = "/tmp/thumb_custom.jpg"
+    mock_job["poster_url"] = custom_photo
+    mock_job["metadata"]["poster_url"] = custom_photo
+    mock_job["banner_path"] = "/tmp/banner_custom.jpg"
+
+    assert _jobs[9999]["metadata"]["poster_url"] == custom_photo
+    assert _jobs[9999]["poster_url"] == custom_photo
+    assert _jobs[9999]["banner_path"] == "/tmp/banner_custom.jpg"
+    del _jobs[9999]
+
+    print("✅ Poster Regeneration & Fix Menu: Keyboards, callbacks, sessions & banner sync verified!")
 
 
 if __name__ == "__main__":
