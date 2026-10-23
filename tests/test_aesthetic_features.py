@@ -86,6 +86,30 @@ class TestAestheticFeatures(unittest.TestCase):
         self.assertLessEqual(len(cap_edit), 1024)
         self.assertIn("Karya Sutradara Gareth Evans", cap_edit)
 
+        # 4. Compact (One-Glance)
+        cap_compact = self.caption_gen.generate(meta, custom_watermark="@film_indonesia1", style="compact")
+        self.assertLessEqual(len(cap_compact), 1024)
+        self.assertIn("⭐ <b>8.1 / 10</b>", cap_compact)
+        self.assertIn("🎞️ <b>1080p FHD</b>", cap_compact)
+
+        # 5. Cinema VIP Premiere
+        cap_vip = self.caption_gen.generate(meta, custom_watermark="@film_indonesia1", style="cinema_vip")
+        self.assertLessEqual(len(cap_vip), 1024)
+        self.assertIn("🎟️ <b>PREMIERE EXCLUSIVE</b>", cap_vip)
+        self.assertIn("⚜️ <b>SPESIFIKASI TAYANG:</b>", cap_vip)
+
+        # 6. Monochrome / Swiss Apple TV
+        cap_mono = self.caption_gen.generate(meta, custom_watermark="@film_indonesia1", style="monochrome")
+        self.assertLessEqual(len(cap_mono), 1024)
+        self.assertIn("★ <b>8.1 / 10</b> TMDb", cap_mono)
+        self.assertNotIn("🎬", cap_mono)  # Zero emoji clutter
+
+        # 7. Sinema Retro
+        cap_retro = self.caption_gen.generate(meta, custom_watermark="@film_indonesia1", style="sinema_retro")
+        self.assertLessEqual(len(cap_retro), 1024)
+        self.assertIn("📽️ <b>SINEMA INDONESIA</b>", cap_retro)
+        self.assertIn("Arsip Resmi", cap_retro)
+
     # 3. NETFLIX HOMEPAGE PINNED CATALOG
     def test_netflix_pinned_catalog(self):
         """Should format a Netflix-style streaming homepage with top rated, latest, and genre navigation."""

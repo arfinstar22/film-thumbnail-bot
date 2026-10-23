@@ -831,7 +831,7 @@ BOT_COMMANDS_LIST = [
     BotCommand("banner", "Buat gambar banner promosi sinematik film"),
     BotCommand("setbanner", "Atur banner otomatis terbit (on/off)"),
     BotCommand("broadcast", "Kirim pengumuman ke seluruh member bot"),
-    BotCommand("captionstyle", "Pilih preset gaya tampilan caption (Minimalis/Streaming/Editorial)"),
+    BotCommand("captionstyle", "Pilih preset gaya tampilan caption (7 pilihan estetik)"),
     BotCommand("pingsupabase", "Cek koneksi & keepalive anti-jeda Supabase")
 ]
 
@@ -3003,6 +3003,41 @@ async def settmdb_cmd(client: Client, msg: Message):
         )
 
 
+def _build_caption_style_kb(curr_style: str) -> InlineKeyboardMarkup:
+    styles = [
+        ("compact", "⚡ Ringkas Modern"),
+        ("minimalist", "💎 Minimalis Elegan"),
+        ("cinema_vip", "🎟️ Premiere VIP"),
+        ("monochrome", "🍏 Swiss / Apple TV"),
+        ("sinema_retro", "📽️ Sinema Klasik"),
+        ("streaming", "📺 Streaming Netflix"),
+        ("editorial", "✒️ Editorial Bioskop"),
+    ]
+    buttons = []
+    row = []
+    for sid, name in styles:
+        prefix = "✅ " if curr_style == sid else ""
+        row.append(InlineKeyboardButton(f"{prefix}{name}", callback_data=f"set_capstyle:{sid}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton("🗑️ Tutup Menu", callback_data="close_capstyle")])
+    return InlineKeyboardMarkup(buttons)
+
+
+CAPTION_STYLE_NAMES = {
+    "compact": "⚡ Ringkas Modern (One-Glance)",
+    "minimalist": "💎 Minimalis Elegan (Chips & Pemisah Halus)",
+    "cinema_vip": "🎟️ Tiket Premiere VIP (Cinema Deluxe)",
+    "monochrome": "🍏 Swiss / Apple TV (Tipografi Murni)",
+    "sinema_retro": "📽️ Sinema Klasik Nusantara",
+    "streaming": "📺 Streaming Netflix (Ikon Lengkap)",
+    "editorial": "✒️ Editorial Bioskop (Cinephile Showcase)"
+}
+
+
 @app.on_message(filters.command(["captionstyle", "setcaption"]))
 async def captionstyle_cmd(client: Client, msg: Message):
     if not check_admin(msg):
@@ -3010,52 +3045,28 @@ async def captionstyle_cmd(client: Client, msg: Message):
         return
 
     curr_style = (_engine.cache.get_setting("caption_style", "minimalist") or "minimalist").lower()
-    style_names = {
-        "minimalist": "💎 Minimalis Elegan (Chips & Spacing Bersih)",
-        "streaming": "📺 Streaming Netflix (Struktur Emoji Rinci)",
-        "editorial": "✒️ Editorial Bioskop (Cinephile Showcase)"
-    }
-
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                f"{'✅ ' if curr_style == 'minimalist' else ''}💎 Minimalis Elegan",
-                callback_data="set_capstyle:minimalist"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                f"{'✅ ' if curr_style == 'streaming' else ''}📺 Streaming Netflix",
-                callback_data="set_capstyle:streaming"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                f"{'✅ ' if curr_style == 'editorial' else ''}✒️ Editorial Bioskop",
-                callback_data="set_capstyle:editorial"
-            )
-        ],
-        [
-            InlineKeyboardButton("🗑️ Tutup Menu", callback_data="close_capstyle")
-        ]
-    ])
+    kb = _build_caption_style_kb(curr_style)
 
     await msg.reply_text(
         f"🎨 <b>PILIH PRESET GAYA TAMPILAN CAPTION CHANNEL:</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📌 <b>Gaya Aktif Saat Ini:</b>\n"
-        f"👉 <b>{style_names.get(curr_style, curr_style.title())}</b>\n\n"
-        f"<b>Karakteristik Gaya:</b>\n"
-        f"• 💎 <b>Minimalis Elegan:</b> Mengelompokkan info dalam chip horizontal <code>[1080p • Dub Indo]</code> dengan pemisah halus dan sinopsis expandable.\n"
-        f"• 📺 <b>Streaming Netflix:</b> Struktur vertikal rapi dengan ikon modern, sutradara & pemain.\n"
-        f"• ✒️ <b>Editorial Bioskop:</b> Format ulasan estetik dengan penekanan sutradara dan kutipan sinopsis sinematik.\n\n"
-        f"<i>Pilih gaya tampilan di bawah ini untuk diterapkan ke setiap postingan film:</i>",
+        f"👉 <b>{CAPTION_STYLE_NAMES.get(curr_style, curr_style.title())}</b>\n\n"
+        f"<b>Pilihan Gaya Estetik & Bebas Clutter:</b>\n"
+        f"• ⚡ <b>Ringkas Modern:</b> Format super bersih 2 baris esensial tanpa info teknis berbelit. Sangat cepat dibaca.\n"
+        f"• 💎 <b>Minimalis Elegan:</b> Mengelompokkan info dalam chip rapi dengan pemisah halus.\n"
+        f"• 🎟️ <b>Premiere VIP:</b> Desain tiket premiere bioskop mewah dengan format tayang berkelas.\n"
+        f"• 🍏 <b>Swiss / Apple TV:</b> Tipografi murni berkualitas tinggi tanpa emoji berlebihan (zero emoji salad).\n"
+        f"• 📽️ <b>Sinema Klasik:</b> Format kartu arsip film Indonesia bernuansa festival.\n"
+        f"• 📺 <b>Streaming Netflix:</b> Struktur vertikal dengan ikon modern lengkap.\n"
+        f"• ✒️ <b>Editorial Bioskop:</b> Format ulasan estetik dengan penekanan sutradara & kutipan sinopsis.\n\n"
+        f"<i>Pilih gaya di bawah untuk diterapkan ke setiap postingan film:</i>",
         parse_mode=ParseMode.HTML,
         reply_markup=kb
     )
 
 
-@app.on_callback_query(filters.regex(r"^set_capstyle:(minimalist|streaming|editorial)$"))
+@app.on_callback_query(filters.regex(r"^set_capstyle:(compact|minimalist|cinema_vip|monochrome|sinema_retro|streaming|editorial)$"))
 async def handle_set_capstyle(client: Client, call: CallbackQuery):
     if not check_admin(call):
         await call.answer("⛔ Hanya Administrator!", show_alert=True)
@@ -3063,36 +3074,7 @@ async def handle_set_capstyle(client: Client, call: CallbackQuery):
 
     chosen = call.matches[0].group(1)
     _engine.cache.set_setting("caption_style", chosen)
-
-    style_names = {
-        "minimalist": "💎 Minimalis Elegan (Chips & Spacing Bersih)",
-        "streaming": "📺 Streaming Netflix (Struktur Emoji Rinci)",
-        "editorial": "✒️ Editorial Bioskop (Cinephile Showcase)"
-    }
-
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                f"{'✅ ' if chosen == 'minimalist' else ''}💎 Minimalis Elegan",
-                callback_data="set_capstyle:minimalist"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                f"{'✅ ' if chosen == 'streaming' else ''}📺 Streaming Netflix",
-                callback_data="set_capstyle:streaming"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                f"{'✅ ' if chosen == 'editorial' else ''}✒️ Editorial Bioskop",
-                callback_data="set_capstyle:editorial"
-            )
-        ],
-        [
-            InlineKeyboardButton("🗑️ Tutup Menu", callback_data="close_capstyle")
-        ]
-    ])
+    kb = _build_caption_style_kb(chosen)
 
     await call.answer(f"✅ Gaya caption diubah ke {chosen.title()}!", show_alert=True)
     try:
@@ -3100,7 +3082,7 @@ async def handle_set_capstyle(client: Client, call: CallbackQuery):
             f"🎨 <b>PILIH PRESET GAYA TAMPILAN CAPTION CHANNEL:</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📌 <b>Gaya Aktif Saat Ini:</b>\n"
-            f"👉 <b>{style_names.get(chosen, chosen.title())}</b>\n\n"
+            f"👉 <b>{CAPTION_STYLE_NAMES.get(chosen, chosen.title())}</b>\n\n"
             f"✨ <i>Semua postingan film channel berikutnya akan menggunakan format tampilan ini!</i>",
             parse_mode=ParseMode.HTML,
             reply_markup=kb
