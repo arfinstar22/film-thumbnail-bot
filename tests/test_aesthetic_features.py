@@ -50,9 +50,9 @@ class TestAestheticFeatures(unittest.TestCase):
         if os.path.exists(out_banner):
             os.remove(out_banner)
 
-    # 2. CAPTION PRESET STYLES
+    # 2. CAPTION FORMAT (UNIFIED ARTICLE POST)
     def test_caption_styles(self):
-        """Should support minimalist, streaming, and editorial styles strictly <= 1024 chars."""
+        """Should always render clean, modern interactive article post strictly <= 1024 chars."""
         meta = {
             "title": "The Raid: Redemption <Special>",
             "year": 2011,
@@ -69,54 +69,13 @@ class TestAestheticFeatures(unittest.TestCase):
             "synopsis": "Sebuah tim pasukan khusus terjebak di gedung apartemen 30 lantai milik gembong narkoba kejam. " * 15
         }
 
-        # 1. Minimalist
-        cap_min = self.caption_gen.generate(meta, custom_watermark="@film_indonesia1", style="minimalist")
-        self.assertLessEqual(len(cap_min), 1024)
-        self.assertIn("— • — • —", cap_min)
-        self.assertIn("&lt;SPECIAL&gt;", cap_min)
-
-        # 2. Streaming
-        cap_stream = self.caption_gen.generate(meta, custom_watermark="@film_indonesia1", style="streaming")
-        self.assertLessEqual(len(cap_stream), 1024)
-        self.assertIn("━━━━━━━━━━━━━━━━━━", cap_stream)
-        self.assertIn("📌 <b>Informasi Film:</b>", cap_stream)
-
-        # 3. Editorial
-        cap_edit = self.caption_gen.generate(meta, custom_watermark="@film_indonesia1", style="editorial")
-        self.assertLessEqual(len(cap_edit), 1024)
-        self.assertIn("Karya Sutradara Gareth Evans", cap_edit)
-
-        # 4. Compact (One-Glance)
-        cap_compact = self.caption_gen.generate(meta, custom_watermark="@film_indonesia1", style="compact")
-        self.assertLessEqual(len(cap_compact), 1024)
-        self.assertIn("⭐ <b>8.1 / 10</b>", cap_compact)
-        self.assertIn("🎞️ <b>1080p FHD</b>", cap_compact)
-
-        # 5. Cinema VIP Premiere
-        cap_vip = self.caption_gen.generate(meta, custom_watermark="@film_indonesia1", style="cinema_vip")
-        self.assertLessEqual(len(cap_vip), 1024)
-        self.assertIn("🎟️ <b>PREMIERE EXCLUSIVE</b>", cap_vip)
-        self.assertIn("⚜️ <b>SPESIFIKASI TAYANG:</b>", cap_vip)
-
-        # 6. Monochrome / Swiss Apple TV
-        cap_mono = self.caption_gen.generate(meta, custom_watermark="@film_indonesia1", style="monochrome")
-        self.assertLessEqual(len(cap_mono), 1024)
-        self.assertIn("★ <b>8.1 / 10</b> TMDb", cap_mono)
-        self.assertNotIn("🎬", cap_mono)  # Zero emoji clutter
-
-        # 7. Sinema Retro
-        cap_retro = self.caption_gen.generate(meta, custom_watermark="@film_indonesia1", style="sinema_retro")
-        self.assertLessEqual(len(cap_retro), 1024)
-        self.assertIn("📽️ <b>SINEMA INDONESIA</b>", cap_retro)
-        self.assertIn("Arsip Resmi", cap_retro)
-
-        # 8. Article (Interactive Collapsible Cards)
-        cap_article = self.caption_gen.generate(meta, custom_watermark="@film_indonesia1", style="article")
-        self.assertLessEqual(len(cap_article), 1024)
-        self.assertIn("POSTER RESMI & BANNER HD", cap_article)
-        self.assertIn("SINOPSIS LENGKAP:", cap_article)
-        self.assertIn("DETAIL SPESIFIKASI & PEMAIN:", cap_article)
-        self.assertIn("<blockquote expandable>", cap_article)
+        cap = self.caption_gen.generate(meta, custom_watermark="@film_indonesia1")
+        self.assertLessEqual(len(cap), 1024)
+        self.assertIn("THE RAID: REDEMPTION &lt;SPECIAL&gt;", cap)
+        self.assertIn("POSTER RESMI & BANNER HD", cap)
+        self.assertIn("SINOPSIS LENGKAP:", cap)
+        self.assertIn("DETAIL SPESIFIKASI & PEMAIN:", cap)
+        self.assertIn("<blockquote expandable>", cap)
 
     # 3. NETFLIX HOMEPAGE PINNED CATALOG
     def test_netflix_pinned_catalog(self):
@@ -169,14 +128,14 @@ class TestAestheticFeatures(unittest.TestCase):
         )
         texts = [[b.text for b in row] for row in kb.inline_keyboard]
 
-        # Clean, emoji-box-free text
-        self.assertEqual(texts[0], ["⚡ BUKA BROSUR FILM", "🎬 TRAILER"])
-        self.assertEqual(texts[1], ["💬 REQUEST FILM", "📤 BAGIKAN"])
+        # Clean, exact 4 buttons text
+        self.assertEqual(texts[0], ["📢 Gabung @film_indonesia1", "🎬 Tonton Trailer"])
+        self.assertEqual(texts[1], ["💬 Request Film", "🔄 Bagikan Film"])
 
-        # Native Bot API 9.4 styles
+        # Native Bot API styles (Success Green, Danger Red)
         bot_api_kb = _build_bot_api_reply_markup(kb)["inline_keyboard"]
-        self.assertEqual(bot_api_kb[0][0]["style"], "primary")   # Brosur: Blue
-        self.assertEqual(bot_api_kb[0][1]["style"], "success")   # Trailer: Green
+        self.assertEqual(bot_api_kb[0][0]["style"], "success")   # Gabung: Green
+        self.assertEqual(bot_api_kb[0][1]["style"], "danger")    # Trailer: Red
         self.assertEqual(bot_api_kb[1][0]["style"], "danger")    # Request: Red
         self.assertEqual(bot_api_kb[1][1]["style"], "success")   # Bagikan: Green
 

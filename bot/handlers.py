@@ -32,6 +32,7 @@ from .services.video import (
 )
 from .services.metadata.engine import MetadataEngine
 from .services.metadata.catalog import format_pinned_catalog, publish_or_update_telegraph_catalog, publish_movie_instant_view
+from .services.metadata.rich_post import async_send_rich_article_post
 from .services.metadata.cache import WIB, get_next_prime_time_slots, normalize_movie_title_and_year
 
 logging.basicConfig(level=logging.INFO)
@@ -815,11 +816,13 @@ def build_channel_post_keyboard(
     request_link: Optional[str] = None,
     series_nav_row: Optional[List[InlineKeyboardButton]] = None
 ) -> InlineKeyboardMarkup:
-    """Builds a luxury, color-differentiated channel button layout with native Telegram Bot API styling:
-    - ⚡ BUKA BROSUR FILM: Primary Blue Background
-    - 🎬 TRAILER: Success Green Background
-    - 💬 REQUEST FILM: Danger Red Background
-    - 📤 BAGIKAN / 📢 GABUNG: Success Green Background
+    """Builds the 4 distinct colored channel buttons matching the post layout:
+    Row 1:
+      - 📢 Gabung @channel (Success Green)
+      - 🎬 Tonton Trailer (Danger Red)
+    Row 2:
+      - 💬 Request Film (Danger Red)
+      - 🔄 Bagikan Film (Success Green)
     """
     clean_wm = (watermark or "").lstrip("@").strip()
     channel_url = f"https://t.me/{clean_wm}" if clean_wm else "https://t.me"
@@ -832,36 +835,26 @@ def build_channel_post_keyboard(
         trailer_query = f"Trailer {title}" + (f" {year}" if year else "")
         trailer_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(trailer_query)}"
 
-    kb_rows = []
+    req_url = request_link if (request_link and request_link.lower() != "off") else channel_url
 
-    # Optional Series/Drakor Navigation (Row 0)
-    if series_nav_row:
-        kb_rows.append(series_nav_row)
+    # Row 1: 📢 Gabung @channel (Green / Success) + 🎬 Tonton Trailer (Red / Danger)
+    btn_join = InlineKeyboardButton(f"📢 Gabung {watermark}", url=channel_url)
+    btn_join.style = "success"
 
-    # Row 1: ⚡ BUKA BROSUR FILM (Biru / primary) + 🎬 TRAILER (Hijau / success)
-    brosur_url = instant_view_url or channel_url
-    btn_brosur = InlineKeyboardButton("⚡ BUKA BROSUR FILM", url=brosur_url)
-    btn_brosur.style = "primary"
+    btn_trailer = InlineKeyboardButton("🎬 Tonton Trailer", url=trailer_url)
+    btn_trailer.style = "danger"
 
-    btn_trailer = InlineKeyboardButton("🎬 TRAILER", url=trailer_url)
-    btn_trailer.style = "success"
+    # Row 2: 💬 Request Film (Red / Danger) + 🔄 Bagikan Film (Green / Success)
+    btn_req = InlineKeyboardButton("💬 Request Film", url=req_url)
+    btn_req.style = "danger"
 
-    kb_rows.append([btn_brosur, btn_trailer])
-
-    # Row 2: 💬 REQUEST FILM (Merah / danger) + 📤 BAGIKAN (Hijau / success)
-    btn_share = InlineKeyboardButton("📤 BAGIKAN", url=share_url)
+    btn_share = InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
     btn_share.style = "success"
 
-    if request_link and request_link.lower() != "off":
-        btn_req = InlineKeyboardButton("💬 REQUEST FILM", url=request_link)
-        btn_req.style = "danger"
-        kb_rows.append([btn_req, btn_share])
-    else:
-        btn_channel = InlineKeyboardButton(f"📢 GABUNG {watermark}", url=channel_url)
-        btn_channel.style = "success"
-        kb_rows.append([btn_channel, btn_share])
-
-    return InlineKeyboardMarkup(kb_rows)
+    return InlineKeyboardMarkup([
+        [btn_join, btn_trailer],
+        [btn_req, btn_share]
+    ])
 
 
 def get_caption_kb(message_id: int, watermark: str):
@@ -954,7 +947,6 @@ BOT_COMMANDS_LIST = [
     BotCommand("banner", "Buat gambar banner promosi sinematik film"),
     BotCommand("setbanner", "Atur banner otomatis terbit (on/off)"),
     BotCommand("broadcast", "Kirim pengumuman ke seluruh member bot"),
-    BotCommand("captionstyle", "Pilih preset gaya tampilan caption (7 pilihan estetik)"),
     BotCommand("pingsupabase", "Cek koneksi & keepalive anti-jeda Supabase")
 ]
 
@@ -3123,104 +3115,16 @@ async def settmdb_cmd(client: Client, msg: Message):
         )
 
 
-def _build_caption_style_kb(curr_style: str) -> InlineKeyboardMarkup:
-    styles = [
-        ("article", "📰 Artikel Interaktif (3 Lipat)"),
-        ("compact", "⚡ Ringkas Modern"),
-        ("minimalist", "💎 Minimalis Elegan"),
-        ("cinema_vip", "🎟️ Premiere VIP"),
-        ("monochrome", "🍏 Swiss / Apple TV"),
-        ("sinema_retro", "📽️ Sinema Klasik"),
-        ("streaming", "📺 Streaming Netflix"),
-        ("editorial", "✒️ Editorial Bioskop"),
-    ]
-    buttons = []
-    row = []
-    for sid, name in styles:
-        prefix = "✅ " if curr_style == sid else ""
-        row.append(InlineKeyboardButton(f"{prefix}{name}", callback_data=f"set_capstyle:{sid}"))
-        if len(row) == 2:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    buttons.append([InlineKeyboardButton("🗑️ Tutup Menu", callback_data="close_capstyle")])
-    return InlineKeyboardMarkup(buttons)
-
-
-CAPTION_STYLE_NAMES = {
-    "article": "📰 Artikel Interaktif (Poster, Sinopsis, Specs Lipat)",
-    "compact": "⚡ Ringkas Modern (One-Glance)",
-    "minimalist": "💎 Minimalis Elegan (Chips & Pemisah Halus)",
-    "cinema_vip": "🎟️ Tiket Premiere VIP (Cinema Deluxe)",
-    "monochrome": "🍏 Swiss / Apple TV (Tipografi Murni)",
-    "sinema_retro": "📽️ Sinema Klasik Nusantara",
-    "streaming": "📺 Streaming Netflix (Ikon Lengkap)",
-    "editorial": "✒️ Editorial Bioskop (Cinephile Showcase)"
-}
-
-
 @app.on_message(filters.command(["captionstyle", "setcaption"]))
 async def captionstyle_cmd(client: Client, msg: Message):
-    if not check_admin(msg):
-        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
-        return
-
-    curr_style = (_engine.cache.get_setting("caption_style", "minimalist") or "minimalist").lower()
-    kb = _build_caption_style_kb(curr_style)
-
     await msg.reply_text(
-        f"🎨 <b>PILIH PRESET GAYA TAMPILAN CAPTION CHANNEL:</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 <b>Gaya Aktif Saat Ini:</b>\n"
-        f"👉 <b>{CAPTION_STYLE_NAMES.get(curr_style, curr_style.title())}</b>\n\n"
-        f"<b>Pilihan Gaya Estetik & Bebas Clutter:</b>\n"
-        f"• 📰 <b>Artikel Interaktif:</b> 1 Card tunggal dengan 3 blok lipat (Poster HD, Sinopsis Lengkap, Spesifikasi Teknis & Pemain).\n"
-        f"• ⚡ <b>Ringkas Modern:</b> Format super bersih 2 baris esensial tanpa info teknis berbelit. Sangat cepat dibaca.\n"
-        f"• 💎 <b>Minimalis Elegan:</b> Mengelompokkan info dalam chip rapi dengan pemisah halus.\n"
-        f"• 🎟️ <b>Premiere VIP:</b> Desain tiket premiere bioskop mewah dengan format tayang berkelas.\n"
-        f"• 🍏 <b>Swiss / Apple TV:</b> Tipografi murni berkualitas tinggi tanpa emoji berlebihan (zero emoji salad).\n"
-        f"• 📽️ <b>Sinema Klasik:</b> Format kartu arsip film Indonesia bernuansa festival.\n"
-        f"• 📺 <b>Streaming Netflix:</b> Struktur vertikal dengan ikon modern lengkap.\n"
-        f"• ✒️ <b>Editorial Bioskop:</b> Format ulasan estetik dengan penekanan sutradara & kutipan sinopsis.\n\n"
-        f"<i>Pilih gaya di bawah untuk diterapkan ke setiap postingan film:</i>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb
+        "📰 <b>Format Postingan Channel:</b>\n\n"
+        "Semua postingan film sekarang otomatis menggunakan <b>Rich Article Post (Bot API 10.1+)</b> "
+        "sebagai format permanen. Postingan otomatis dirakit dalam 1 card interaktif dengan video, "
+        "slideshow poster swipeable, dan lipatan sinopsis/spesifikasi.\n\n"
+        "<i>Preset gaya lama sudah dinonaktifkan.</i>",
+        parse_mode=ParseMode.HTML
     )
-
-
-@app.on_callback_query(filters.regex(r"^set_capstyle:(article|compact|minimalist|cinema_vip|monochrome|sinema_retro|streaming|editorial)$"))
-async def handle_set_capstyle(client: Client, call: CallbackQuery):
-    if not check_admin(call):
-        await call.answer("⛔ Hanya Administrator!", show_alert=True)
-        return
-
-    chosen = call.matches[0].group(1)
-    _engine.cache.set_setting("caption_style", chosen)
-    kb = _build_caption_style_kb(chosen)
-
-    await call.answer(f"✅ Gaya caption diubah ke {chosen.title()}!", show_alert=True)
-    try:
-        await call.message.edit_text(
-            f"🎨 <b>PILIH PRESET GAYA TAMPILAN CAPTION CHANNEL:</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📌 <b>Gaya Aktif Saat Ini:</b>\n"
-            f"👉 <b>{CAPTION_STYLE_NAMES.get(chosen, chosen.title())}</b>\n\n"
-            f"✨ <i>Semua postingan film channel berikutnya akan menggunakan format tampilan ini!</i>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb
-        )
-    except Exception:
-        pass
-
-
-@app.on_callback_query(filters.regex(r"^close_capstyle$"))
-async def handle_close_capstyle(client: Client, call: CallbackQuery):
-    await call.answer("Ditutup")
-    try:
-        await call.message.delete()
-    except Exception:
-        pass
 
 
 @app.on_message(filters.command("autojoin"))
@@ -5252,123 +5156,234 @@ async def publish_video_to_channel(
     banner_mode = _engine.cache.get_setting("banner_post_mode", "off")
     use_banner = (with_banner is True) or (with_banner is None and banner_mode == "on")
     sent_banner = None
+    banner_file_id = None
+    poster_file_id = None
 
-    if use_banner:
-        banner_path = None
-        cleanup_banner = False
-        try:
-            if pregenerated_banner_path and os.path.exists(pregenerated_banner_path):
-                banner_path = pregenerated_banner_path
-                cleanup_banner = False
-            else:
-                poster_src = (
-                    poster_source
-                    or meta.get("poster_url")
-                    or meta.get("poster_path")
-                    or meta.get("thumb_path")
-                    or thumb_path
-                )
+    # Pre-generate Banner HD and Poster locally for rich article slideshow
+    banner_path = None
+    cleanup_banner = False
+    poster_path = None
+    cleanup_poster = False
+
+    try:
+        if pregenerated_banner_path and os.path.exists(pregenerated_banner_path):
+            banner_path = pregenerated_banner_path
+            cleanup_banner = False
+        else:
+            poster_src = (
+                poster_source
+                or meta.get("poster_url")
+                or meta.get("poster_path")
+                or meta.get("thumb_path")
+                or thumb_path
+            )
+            if poster_src:
                 with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as banner_tmp:
                     banner_path = banner_tmp.name
                 cleanup_banner = True
-
                 _engine.banner_gen.create_banner(
                     metadata=meta,
                     poster_source=poster_src,
                     watermark=watermark,
                     output_path=banner_path
                 )
+    except Exception as be:
+        logger.warning(f"Failed to generate banner for rich post: {be}")
+        banner_path = None
 
-            sent_banner = await client.send_photo(
-                chat_id=watermark,
-                photo=banner_path,
-                caption=caption_text,
-                parse_mode=ParseMode.HTML,
-                protect_content=protect_flag
-            )
-            if sent_banner:
-                await _apply_expandable_caption(watermark, sent_banner.id, caption_text, None)
-        except Exception as be:
-            logger.warning(f"Failed to publish banner photo to {watermark}: {be}")
-            sent_banner = None
-        finally:
-            if cleanup_banner and banner_path and os.path.exists(banner_path):
+    try:
+        raw_poster = (
+            poster_source
+            or meta.get("poster_url")
+            or meta.get("poster_path")
+            or meta.get("thumb_path")
+            or thumb_path
+        )
+        if raw_poster:
+            if os.path.exists(str(raw_poster)):
+                poster_path = str(raw_poster)
+            elif str(raw_poster).startswith("http"):
+                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as p_tmp:
+                    poster_path = p_tmp.name
+                cleanup_poster = True
+                req = urllib.request.Request(
+                    str(raw_poster),
+                    headers={"User-Agent": "Mozilla/5.0"}
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp, open(poster_path, "wb") as out_f:
+                    out_f.write(resp.read())
+    except Exception as pe:
+        logger.debug(f"Failed to prepare local poster for rich post: {pe}")
+        poster_path = None
+
+    # === TRY RICH ARTICLE POST (sendRichMessage, Bot API 10.1+) ===
+    sent_channel = None
+    rich_post_success = False
+
+    if BOT_TOKEN:
+        try:
+            # Upload banner to Telegram to get file_id for slideshow
+            if banner_path and os.path.exists(banner_path):
                 try:
-                    os.remove(banner_path)
+                    tmp_banner = await client.send_photo(
+                        chat_id=chat_id,
+                        photo=banner_path,
+                        disable_notification=True
+                    )
+                    if tmp_banner and tmp_banner.photo:
+                        banner_file_id = tmp_banner.photo[-1].file_id
+                    try:
+                        await tmp_banner.delete()
+                    except Exception:
+                        pass
+                except Exception as ue:
+                    logger.debug(f"Banner upload for file_id failed: {ue}")
+
+            # Upload poster to Telegram to get file_id for slideshow
+            if poster_path and os.path.exists(poster_path):
+                try:
+                    tmp_poster = await client.send_photo(
+                        chat_id=chat_id,
+                        photo=poster_path,
+                        disable_notification=True
+                    )
+                    if tmp_poster and tmp_poster.photo:
+                        poster_file_id = tmp_poster.photo[-1].file_id
+                    try:
+                        await tmp_poster.delete()
+                    except Exception:
+                        pass
+                except Exception as pe:
+                    logger.debug(f"Poster upload for file_id failed: {pe}")
+
+            # Build reply markup for Bot API format
+            rich_kb = _build_bot_api_reply_markup(channel_kb)
+
+            # Send native rich article post via Bot API 10.1+ sendRichMessage
+            result = await async_send_rich_article_post(
+                bot_token=BOT_TOKEN,
+                chat_id=watermark,
+                metadata=meta,
+                watermark=watermark,
+                video_file_id=video_file_id,
+                banner_file_id_or_url=banner_file_id,
+                poster_file_id_or_url=poster_file_id,
+                reply_markup=rich_kb,
+                protect_content=protect_flag,
+            )
+
+            if result and result.get("message_id"):
+                # Create a minimal Message-like object for downstream compatibility
+                class _RichMsg:
+                    def __init__(self, mid):
+                        self.id = mid
+                sent_channel = _RichMsg(result["message_id"])
+                rich_post_success = True
+                logger.info(f"Rich article post published: {title_display} (msg_id={sent_channel.id})")
+        except Exception as rich_err:
+            logger.info(f"sendRichMessage not available or failed, falling back to legacy: {rich_err}")
+            rich_post_success = False
+
+    # === FALLBACK: Legacy sendVideo with caption ===
+    if not rich_post_success:
+        if use_banner and banner_path and os.path.exists(banner_path):
+            try:
+                sent_banner = await client.send_photo(
+                    chat_id=watermark,
+                    photo=banner_path,
+                    caption=caption_text,
+                    parse_mode=ParseMode.HTML,
+                    protect_content=protect_flag
+                )
+                if sent_banner:
+                    await _apply_expandable_caption(watermark, sent_banner.id, caption_text, None)
+            except Exception as be:
+                logger.warning(f"Failed to publish banner photo to {watermark}: {be}")
+                sent_banner = None
+
+        # Video caption: format with article card layout (collapsible poster, synopsis, specs)
+        if sent_banner:
+            v_lines = [f"🎬 <b>{html.escape(title_display.upper())}</b>"]
+            tech_parts = []
+            if meta.get("resolution"):
+                tech_parts.append(html.escape(str(meta['resolution'])))
+            if meta.get("source"):
+                tech_parts.append(html.escape(str(meta['source'])))
+            if meta.get("fileSize"):
+                tech_parts.append(html.escape(str(meta['fileSize'])))
+            elif meta.get("duration"):
+                tech_parts.append(html.escape(str(meta['duration'])))
+            if tech_parts:
+                v_lines.append(f"📦 {' • '.join(tech_parts)}")
+            v_lines.append(f"🍿 <b>Channel Resmi:</b> <a href=\"{html.escape(channel_url, quote=True)}\">{html.escape(watermark)}</a>")
+            video_caption = "\n".join(v_lines)
+        else:
+            if "POSTER RESMI FILM" not in caption_text:
+                try:
+                    article_caption = _engine.caption_gen.generate(meta, custom_watermark=watermark, style="article")
+                    video_caption = article_caption or caption_text
+                except Exception:
+                    video_caption = caption_text
+            else:
+                video_caption = caption_text
+
+        # Ensure thumbnail exists (prioritize Banner HD, then branded poster)
+        final_thumb = thumb_path
+        cleanup_thumb = False
+        if not final_thumb or not os.path.exists(final_thumb):
+            banner_src = pregenerated_banner_path if (pregenerated_banner_path and os.path.exists(pregenerated_banner_path)) else None
+            poster_src = banner_src or meta.get("poster_url") or meta.get("poster_path") or meta.get("thumb_path")
+            if poster_src:
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+                        final_thumb = tf.name
+                    _engine.thumb_gen.create_thumbnail(
+                        source=poster_src,
+                        watermark=watermark,
+                        title=title_display,
+                        output_path=final_thumb
+                    )
+                    cleanup_thumb = True
+                except Exception as te:
+                    logger.debug(f"Failed to auto-generate thumb for channel post: {te}")
+                    final_thumb = None
+
+        try:
+            sent_channel = await client.send_video(
+                chat_id=watermark,
+                video=video_file_id,
+                caption=video_caption,
+                parse_mode=ParseMode.HTML,
+                thumb=final_thumb if (final_thumb and os.path.exists(final_thumb)) else None,
+                supports_streaming=True,
+                protect_content=protect_flag,
+                reply_markup=channel_kb
+            )
+        finally:
+            if cleanup_thumb and final_thumb and os.path.exists(final_thumb):
+                try:
+                    os.remove(final_thumb)
                 except Exception:
                     pass
 
-    # Video caption: format with article card layout (collapsible poster, synopsis, specs)
-    if sent_banner:
-        v_lines = [f"🎬 <b>{html.escape(title_display.upper())}</b>"]
-        tech_parts = []
-        if meta.get("resolution"):
-            tech_parts.append(html.escape(str(meta['resolution'])))
-        if meta.get("source"):
-            tech_parts.append(html.escape(str(meta['source'])))
-        if meta.get("fileSize"):
-            tech_parts.append(html.escape(str(meta['fileSize'])))
-        elif meta.get("duration"):
-            tech_parts.append(html.escape(str(meta['duration'])))
-        if tech_parts:
-            v_lines.append(f"📦 {' • '.join(tech_parts)}")
-        v_lines.append(f"🍿 <b>Channel Resmi:</b> <a href=\"{html.escape(channel_url, quote=True)}\">{html.escape(watermark)}</a>")
-        video_caption = "\n".join(v_lines)
-    else:
-        # Default to interactive article format if not already containing expandable poster
-        if "POSTER RESMI FILM" not in caption_text:
-            try:
-                article_caption = _engine.caption_gen.generate(meta, custom_watermark=watermark, style="article")
-                video_caption = article_caption or caption_text
-            except Exception:
-                video_caption = caption_text
-        else:
-            video_caption = caption_text
+        if sent_channel:
+            if not sent_banner and video_caption and "<blockquote expandable>" in video_caption:
+                await _apply_expandable_caption(watermark, sent_channel.id, video_caption, channel_kb)
+            else:
+                await _apply_channel_post_styling(watermark, sent_channel.id, channel_kb)
 
-    # Ensure thumbnail exists (prioritize Banner HD, then branded poster)
-    final_thumb = thumb_path
-    cleanup_thumb = False
-    if not final_thumb or not os.path.exists(final_thumb):
-        banner_src = pregenerated_banner_path if (pregenerated_banner_path and os.path.exists(pregenerated_banner_path)) else None
-        poster_src = banner_src or meta.get("poster_url") or meta.get("poster_path") or meta.get("thumb_path")
-        if poster_src:
-            try:
-                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
-                    final_thumb = tf.name
-                _engine.thumb_gen.create_thumbnail(
-                    source=poster_src,
-                    watermark=watermark,
-                    title=title_display,
-                    output_path=final_thumb
-                )
-                cleanup_thumb = True
-            except Exception as te:
-                logger.debug(f"Failed to auto-generate thumb for channel post: {te}")
-                final_thumb = None
+    # Cleanup banner and poster files
+    if cleanup_banner and banner_path and os.path.exists(banner_path):
+        try:
+            os.remove(banner_path)
+        except Exception:
+            pass
 
-    try:
-        sent_channel = await client.send_video(
-            chat_id=watermark,
-            video=video_file_id,
-            caption=video_caption,
-            parse_mode=ParseMode.HTML,
-            thumb=final_thumb if (final_thumb and os.path.exists(final_thumb)) else None,
-            supports_streaming=True,
-            protect_content=protect_flag,
-            reply_markup=channel_kb
-        )
-    finally:
-        if cleanup_thumb and final_thumb and os.path.exists(final_thumb):
-            try:
-                os.remove(final_thumb)
-            except Exception:
-                pass
-
-    if sent_channel:
-        if not sent_banner and video_caption and "<blockquote expandable>" in video_caption:
-            await _apply_expandable_caption(watermark, sent_channel.id, video_caption, channel_kb)
-        else:
-            await _apply_channel_post_styling(watermark, sent_channel.id, channel_kb)
+    if cleanup_poster and poster_path and os.path.exists(poster_path):
+        try:
+            os.remove(poster_path)
+        except Exception:
+            pass
 
     # Kirim stiker pemisah otomatis di bawah film
     await _send_channel_divider(client, chat_id, watermark)
@@ -6746,7 +6761,7 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
 
         clean_wm = wm.lstrip("@").strip()
         post_link = f"https://t.me/{clean_wm}/{sent_channel.id}" if sent_channel else f"https://t.me/{clean_wm}"
-        mode_label = "bersama Foto Banner Sinematik HD" if (with_banner is True or (with_banner is None and _engine.cache.get_setting("banner_post_mode", "on") != "off")) else "1 Pesan Video Tunggal (tanpa banner)"
+        mode_label = "Format Artikel Interaktif (Rich Article Post)"
 
         await call.message.reply_text(
             f"✅ <b>Berhasil Diposting ke {wm}!</b>\n\n"
