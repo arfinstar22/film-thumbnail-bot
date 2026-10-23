@@ -593,8 +593,72 @@ def ensure_scheduler_worker(client: Client):
 
 
 
+def _build_bot_api_reply_markup(reply_markup):
+    """Formats Pyrogram InlineKeyboardMarkup into Bot API JSON payload with native button styles (primary, success, danger)."""
+    if not reply_markup or not hasattr(reply_markup, "inline_keyboard"):
+        return None
+    kb = []
+    for row in reply_markup.inline_keyboard:
+        r = []
+        for btn in row:
+            b = {"text": btn.text}
+            if getattr(btn, "url", None):
+                b["url"] = btn.url
+            elif getattr(btn, "callback_data", None):
+                b["callback_data"] = btn.callback_data
+
+            # Check explicit style or auto-detect based on text
+            style = getattr(btn, "style", None)
+            if not style:
+                text_lower = (btn.text or "").lower()
+                if "brosur" in text_lower or "sinopsis" in text_lower:
+                    style = "primary"
+                elif "gabung" in text_lower or "join" in text_lower:
+                    style = "success"
+                elif "trailer" in text_lower:
+                    style = "danger"
+
+            if style in ("primary", "success", "danger"):
+                b["style"] = style
+
+            r.append(b)
+        kb.append(r)
+    return {"inline_keyboard": kb}
+
+
+async def _apply_channel_post_styling(chat_id: Union[int, str], message_id: int, reply_markup=None):
+    """Applies Telegram Bot API native button colors (primary blue, success green, danger red)."""
+    if not BOT_TOKEN or not reply_markup:
+        return
+
+    formatted_kb = _build_bot_api_reply_markup(reply_markup)
+    if not formatted_kb:
+        return
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageReplyMarkup"
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "reply_markup": formatted_kb
+    }
+
+    def _sync_call():
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=3.5) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    try:
+        await asyncio.to_thread(_sync_call)
+    except Exception as e:
+        logger.debug(f"Bot API styled reply markup error: {e}")
+
+
 async def _apply_expandable_caption(chat_id: Union[int, str], message_id: int, caption: str, reply_markup=None):
-    """Enforce native Telegram expandable blockquote via Bot API HTTP endpoint."""
+    """Enforce native Telegram expandable blockquote via Bot API HTTP endpoint with button styling."""
     if not BOT_TOKEN or not caption or "<blockquote expandable>" not in caption:
         return
 
@@ -606,19 +670,10 @@ async def _apply_expandable_caption(chat_id: Union[int, str], message_id: int, c
         "parse_mode": "HTML"
     }
 
-    if reply_markup and hasattr(reply_markup, "inline_keyboard"):
-        kb = []
-        for row in reply_markup.inline_keyboard:
-            r = []
-            for btn in row:
-                b = {"text": btn.text}
-                if getattr(btn, "url", None):
-                    b["url"] = btn.url
-                elif getattr(btn, "callback_data", None):
-                    b["callback_data"] = btn.callback_data
-                r.append(b)
-            kb.append(r)
-        payload["reply_markup"] = {"inline_keyboard": kb}
+    if reply_markup:
+        formatted_kb = _build_bot_api_reply_markup(reply_markup)
+        if formatted_kb:
+            payload["reply_markup"] = formatted_kb
 
     def _sync_call():
         req = urllib.request.Request(
@@ -750,12 +805,11 @@ def build_channel_post_keyboard(
     request_link: Optional[str] = None,
     series_nav_row: Optional[List[InlineKeyboardButton]] = None
 ) -> InlineKeyboardMarkup:
-    """Builds a luxury, color-differentiated channel button layout:
-    - 🔷 Biru: Brosur Sinopsis (Instant View)
-    - 🟩 Hijau: Gabung Channel
-    - 🟥 Merah: Tonton Trailer Resmi
-    - 🟪 Ungu: Request Film
-    - 🟧 Oranye: Bagikan Film
+    """Builds a luxury, color-differentiated channel button layout with native Telegram Bot API styling:
+    - 📖 Brosur Sinopsis: Primary Blue Background
+    - 📢 Gabung Channel: Success Green Background
+    - 🎬 Tonton Trailer: Danger Red Background
+    - 💬 Request Film & 🔄 Bagikan Film: Platform Default Transparent Background
     """
     clean_wm = (watermark or "").lstrip("@").strip()
     channel_url = f"https://t.me/{clean_wm}" if clean_wm else "https://t.me"
@@ -774,28 +828,26 @@ def build_channel_post_keyboard(
     if series_nav_row:
         kb_rows.append(series_nav_row)
 
-    # 1. 🔷 Brosur Sinopsis (Full Width Top Card - Sapphire Blue)
+    # 1. 📖 Brosur Sinopsis (Sapphire Blue Background - primary)
     if instant_view_url:
-        kb_rows.append([
-            InlineKeyboardButton("🔷 Brosur Sinopsis (Instant View)", url=instant_view_url)
-        ])
+        btn_iv = InlineKeyboardButton("📖 Brosur Sinopsis (Instant View)", url=instant_view_url)
+        btn_iv.style = "primary"
+        kb_rows.append([btn_iv])
 
-    # 2. 🟩 Gabung Channel (Emerald Green) + 🟥 Tonton Trailer (Crimson Red)
-    kb_rows.append([
-        InlineKeyboardButton(f"🟩 Gabung {watermark}", url=channel_url),
-        InlineKeyboardButton("🟥 Tonton Trailer", url=trailer_url)
-    ])
+    # 2. 📢 Gabung Channel (Emerald Green Background - success) + 🎬 Tonton Trailer (Crimson Red Background - danger)
+    btn_join = InlineKeyboardButton(f"📢 Gabung {watermark}", url=channel_url)
+    btn_join.style = "success"
+    btn_trailer = InlineKeyboardButton("🎬 Tonton Trailer", url=trailer_url)
+    btn_trailer.style = "danger"
+    kb_rows.append([btn_join, btn_trailer])
 
-    # 3. 🟪 Request Film (Violet Purple) + 🟧 Bagikan Film (Amber Orange)
+    # 3. 💬 Request Film + 🔄 Bagikan Film (Default Background)
+    btn_share = InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
     if request_link and request_link.lower() != "off":
-        kb_rows.append([
-            InlineKeyboardButton("🟪 Request Film", url=request_link),
-            InlineKeyboardButton("🟧 Bagikan Film", url=share_url)
-        ])
+        btn_req = InlineKeyboardButton("💬 Request Film", url=request_link)
+        kb_rows.append([btn_req, btn_share])
     else:
-        kb_rows.append([
-            InlineKeyboardButton("🟧 Bagikan Film", url=share_url)
-        ])
+        kb_rows.append([btn_share])
 
     return InlineKeyboardMarkup(kb_rows)
 
@@ -2861,7 +2913,10 @@ async def editpost_cmd(client: Client, msg: Message):
             parse_mode=ParseMode.HTML,
             reply_markup=new_kb
         )
-        await _apply_expandable_caption(f"@{target_channel}", target_msg_id, new_caption, new_kb)
+        if "<blockquote expandable>" in new_caption:
+            await _apply_expandable_caption(f"@{target_channel}", target_msg_id, new_caption, new_kb)
+        else:
+            await _apply_channel_post_styling(f"@{target_channel}", target_msg_id, new_kb)
 
         _engine.cache.update_movie_post_metadata(
             channel_username=target_channel,
@@ -4294,6 +4349,7 @@ async def retarget_posts_cmd(client: Client, msg: Message):
                         message_id=m_id,
                         reply_markup=new_kb
                     )
+                    await _apply_channel_post_styling(f"@{clean_wm}", m_id, new_kb)
                     updated_count += 1
                     break
                 except FloodWait as fw:
@@ -5079,6 +5135,7 @@ async def _update_previous_episode_post(
             message_id=prev_mid,
             reply_markup=updated_kb
         )
+        await _apply_channel_post_styling(watermark, prev_mid, updated_kb)
         logger.info(f"Updated in-place post for {title_meta} Eps {prev_ep} (mid={prev_mid}) with forward link to Eps {next_ep} (mid={next_mid})")
     except Exception as e:
         logger.warning(f"Failed to update previous episode post {prev_mid}: {e}")
@@ -5263,8 +5320,11 @@ async def publish_video_to_channel(
             except Exception:
                 pass
 
-    if sent_channel and not sent_banner:
-        await _apply_expandable_caption(watermark, sent_channel.id, caption_text, channel_kb)
+    if sent_channel:
+        if not sent_banner and caption_text and "<blockquote expandable>" in caption_text:
+            await _apply_expandable_caption(watermark, sent_channel.id, caption_text, channel_kb)
+        else:
+            await _apply_channel_post_styling(watermark, sent_channel.id, channel_kb)
 
     # Kirim stiker pemisah otomatis di bawah film
     await _send_channel_divider(client, chat_id, watermark)

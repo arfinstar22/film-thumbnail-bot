@@ -146,10 +146,10 @@ class TestAestheticFeatures(unittest.TestCase):
         self.assertEqual(url, "https://telegra.ph/Gundala-2019-Brochure")
 
 
-    # 5. VIBRANT COLORFUL CHANNEL BUTTONS
+    # 5. VIBRANT COLORFUL CHANNEL BUTTONS (NATIVE TELEGRAM BOT API)
     def test_channel_post_colorful_buttons(self):
-        """Should build 5 distinct color-coded buttons: Blue, Green, Red, Purple, Orange."""
-        from bot.handlers import build_channel_post_keyboard
+        """Should build clean button text with native styles: Blue (primary), Green (success), Red (danger)."""
+        from bot.handlers import build_channel_post_keyboard, _build_bot_api_reply_markup
 
         kb = build_channel_post_keyboard(
             watermark="@film_indonesia1",
@@ -161,12 +161,18 @@ class TestAestheticFeatures(unittest.TestCase):
         )
         texts = [[b.text for b in row] for row in kb.inline_keyboard]
 
-        # Row 1: Sapphire Blue
-        self.assertEqual(texts[0], ["🔷 Brosur Sinopsis (Instant View)"])
-        # Row 2: Emerald Green & Crimson Red
-        self.assertEqual(texts[1], ["🟩 Gabung @film_indonesia1", "🟥 Tonton Trailer"])
-        # Row 3: Violet Purple & Amber Orange
-        self.assertEqual(texts[2], ["🟪 Request Film", "🟧 Bagikan Film"])
+        # Clean, emoji-box-free text
+        self.assertEqual(texts[0], ["📖 Brosur Sinopsis (Instant View)"])
+        self.assertEqual(texts[1], ["📢 Gabung @film_indonesia1", "🎬 Tonton Trailer"])
+        self.assertEqual(texts[2], ["💬 Request Film", "🔄 Bagikan Film"])
+
+        # Native Bot API 9.4 styles
+        bot_api_kb = _build_bot_api_reply_markup(kb)["inline_keyboard"]
+        self.assertEqual(bot_api_kb[0][0]["style"], "primary")   # Blue
+        self.assertEqual(bot_api_kb[1][0]["style"], "success")   # Green
+        self.assertEqual(bot_api_kb[1][1]["style"], "danger")    # Red
+        self.assertNotIn("style", bot_api_kb[2][0])              # Default
+        self.assertNotIn("style", bot_api_kb[2][1])              # Default
 
 
 if __name__ == "__main__":
