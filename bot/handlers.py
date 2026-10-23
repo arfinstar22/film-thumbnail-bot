@@ -29,7 +29,7 @@ from .config import (
 from .services.video import photo_thumbnail
 from .services.metadata.engine import MetadataEngine
 from .services.metadata.catalog import format_pinned_catalog, publish_or_update_telegraph_catalog
-from .services.metadata.cache import WIB, get_next_prime_time_slots
+from .services.metadata.cache import WIB, get_next_prime_time_slots, normalize_movie_title_and_year
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -5430,6 +5430,14 @@ async def _process_video_task(client: Client, msg: Message):
         meta = result.get("metadata", {})
         meta_title = meta.get("title") or filename
         meta_year = meta.get("year")
+        if not meta_year and filename:
+            ym = re.search(r"\b(19\d\d|20\d\d)\b", filename)
+            if ym:
+                try:
+                    meta_year = int(ym.group(1))
+                except ValueError:
+                    pass
+
         clean_wm = (wm or "").lstrip("@").strip().lower()
 
         existing_movie = _engine.cache.find_existing_movie(meta_title, meta_year, clean_wm) if clean_wm else None
@@ -5437,7 +5445,10 @@ async def _process_video_task(client: Client, msg: Message):
             ex_msg_id = existing_movie.get("message_id")
             ex_title = existing_movie.get("title") or meta_title
             ex_year = existing_movie.get("year")
-            ex_disp = f"{ex_title} ({ex_year})" if ex_year else ex_title
+            clean_ex_t, clean_ex_y, _ = normalize_movie_title_and_year(ex_title, ex_year)
+            disp_title = clean_ex_t.title() if clean_ex_t else ex_title
+            disp_year = clean_ex_y or ex_year
+            ex_disp = f"{disp_title} ({disp_year})" if disp_year else disp_title
             ex_link = f"https://t.me/{clean_wm}/{ex_msg_id}" if ex_msg_id else f"https://t.me/{clean_wm}"
             await msg.reply_text(
                 f"⚠️ <b>PERINGATAN DUPLIKAT TERDETEKSI:</b>\n\n"

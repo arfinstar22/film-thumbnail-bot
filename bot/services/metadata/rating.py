@@ -95,11 +95,13 @@ class MovieRatingService:
                 for it in items:
                     it_id = it.get("id", "")
                     if it_id.startswith("tt"):
-                        if year and it.get("y") and abs(it["y"] - year) <= 1:
-                            imdb_id = it_id
-                            suggested_title = it.get("l")
-                            break
-                        elif not imdb_id:
+                        it_y = it.get("y")
+                        if year and it_y:
+                            if abs(it_y - year) <= 1:
+                                imdb_id = it_id
+                                suggested_title = it.get("l")
+                                break
+                        elif not year and not imdb_id:
                             imdb_id = it_id
                             suggested_title = it.get("l")
         except Exception as e:
@@ -119,10 +121,21 @@ class MovieRatingService:
                 with urllib.request.urlopen(req, timeout=2.5) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                     if data.get("Response") == "True":
+                        # Validate year compatibility if present
+                        omdb_year = None
+                        if data.get("Year"):
+                            ym = re.search(r"\b(19\d\d|20\d\d)\b", str(data["Year"]))
+                            if ym:
+                                omdb_year = int(ym.group(1))
+                        if year and omdb_year and abs(year - omdb_year) > 1:
+                            continue
+
                         rating = data.get("imdbRating")
                         raw_genre = data.get("Genre")
                         genre = self._translate_genres(raw_genre)
                         res = {}
+                        if omdb_year:
+                            res["year"] = omdb_year
                         if rating and rating != "N/A":
                             res["rating"] = f"{rating} / 10 • IMDb"
                         elif data.get("Rated") and data["Rated"] != "N/A":
@@ -148,15 +161,18 @@ class MovieRatingService:
             except Exception:
                 continue
 
-        # Step 3: Fallback query attempt - if 0 results, test stripping potential unknown prefix word
+        # Step 3: Fallback query attempt - only for recognized junk/filler prefixes like 'The', 'Film', 'Movie'
         words = title.split()
-        if _depth < 2 and len(words) > 1:
+        generic_prefixes = {"the", "a", "an", "film", "movie", "serial"}
+        if _depth < 1 and len(words) > 1 and words[0].lower() in generic_prefixes:
             sub_title = " ".join(words[1:])
             sub_res = self._sync_fetch(sub_title, year, _depth=_depth + 1)
             if sub_res and (sub_res.get("director") or sub_res.get("poster_url") or sub_res.get("rating")):
-                # Cache under original key too to save future lookups
-                self.cache.set_setting(cache_key, json.dumps(sub_res))
-                return sub_res
+                # Ensure year compatibility on fallback
+                sub_y = sub_res.get("year")
+                if not (year and sub_y and abs(year - sub_y) > 1):
+                    self.cache.set_setting(cache_key, json.dumps(sub_res))
+                    return sub_res
 
         # Save empty result to avoid re-fetching failed queries
         self.cache.set_setting(cache_key, json.dumps({}))

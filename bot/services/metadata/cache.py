@@ -14,18 +14,61 @@ from .supabase_sync import SupabaseSyncService
 logger = logging.getLogger(__name__)
 
 
-def normalize_movie_title_and_year(title: str, year: Optional[int] = None):
-    t = (title or "").strip()
-    m = re.search(r'[\(\[]\s*(\d{4})\s*[\)\]]$', t)
-    if m:
-        if not year:
+def normalize_movie_title_and_year(title: str, year: Optional[int] = None) -> Tuple[str, Optional[int], str]:
+    raw_t = (title or "").strip()
+    if not raw_t:
+        return "", year, ""
+
+    # Strip channel watermarks like • @channel or @channel
+    t = re.sub(r"[•|]\s*@\w+", " ", raw_t)
+    t = re.sub(r"@\w+", " ", t)
+
+    # Strip common video file extensions
+    t = re.sub(r"\.(mp4|mkv|avi|mov|webm|flv|ts)$", "", t, flags=re.I)
+
+    # Strip common video/audio/release tags
+    t = re.sub(r"\b(1080p|720p|480p|2160p|4k|uhd|fhd|hd|web[-_. ]?dl|bluray|bdrip|hdrip|dvdrip|x264|x265|hevc|aac|dts)\b", " ", t, flags=re.I)
+
+    # Extract 4-digit year (1900-2099)
+    if not year:
+        ym = re.search(r"[\(\[]\s*(19\d\d|20\d\d)\s*[\)\]]", t)
+        if ym:
             try:
-                year = int(m.group(1))
+                year = int(ym.group(1))
             except ValueError:
                 pass
-        t = t[:m.start()].strip()
-    clean_key = re.sub(r'[^a-zA-Z0-9]', '', t).lower()
-    return t, year, clean_key
+        else:
+            ym2 = re.search(r"(?:^|[\s._\-])(19\d\d|20\d\d)(?:$|[\s._\-])", t)
+            if ym2:
+                try:
+                    year = int(ym2.group(1))
+                except ValueError:
+                    pass
+
+    # Remove the year from title string
+    t_noyear = re.sub(r"[\(\[]\s*(?:19\d\d|20\d\d)\s*[\)\]]", " ", t)
+    t_noyear = re.sub(r"(?:^|[\s._\-])(?:19\d\d|20\d\d)(?:$|[\s._\-])", " ", t_noyear)
+
+    # If title has dot separators (filename style e.g. Para.Perasuk), convert dots to spaces
+    if "." in t_noyear and not re.search(r"\.\s", t_noyear):
+        t_noyear = t_noyear.replace(".", " ")
+
+    clean_disp = re.sub(r"\s+", " ", t_noyear).strip()
+    # clean_key: alphanumeric lowercase without spaces or punctuation
+    clean_key = re.sub(r"[^a-zA-Z0-9]", "", clean_disp).lower()
+    return clean_disp, year, clean_key
+
+
+def extract_movie_sequel_tag(title: str) -> Optional[str]:
+    """Extracts sequel/part indicators such as 2, 3, II, III, part 2, chapter 2."""
+    t = (title or "").lower().strip()
+    m = re.search(r"\b(?:part|chapter|vol|volume|season)\s*(\d+|[ivx]+)\b", t, re.I)
+    if m:
+        return m.group(1).lower()
+    m2 = re.search(r"\b(2|3|4|5|6|7|8|9|ii|iii|iv|v|vi|vii|viii)\b", t, re.I)
+    if m2:
+        return m2.group(1).lower()
+    return None
 
 
 def calculate_search_relevance(
@@ -61,12 +104,15 @@ def calculate_search_relevance(
     if q_clean == t_clean or (t_noyear and q_clean == t_noyear) or (q_noyear and q_noyear == t_noyear):
         candidates.append((100.0, True))
 
-    # 2. Substring match
-    if q_clean in t_clean or (t_noyear and q_clean in t_noyear) or (q_noyear and t_noyear and q_noyear in t_noyear):
-        cov = len(q_clean) / max(len(t_clean), len(q_clean))
+    # 2. Whole-word substring / containment match (MUST respect word boundaries)
+    t_target = t_noyear if t_noyear else t_clean
+    q_target = q_noyear if q_noyear else q_clean
+    if re.search(r"\b" + re.escape(q_target) + r"\b", t_target):
+        cov = len(q_target) / max(len(t_target), len(q_target))
         candidates.append((78.0 + cov * 18.0, True))
-    elif t_clean in q_clean or (t_noyear and t_noyear in q_clean):
-        candidates.append((72.0, True))
+    elif re.search(r"\b" + re.escape(t_target) + r"\b", q_target):
+        cov = len(t_target) / max(len(t_target), len(q_target))
+        candidates.append((60.0 + cov * 15.0, True))
 
     # 3. Whole words match
     q_words = [w for w in q_clean.split() if len(w) > 1]
@@ -106,9 +152,12 @@ def calculate_search_relevance(
     base_score, is_exact = candidates[0]
     is_fuzzy = not is_exact
 
-    # Year boost / match
-    if q_year and year and q_year == year:
-        base_score += 15.0
+    # Year boost / penalty
+    if q_year and year:
+        if q_year == year:
+            base_score += 15.0
+        elif abs(q_year - year) > 1:
+            base_score -= 35.0
 
     # Rating boost (up to +5.0)
     if rating:
@@ -586,37 +635,93 @@ class MetadataCache:
         year: Optional[int] = None,
         channel_username: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
-        """Check if a movie already exists in the channel catalog (supports exact & high-confidence fuzzy matching)."""
+        """
+        Check if a movie already exists in the channel catalog.
+        Strict duplicate detection rules:
+        1. Year matching: If both target and catalog item have years, abs(target_year - item_year) must be <= 1.
+           A movie from 2018 is NEVER a duplicate of a movie from 2026.
+        2. Sequel/Part check: Titles with distinct sequel numbers (e.g. '2', 'II', 'part 2') are not duplicates.
+        3. Exact match: Normalized keys match and years do not conflict.
+        4. Typo / High-Fuzzy match:
+           - String ratio >= 0.88
+           - Word token overlap must not be disjoint, no unshared major words.
+           - If both have years, years must be compatible.
+        """
         norm_t, norm_y, norm_k = normalize_movie_title_and_year(title, year)
         if not norm_k:
             return None
 
         movies = self.get_deduplicated_catalog(channel_username)
-        # 1. Exact match
+        if not movies:
+            return None
+
+        target_words = set(w for w in norm_t.lower().split() if len(w) > 1)
+        target_sequel = extract_movie_sequel_tag(norm_t)
+
+        # Pass 1: Exact Key Match
         for m in movies:
             mt, my, mk = normalize_movie_title_and_year(m.get("title", ""), m.get("year"))
-            if mk == norm_k:
-                return m
-            if mt.lower() == norm_t.lower() and (not norm_y or not my or norm_y == my):
+            if not mk:
+                continue
+
+            # Year incompatibility check
+            if norm_y and my and abs(norm_y - my) > 1:
+                continue
+
+            # Sequel mismatch check
+            item_sequel = extract_movie_sequel_tag(mt)
+            if target_sequel != item_sequel:
+                continue
+
+            if mk == norm_k or mt.lower() == norm_t.lower():
                 return m
 
-        # 2. High-confidence fuzzy match (catches typos like 'Pengadi Setan')
+        # Pass 2: High-confidence Typo / Fuzzy Match (Strict)
         best_cand = None
-        best_score = 0.0
+        best_ratio = 0.0
+
         for m in movies:
-            score, _ = calculate_search_relevance(
-                title,
-                m.get("title", ""),
-                year=m.get("year"),
-                rating=m.get("rating")
-            )
-            if score >= 65.0 and score > best_score:
-                if year and m.get("year") and abs(year - m["year"]) > 1:
+            mt, my, mk = normalize_movie_title_and_year(m.get("title", ""), m.get("year"))
+            if not mk:
+                continue
+
+            # Year incompatibility check
+            if norm_y and my and abs(norm_y - my) > 1:
+                continue
+
+            # Sequel mismatch check
+            item_sequel = extract_movie_sequel_tag(mt)
+            if target_sequel != item_sequel:
+                continue
+
+            # Word tokens
+            cand_words = set(w for w in mt.lower().split() if len(w) > 1)
+            if not target_words or not cand_words:
+                continue
+
+            # Check word overlap - words must not be completely disjoint
+            intersection = target_words & cand_words
+            overlap_ratio = len(intersection) / max(len(target_words), len(cand_words))
+
+            # SequenceMatcher ratio between clean strings
+            ratio = difflib.SequenceMatcher(None, norm_t.lower(), mt.lower()).ratio()
+
+            is_valid_typo = False
+            if ratio >= 0.88:
+                if len(target_words) == 1 and len(cand_words) == 1:
+                    is_valid_typo = True
+                elif overlap_ratio >= 0.50:
+                    is_valid_typo = True
+                elif len(target_words) == len(cand_words) and ratio >= 0.90:
+                    is_valid_typo = True
+
+            if is_valid_typo and ratio > best_ratio:
+                if norm_y and my and norm_y != my:
                     continue
-                best_score = score
+                best_ratio = ratio
                 best_cand = m
 
-        if best_cand and best_score >= 65.0:
+        if best_cand:
             return best_cand
 
         return None

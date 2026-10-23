@@ -134,6 +134,39 @@ class TestSmartSearchAndFuzzyMatching(unittest.TestCase):
         self.assertIsNotNone(found)
         self.assertEqual(found["title"], "Pengabdi Setan")
 
+    def test_rasuk_vs_para_perasuk_not_duplicate(self):
+        # Catalog has Rasuk (2018)
+        self.cache.save_movie_post(
+            title="Rasuk",
+            year=2018,
+            rating="3.9",
+            genre="Horor",
+            quality="1080p",
+            channel_username="film_indonesia1",
+            message_id=999,
+            caption="Rasuk (2018)"
+        )
+
+        # Checking Para Perasuk (2026) must NOT match Rasuk (2018)
+        found1 = self.cache.find_existing_movie("Para.Perasuk.2026.WEB.DL.720p.mp4", 2026, "film_indonesia1")
+        self.assertIsNone(found1)
+
+        found2 = self.cache.find_existing_movie("Para Perasuk", 2026, "film_indonesia1")
+        self.assertIsNone(found2)
+
+        # Even without explicit year passed, filename contains 2026 and title is distinct
+        found3 = self.cache.find_existing_movie("Para.Perasuk.2026.WEB.DL.720p.mp4", None, "film_indonesia1")
+        self.assertIsNone(found3)
+
+        # Sequel Rasuk 2 (2020) must NOT be flagged as duplicate of Rasuk (2018)
+        found_sequel = self.cache.find_existing_movie("Rasuk 2", 2020, "film_indonesia1")
+        self.assertIsNone(found_sequel)
+
+        # True duplicate of Rasuk (2018) must still be found
+        found_exact = self.cache.find_existing_movie("Rasuk", 2018, "film_indonesia1")
+        self.assertIsNotNone(found_exact)
+        self.assertEqual(found_exact["title"], "Rasuk")
+
 
 class TestTMDbService(unittest.TestCase):
     def setUp(self):
@@ -246,6 +279,40 @@ class TestTMDbService(unittest.TestCase):
         }
         banner = bg.create_banner(meta)
         self.assertEqual(banner.size, (1280, 720))
+
+    def test_pick_best_match_rejects_year_mismatch_and_partial_words(self):
+        # When searching 'Para Perasuk' (2026), TMDb candidate 'Rasuk' (2018) must be rejected
+        candidates = [
+            {
+                "id": 529123,
+                "title": "Rasuk",
+                "original_title": "Rasuk",
+                "release_date": "2018-06-27",
+                "popularity": 12.5
+            }
+        ]
+        match = self.tmdb._pick_best_match(candidates, "Para Perasuk", 2026, False)
+        self.assertIsNone(match)
+
+    def test_engine_rejects_year_mismatched_title_hijacking(self):
+        import asyncio
+        from bot.services.metadata.engine import MetadataEngine
+        engine = MetadataEngine()
+        fake_mismatched_rate = {
+            "verified_title": "Rasuk",
+            "year": 2018,
+            "rating": "3.9 / 10 • TMDb",
+            "genre": "Horor",
+            "director": "Ubay Fox",
+            "actors": "Shandy Aulia",
+            "plot": "Langgir Janaka..."
+        }
+        with patch.object(engine.rating_service, "get_rating_and_genre", return_value=fake_mismatched_rate):
+            res = asyncio.run(engine.process(filename="Para.Perasuk.2026.WEB.DL.720p.mp4"))
+            meta = res["metadata"]
+            self.assertEqual(meta["title"], "Para Perasuk")
+            self.assertEqual(meta["year"], 2026)
+            self.assertNotEqual(meta.get("director"), "Ubay Fox")
 
 
 if __name__ == "__main__":

@@ -215,28 +215,42 @@ class TMDbService:
         is_series: bool
     ) -> Optional[Dict[str, Any]]:
         import difflib
+        import re
         q_clean = title.lower().strip()
         best_cand = None
-        best_score = -1.0
+        best_score = 0.0
 
         for it in results:
             cand_title = (it.get("title") or it.get("name") or "").lower().strip()
             cand_orig = (it.get("original_title") or it.get("original_name") or "").lower().strip()
-            
+
             # Extract year
             date_str = it.get("release_date") or it.get("first_air_date") or ""
             cand_year = None
             if date_str and len(date_str) >= 4 and date_str[:4].isdigit():
                 cand_year = int(date_str[:4])
 
+            # Disqualify if years differ significantly and title is not nearly identical
+            if year and cand_year and abs(year - cand_year) > 1:
+                # Calculate quick title ratio
+                r_quick = max(
+                    difflib.SequenceMatcher(None, q_clean, cand_title).ratio(),
+                    difflib.SequenceMatcher(None, q_clean, cand_orig).ratio()
+                )
+                if r_quick < 0.90:
+                    continue
+
             # Similarity ratio
             ratio_title = difflib.SequenceMatcher(None, q_clean, cand_title).ratio()
             ratio_orig = difflib.SequenceMatcher(None, q_clean, cand_orig).ratio()
             base_ratio = max(ratio_title, ratio_orig)
 
-            # Substring match bonus
-            if q_clean in cand_title or q_clean in cand_orig:
+            # Whole-word substring match bonus (MUST respect word boundaries)
+            if re.search(r"\b" + re.escape(q_clean) + r"\b", cand_title) or re.search(r"\b" + re.escape(q_clean) + r"\b", cand_orig):
                 base_ratio = max(base_ratio, 0.85)
+
+            if base_ratio < 0.55:
+                continue
 
             score = base_ratio * 100.0
 
@@ -247,13 +261,13 @@ class TMDbService:
                 elif abs(year - cand_year) == 1:
                     score += 10.0
                 else:
-                    score -= 15.0
+                    score -= 30.0
 
             # Popularity / vote count bonus
             pop = it.get("popularity", 0.0)
             score += min(pop * 0.05, 10.0)
 
-            if score > best_score:
+            if score > best_score and score >= 60.0:
                 best_score = score
                 best_cand = it
 
