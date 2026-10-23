@@ -86,9 +86,9 @@ class TestAdvancedFeatures(unittest.TestCase):
         self.assertEqual(meta4.get("audio"), "Dual Audio (ID+EN)")
 
 
-    # ================= 4. SMART BATCH SCHEDULING =================
-    def test_smart_batch_scheduling_queue(self):
-        """Should batch schedule multiple movies into consecutive prime-time slots."""
+    # ================= 4. PRIME-TIME SEQUENTIAL SCHEDULING =================
+    def test_prime_time_scheduling_queue(self):
+        """Should schedule multiple movies into consecutive prime-time slots."""
         chat_id = 112233
         titles = ["Gundala", "Sri Asih", "Virgo and the Sparklings"]
         for t in titles:

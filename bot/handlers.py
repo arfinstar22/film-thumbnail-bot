@@ -62,7 +62,6 @@ CallbackQuery.answer = _safe_callback_answer
 
 _jobs = {}
 _jobs_by_msg: Dict[int, Dict[str, Any]] = {}
-_batch_collector: Dict[int, List[Dict[str, Any]]] = {}
 _banner_sessions: Dict[int, Dict[str, Any]] = {}
 _user_states: Dict[int, str] = {}
 _pending_smart_requests: Dict[str, Dict[str, Any]] = {}
@@ -5761,7 +5760,6 @@ async def _process_video_task(client: Client, msg: Message):
         if sent:
             _jobs_by_msg[sent.id] = current_job
         _jobs_by_msg[msg.id] = current_job
-        _batch_collector.setdefault(chat_id, []).append(current_job)
 
         # DUPE ALERT: Check if movie already exists in channel catalog
         meta = result.get("metadata", {})
@@ -5903,164 +5901,7 @@ async def _process_video_task(client: Client, msg: Message):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-# ================= SMART BATCH REVIEW & MOOD =================
 
-async def send_batch_review_dashboard(client: Client, chat_id: int):
-    jobs = _batch_collector.get(chat_id, [])
-    if len(jobs) < 2:
-        return
-
-    wm = _get_user_watermark(chat_id)
-    clean_wm = (wm or "").lstrip("@").strip()
-    count = len(jobs)
-
-    lines = [
-        f"📦 <b>SMART BATCH REVIEW: {count} FILM TERDETEKSI</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
-        "Semua metadata & poster resmi TMDb telah disiapkan otomatis:\n"
-    ]
-
-    for i, j in enumerate(jobs, 1):
-        meta = j.get("metadata", {})
-        t = meta.get("title") or j.get("filename") or "Film"
-        y = meta.get("year")
-        disp = f"{t} ({y})" if y else t
-        rating = f"⭐ {meta['rating']}" if meta.get("rating") else "⭐ 7.0+"
-        genre = f"🎭 {meta['genre']}" if meta.get("genre") else "Indonesian Movie"
-        has_poster = "✅ TMDb Poster" if j.get("poster_url") else "📷 Snapshot Video"
-        lines.append(f"<b>#{i}.</b> 🎬 <b>{html.escape(disp)}</b>")
-        lines.append(f"   {html.escape(rating)} | {html.escape(genre)} [{has_poster}]\n")
-
-    lines.append("👇 <i>Pilih aksi massal di bawah untuk memproses semua film sekaligus:</i>")
-
-    batch_kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🚀 Jadwalkan Semua Sekaligus", callback_data="batch_sched_all"),
-            InlineKeyboardButton("⚡ Terbitkan Semua Sekarang", callback_data="batch_pub_all")
-        ],
-        [
-            InlineKeyboardButton("❌ Batalkan Batch", callback_data="batch_cancel")
-        ]
-    ])
-
-    await client.send_message(
-        chat_id=chat_id,
-        text="\n".join(lines),
-        parse_mode=ParseMode.HTML,
-        reply_markup=batch_kb
-    )
-
-
-@app.on_callback_query(filters.regex(r"^batch_sched_all$"))
-async def handle_batch_sched_all(client: Client, call: CallbackQuery):
-    if not check_admin(call):
-        await call.answer("⛔ Khusus Administrator!", show_alert=True)
-        return
-
-    chat_id = call.message.chat.id
-    jobs = _batch_collector.pop(chat_id, [])
-    if not jobs:
-        await call.answer("Tidak ada antrean batch film.", show_alert=True)
-        return
-
-    await call.answer("⏳ Menjadwalkan semua film batch...")
-    wm = _get_user_watermark(chat_id)
-    scheduled_titles = []
-
-    for j in jobs:
-        meta = j.get("metadata", {})
-        t = meta.get("title") or j.get("filename") or "Film"
-        y = meta.get("year")
-        disp = f"{t} ({y})" if y else t
-        v_fid = j["sent_msg"].video.file_id if (j.get("sent_msg") and j["sent_msg"].video) else None
-        if not v_fid and j.get("video_msg") and (j["video_msg"].video or j["video_msg"].document):
-            m = j["video_msg"].video or j["video_msg"].document
-            v_fid = m.file_id
-        if v_fid:
-            _engine.cache.add_scheduled_post(
-                chat_id=chat_id,
-                video_file_id=v_fid,
-                caption_text=j.get("caption_text", ""),
-                metadata=meta,
-                watermark=wm,
-                title=disp
-            )
-            scheduled_titles.append(disp)
-
-    await sync_queue_backup_to_owner(client)
-    ensure_scheduler_worker(client)
-
-    summary_lines = [
-        f"🎉 <b>BATCH JADWAL SUKSES: {len(scheduled_titles)} FILM!</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
-        "Film berikut telah otomatis dijadwalkan ke jam Prime-Time (16-18 & 20-22 WIB):\n"
-    ]
-    for idx, st in enumerate(scheduled_titles, 1):
-        summary_lines.append(f"{idx}. 🎬 <b>{html.escape(st)}</b>")
-    summary_lines.append("\n<i>Ketik <code>/queue</code> untuk melihat timeline antrean live.</i>")
-
-    await call.message.edit_text("\n".join(summary_lines), parse_mode=ParseMode.HTML)
-
-
-@app.on_callback_query(filters.regex(r"^batch_pub_all$"))
-async def handle_batch_pub_all(client: Client, call: CallbackQuery):
-    if not check_admin(call):
-        await call.answer("⛔ Khusus Administrator!", show_alert=True)
-        return
-
-    chat_id = call.message.chat.id
-    jobs = _batch_collector.pop(chat_id, [])
-    if not jobs:
-        await call.answer("Tidak ada antrean batch film.", show_alert=True)
-        return
-
-    await call.answer("🚀 Mempublikasikan semua film ke channel...")
-    status_msg = await call.message.reply_text(f"⏳ <i>Sedang mempublikasikan {len(jobs)} film ke channel...</i>", parse_mode=ParseMode.HTML)
-
-    published_count = 0
-    for j in jobs:
-        meta = j.get("metadata", {})
-        v_fid = j["sent_msg"].video.file_id if (j.get("sent_msg") and j["sent_msg"].video) else None
-        if not v_fid and j.get("video_msg") and (j["video_msg"].video or j["video_msg"].document):
-            m = j["video_msg"].video or j["video_msg"].document
-            v_fid = m.file_id
-        if v_fid:
-            try:
-                await publish_video_to_channel(
-                    client=client,
-                    chat_id=chat_id,
-                    video_file_id=v_fid,
-                    caption_text=j.get("caption_text", ""),
-                    metadata=meta,
-                    watermark=j.get("watermark") or _get_user_watermark(chat_id),
-                    with_banner=True
-                )
-                published_count += 1
-                await asyncio.sleep(1.5)
-            except Exception as pe:
-                logger.warning(f"Batch publish item failed: {pe}")
-
-    await status_msg.delete()
-    await call.message.edit_text(
-        f"🎉 <b>BATCH PUBLISH SELESAI:</b>\n\n"
-        f"✅ Berhasil memposting <b>{published_count} dari {len(jobs)} film</b> langsung ke channel!",
-        parse_mode=ParseMode.HTML
-    )
-
-
-@app.on_callback_query(filters.regex(r"^batch_cancel$"))
-async def handle_batch_cancel(client: Client, call: CallbackQuery):
-    if not check_admin(call):
-        await call.answer("⛔ Khusus Administrator!", show_alert=True)
-        return
-    chat_id = call.message.chat.id
-    _batch_collector.pop(chat_id, None)
-    await call.answer("Batch dibatalkan.")
-    await call.message.edit_text(
-        "❌ <b>Batch Dibatalkan:</b>\n"
-        "Anda tetap dapat mengunggah atau menjadwalkan film satu per satu melalui kartu pratinjau masing-masing di atas.",
-        parse_mode=ParseMode.HTML
-    )
 
 
 @app.on_callback_query(filters.regex(r"^probe_streams:(\d+)$"))
@@ -6267,11 +6108,6 @@ async def video_queue_worker(client: Client):
         finally:
             _is_processing = False
             _video_queue.task_done()
-            if _video_queue.empty():
-                try:
-                    await send_batch_review_dashboard(cl, m.chat.id)
-                except Exception as bde:
-                    logger.debug(f"Batch review trigger error: {bde}")
 
 
 @app.on_message(filters.video | filters.document)

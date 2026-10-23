@@ -187,12 +187,10 @@ class TestTMDbService(unittest.TestCase):
             # Should be disabled when neither arg, env, nor setting is set
             self.assertFalse(no_key_tmdb.is_enabled())
 
-        no_key_tmdb = TMDbService(cache=self.cache, api_key=None)
-
-        # Test setting via cache
-        self.cache.set_setting("tmdb_api_key", "key_from_db_setting")
-        self.assertEqual(no_key_tmdb.get_api_key(), "key_from_db_setting")
-        self.assertTrue(no_key_tmdb.is_enabled())
+            # Test setting via cache
+            self.cache.set_setting("tmdb_api_key", "key_from_db_setting")
+            self.assertEqual(no_key_tmdb.get_api_key(), "key_from_db_setting")
+            self.assertTrue(no_key_tmdb.is_enabled())
 
     def test_mock_search_movie_extraction(self):
         mock_search_resp = {
