@@ -17,6 +17,7 @@ class CaptionGenerator:
     """
 
     SUPPORTED_STYLES = [
+        "article",
         "compact",
         "minimalist",
         "cinema_vip",
@@ -52,6 +53,7 @@ class CaptionGenerator:
         ach = metadata.get("audioChannels")
         rg = metadata.get("releaseGroup")
         synopsis = (metadata.get("synopsis") or "").strip()
+        poster_url = metadata.get("poster_url") or metadata.get("poster_path")
 
         clean_rating = ""
         if rating:
@@ -96,6 +98,7 @@ class CaptionGenerator:
             "ach": ach,
             "rg": rg,
             "synopsis": synopsis,
+            "poster_url": poster_url,
             "wm": wm,
             "clean_wm": clean_wm,
             "channel_url": channel_url
@@ -119,7 +122,9 @@ class CaptionGenerator:
 
         f = self._extract_fields(metadata, custom_watermark, self.watermark)
 
-        if chosen_style == "compact":
+        if chosen_style == "article":
+            return self._generate_article(f)
+        elif chosen_style == "compact":
             return self._generate_compact(f)
         elif chosen_style == "cinema_vip":
             return self._generate_cinema_vip(f)
@@ -133,6 +138,92 @@ class CaptionGenerator:
             return self._generate_editorial(f)
         else:
             return self._generate_minimalist(f)
+
+    # ---------------- 0. ARTICLE (INTERACTIVE COLLAPSIBLE CARDS) ----------------
+    def _generate_article(self, f: Dict[str, Any]) -> str:
+        """Article post format:
+        - Header: Title & year
+        - Badges: Rating, Genre, Quality
+        - Teaser: 1-line hook
+        - Fold 1 (<blockquote expandable>): Poster film resmi & HD link
+        - Fold 2 (<blockquote expandable>): Sinopsis lengkap
+        - Fold 3 (<blockquote expandable>): Detail spesifikasi teknis & pemain
+        """
+        title_escaped = html.escape(f["title"].upper())
+        header = f"🎬 <b>{title_escaped}</b>"
+        if f["season"] is not None and f["episode"] is not None:
+            header += f" (S{f['season']:02d}E{f['episode']:02d})"
+        elif f["year"]:
+            header += f" ({f['year']})"
+
+        lines = [header]
+
+        # Badges row: Rating, Genre, Resolution
+        badges = []
+        if f["clean_rating"]:
+            badges.append(f"⭐ <b>{html.escape(f['clean_rating'])}/10</b>")
+        if f["genre"]:
+            badges.append(f"🎭 <i>{html.escape(str(f['genre']))}</i>")
+        if f["res_disp"]:
+            res_disp = "1080p FHD" if f["res"] == "1080p" else f["res_disp"]
+            badges.append(f"🎞️ <code>{html.escape(res_disp)}</code>")
+        if badges:
+            lines.append(" • ".join(badges))
+
+        # Short teaser/hook if synopsis exists
+        synopsis = (f.get("synopsis") or "").strip()
+        if synopsis:
+            first_sentence = synopsis.split(".")[0].strip()
+            if 15 <= len(first_sentence) <= 90:
+                lines.append(f"<i>{html.escape(first_sentence)}..</i>")
+
+        lines.append("")
+
+        # 1. Expandable Block: Poster Resmi Film
+        poster_url = f.get("poster_url") or ""
+        lines.append("<blockquote expandable>")
+        lines.append("🖼️ <b>POSTER RESMI FILM</b>")
+        if poster_url and (poster_url.startswith("http://") or poster_url.startswith("https://")):
+            lines.append(f"👉 <a href=\"{html.escape(poster_url, quote=True)}\">Ketuk untuk Buka Poster Resolusi Penuh HD ↗</a>")
+        else:
+            lines.append(f"👉 <a href=\"{html.escape(f['channel_url'], quote=True)}\">Buka Galeri Poster Resmi di Channel ↗</a>")
+        lines.append("</blockquote>")
+        lines.append("")
+
+        # 2. Expandable Block: Sinopsis Lengkap
+        synopsis_idx = None
+        if synopsis:
+            synopsis_idx = len(lines)
+            lines.append(f"<blockquote expandable>\n📖 <b>SINOPSIS LENGKAP:</b>\n{html.escape(synopsis)}\n</blockquote>")
+            lines.append("")
+
+        # 3. Expandable Block: Detail Spesifikasi & Pemain
+        spec_lines = [
+            "<blockquote expandable>",
+            "ℹ️ <b>DETAIL SPESIFIKASI & PEMAIN:</b>"
+        ]
+        if f["duration"]:
+            spec_lines.append(f"• ⏳ <b>Durasi:</b> {html.escape(str(f['duration']))}")
+        if f["res_disp"]:
+            size_part = f" ({html.escape(str(f['file_size']))})" if f["file_size"] else ""
+            spec_lines.append(f"• 🎞️ <b>Kualitas:</b> {html.escape(f['res_disp'])}{size_part}")
+        elif f["file_size"]:
+            spec_lines.append(f"• 📦 <b>Ukuran:</b> {html.escape(str(f['file_size']))}")
+        if f["actors"]:
+            spec_lines.append(f"• 👥 <b>Pemain:</b> {html.escape(str(f['actors']))}")
+        if f["director"]:
+            spec_lines.append(f"• 🎬 <b>Sutradara:</b> {html.escape(str(f['director']))}")
+        if f["audio"]:
+            spec_lines.append(f"• 🔊 <b>Audio:</b> {html.escape(str(f['audio']))}")
+        if f["sub"]:
+            spec_lines.append(f"• 💬 <b>Subtitle:</b> {html.escape(str(f['sub']))}")
+        if f["wm"]:
+            spec_lines.append(f"• 🍿 <b>Channel:</b> <a href=\"{html.escape(f['channel_url'], quote=True)}\">{html.escape(f['wm'])}</a>")
+        spec_lines.append("</blockquote>")
+
+        lines.extend(spec_lines)
+
+        return self._clamp_caption(lines, synopsis, synopsis_idx)
 
     # ---------------- 1. COMPACT (ONE-GLANCE) ----------------
     def _generate_compact(self, f: Dict[str, Any]) -> str:
@@ -520,12 +611,20 @@ class CaptionGenerator:
             excess = len(result_text) - 980
             trimmed_len = max(40, len(synopsis) - excess - 15)
             trimmed = synopsis[:trimmed_len].rstrip() + "..."
-            lines[synopsis_idx] = f"<blockquote expandable>{html.escape(trimmed)}</blockquote>"
+            orig_block = lines[synopsis_idx]
+            if "SINOPSIS LENGKAP:" in orig_block:
+                lines[synopsis_idx] = f"<blockquote expandable>\n📖 <b>SINOPSIS LENGKAP:</b>\n{html.escape(trimmed)}\n</blockquote>"
+            else:
+                lines[synopsis_idx] = f"<blockquote expandable>{html.escape(trimmed)}</blockquote>"
             result_text = "\n".join(lines)
 
         if len(result_text) > 1020 and synopsis_idx is not None and synopsis_idx < len(lines):
             short_syn = synopsis[:60].rstrip() + "..."
-            lines[synopsis_idx] = f"<blockquote expandable>{html.escape(short_syn)}</blockquote>"
+            orig_block = lines[synopsis_idx]
+            if "SINOPSIS LENGKAP:" in orig_block:
+                lines[synopsis_idx] = f"<blockquote expandable>\n📖 <b>SINOPSIS LENGKAP:</b>\n{html.escape(short_syn)}\n</blockquote>"
+            else:
+                lines[synopsis_idx] = f"<blockquote expandable>{html.escape(short_syn)}</blockquote>"
             result_text = "\n".join(lines)
 
         if len(result_text) > 1024:

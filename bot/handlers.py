@@ -623,9 +623,9 @@ def _build_bot_api_reply_markup(reply_markup):
                 text_lower = (btn.text or "").lower()
                 if "brosur" in text_lower or "sinopsis" in text_lower or "katalog" in text_lower or "eps" in text_lower:
                     style = "primary"
-                elif "gabung" in text_lower or "join" in text_lower or "bagikan" in text_lower or "share" in text_lower or "cari" in text_lower or "list" in text_lower:
+                elif "trailer" in text_lower or "gabung" in text_lower or "join" in text_lower or "bagikan" in text_lower or "share" in text_lower or "cari" in text_lower or "list" in text_lower:
                     style = "success"
-                elif "trailer" in text_lower or "request" in text_lower or "tonton" in text_lower:
+                elif "request" in text_lower or "tonton" in text_lower:
                     style = "danger"
 
             if style in ("primary", "success", "danger"):
@@ -816,11 +816,10 @@ def build_channel_post_keyboard(
     series_nav_row: Optional[List[InlineKeyboardButton]] = None
 ) -> InlineKeyboardMarkup:
     """Builds a luxury, color-differentiated channel button layout with native Telegram Bot API styling:
-    - 📖 Brosur Sinopsis: Primary Blue Background
-    - 📢 Gabung Channel: Success Green Background
-    - 🎬 Tonton Trailer: Danger Red Background
-    - 💬 Request Film: Danger Red Background
-    - 🔄 Bagikan Film: Success Green Background
+    - ⚡ BUKA BROSUR FILM: Primary Blue Background
+    - 🎬 TRAILER: Success Green Background
+    - 💬 REQUEST FILM: Danger Red Background
+    - 📤 BAGIKAN / 📢 GABUNG: Success Green Background
     """
     clean_wm = (watermark or "").lstrip("@").strip()
     channel_url = f"https://t.me/{clean_wm}" if clean_wm else "https://t.me"
@@ -839,28 +838,28 @@ def build_channel_post_keyboard(
     if series_nav_row:
         kb_rows.append(series_nav_row)
 
-    # 1. 📖 Brosur Sinopsis (Sapphire Blue Background - primary)
-    if instant_view_url:
-        btn_iv = InlineKeyboardButton("📖 Brosur Sinopsis (Instant View)", url=instant_view_url)
-        btn_iv.style = "primary"
-        kb_rows.append([btn_iv])
+    # Row 1: ⚡ BUKA BROSUR FILM (Biru / primary) + 🎬 TRAILER (Hijau / success)
+    brosur_url = instant_view_url or channel_url
+    btn_brosur = InlineKeyboardButton("⚡ BUKA BROSUR FILM", url=brosur_url)
+    btn_brosur.style = "primary"
 
-    # 2. 📢 Gabung Channel (Emerald Green Background - success) + 🎬 Tonton Trailer (Crimson Red Background - danger)
-    btn_join = InlineKeyboardButton(f"📢 Gabung {watermark}", url=channel_url)
-    btn_join.style = "success"
-    btn_trailer = InlineKeyboardButton("🎬 Tonton Trailer", url=trailer_url)
-    btn_trailer.style = "danger"
-    kb_rows.append([btn_join, btn_trailer])
+    btn_trailer = InlineKeyboardButton("🎬 TRAILER", url=trailer_url)
+    btn_trailer.style = "success"
 
-    # 3. 💬 Request Film (Danger Red) + 🔄 Bagikan Film (Success Green)
-    btn_share = InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
+    kb_rows.append([btn_brosur, btn_trailer])
+
+    # Row 2: 💬 REQUEST FILM (Merah / danger) + 📤 BAGIKAN (Hijau / success)
+    btn_share = InlineKeyboardButton("📤 BAGIKAN", url=share_url)
     btn_share.style = "success"
+
     if request_link and request_link.lower() != "off":
-        btn_req = InlineKeyboardButton("💬 Request Film", url=request_link)
+        btn_req = InlineKeyboardButton("💬 REQUEST FILM", url=request_link)
         btn_req.style = "danger"
         kb_rows.append([btn_req, btn_share])
     else:
-        kb_rows.append([btn_share])
+        btn_channel = InlineKeyboardButton(f"📢 GABUNG {watermark}", url=channel_url)
+        btn_channel.style = "success"
+        kb_rows.append([btn_channel, btn_share])
 
     return InlineKeyboardMarkup(kb_rows)
 
@@ -871,23 +870,23 @@ def get_caption_kb(message_id: int, watermark: str):
 
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🚀 Posting + Banner HD", callback_data=f"post_banner:{message_id}"),
-            InlineKeyboardButton("🎬 Posting Video Saja", callback_data=f"post_video:{message_id}")
+            InlineKeyboardButton("🚀 Posting ke Channel", callback_data=f"post_video:{message_id}"),
+            InlineKeyboardButton("📸 Posting + Banner HD", callback_data=f"post_banner:{message_id}")
         ],
         [
             InlineKeyboardButton("⏰ Jadwal Prime-Time", callback_data=f"sched:{message_id}"),
             InlineKeyboardButton("🎨 Lihat Banner HD", callback_data=f"banner:{message_id}")
         ],
         [
-            InlineKeyboardButton("🔊 Audio & Sub", callback_data=f"audiosub:{message_id}")
+            InlineKeyboardButton("🔊 Audio & Sub", callback_data=f"audiosub:{message_id}"),
+            InlineKeyboardButton("🖼️ Perbaiki Poster", callback_data=f"fixbanner:{message_id}")
         ],
         [
             InlineKeyboardButton("✏️ Edit Caption", callback_data=f"edit:{message_id}"),
             InlineKeyboardButton("📋 Salin Teks", callback_data=f"copy:{message_id}")
         ],
         [
-            InlineKeyboardButton("🔄 Format Ulang", callback_data=f"info:{message_id}"),
-            InlineKeyboardButton("🖼️ Perbaiki Poster", callback_data=f"fixbanner:{message_id}")
+            InlineKeyboardButton("🔄 Format Ulang", callback_data=f"info:{message_id}")
         ],
         [
             InlineKeyboardButton("📢 Buka Channel", url=channel_url)
@@ -3126,6 +3125,7 @@ async def settmdb_cmd(client: Client, msg: Message):
 
 def _build_caption_style_kb(curr_style: str) -> InlineKeyboardMarkup:
     styles = [
+        ("article", "📰 Artikel Interaktif (3 Lipat)"),
         ("compact", "⚡ Ringkas Modern"),
         ("minimalist", "💎 Minimalis Elegan"),
         ("cinema_vip", "🎟️ Premiere VIP"),
@@ -3149,6 +3149,7 @@ def _build_caption_style_kb(curr_style: str) -> InlineKeyboardMarkup:
 
 
 CAPTION_STYLE_NAMES = {
+    "article": "📰 Artikel Interaktif (Poster, Sinopsis, Specs Lipat)",
     "compact": "⚡ Ringkas Modern (One-Glance)",
     "minimalist": "💎 Minimalis Elegan (Chips & Pemisah Halus)",
     "cinema_vip": "🎟️ Tiket Premiere VIP (Cinema Deluxe)",
@@ -3174,6 +3175,7 @@ async def captionstyle_cmd(client: Client, msg: Message):
         f"📌 <b>Gaya Aktif Saat Ini:</b>\n"
         f"👉 <b>{CAPTION_STYLE_NAMES.get(curr_style, curr_style.title())}</b>\n\n"
         f"<b>Pilihan Gaya Estetik & Bebas Clutter:</b>\n"
+        f"• 📰 <b>Artikel Interaktif:</b> 1 Card tunggal dengan 3 blok lipat (Poster HD, Sinopsis Lengkap, Spesifikasi Teknis & Pemain).\n"
         f"• ⚡ <b>Ringkas Modern:</b> Format super bersih 2 baris esensial tanpa info teknis berbelit. Sangat cepat dibaca.\n"
         f"• 💎 <b>Minimalis Elegan:</b> Mengelompokkan info dalam chip rapi dengan pemisah halus.\n"
         f"• 🎟️ <b>Premiere VIP:</b> Desain tiket premiere bioskop mewah dengan format tayang berkelas.\n"
@@ -3187,7 +3189,7 @@ async def captionstyle_cmd(client: Client, msg: Message):
     )
 
 
-@app.on_callback_query(filters.regex(r"^set_capstyle:(compact|minimalist|cinema_vip|monochrome|sinema_retro|streaming|editorial)$"))
+@app.on_callback_query(filters.regex(r"^set_capstyle:(article|compact|minimalist|cinema_vip|monochrome|sinema_retro|streaming|editorial)$"))
 async def handle_set_capstyle(client: Client, call: CallbackQuery):
     if not check_admin(call):
         await call.answer("⛔ Hanya Administrator!", show_alert=True)
@@ -5247,8 +5249,8 @@ async def publish_video_to_channel(
 
     protect_flag = _engine.cache.get_protect_content(chat_id)
 
-    banner_mode = _engine.cache.get_setting("banner_post_mode", "on")
-    use_banner = (with_banner is True) or (with_banner is None and banner_mode != "off")
+    banner_mode = _engine.cache.get_setting("banner_post_mode", "off")
+    use_banner = (with_banner is True) or (with_banner is None and banner_mode == "on")
     sent_banner = None
 
     if use_banner:
@@ -5296,7 +5298,7 @@ async def publish_video_to_channel(
                 except Exception:
                     pass
 
-    # Video caption: concise if banner was posted, full if banner was skipped
+    # Video caption: format with article card layout (collapsible poster, synopsis, specs)
     if sent_banner:
         v_lines = [f"🎬 <b>{html.escape(title_display.upper())}</b>"]
         tech_parts = []
@@ -5313,7 +5315,15 @@ async def publish_video_to_channel(
         v_lines.append(f"🍿 <b>Channel Resmi:</b> <a href=\"{html.escape(channel_url, quote=True)}\">{html.escape(watermark)}</a>")
         video_caption = "\n".join(v_lines)
     else:
-        video_caption = caption_text
+        # Default to interactive article format if not already containing expandable poster
+        if "POSTER RESMI FILM" not in caption_text:
+            try:
+                article_caption = _engine.caption_gen.generate(meta, custom_watermark=watermark, style="article")
+                video_caption = article_caption or caption_text
+            except Exception:
+                video_caption = caption_text
+        else:
+            video_caption = caption_text
 
     # Ensure thumbnail exists (branded poster or custom thumb)
     final_thumb = thumb_path
@@ -5354,8 +5364,8 @@ async def publish_video_to_channel(
                 pass
 
     if sent_channel:
-        if not sent_banner and caption_text and "<blockquote expandable>" in caption_text:
-            await _apply_expandable_caption(watermark, sent_channel.id, caption_text, channel_kb)
+        if not sent_banner and video_caption and "<blockquote expandable>" in video_caption:
+            await _apply_expandable_caption(watermark, sent_channel.id, video_caption, channel_kb)
         else:
             await _apply_channel_post_styling(watermark, sent_channel.id, channel_kb)
 

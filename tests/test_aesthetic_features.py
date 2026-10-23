@@ -110,6 +110,14 @@ class TestAestheticFeatures(unittest.TestCase):
         self.assertIn("📽️ <b>SINEMA INDONESIA</b>", cap_retro)
         self.assertIn("Arsip Resmi", cap_retro)
 
+        # 8. Article (Interactive Collapsible Cards)
+        cap_article = self.caption_gen.generate(meta, custom_watermark="@film_indonesia1", style="article")
+        self.assertLessEqual(len(cap_article), 1024)
+        self.assertIn("POSTER RESMI FILM", cap_article)
+        self.assertIn("SINOPSIS LENGKAP:", cap_article)
+        self.assertIn("DETAIL SPESIFIKASI & PEMAIN:", cap_article)
+        self.assertIn("<blockquote expandable>", cap_article)
+
     # 3. NETFLIX HOMEPAGE PINNED CATALOG
     def test_netflix_pinned_catalog(self):
         """Should format a Netflix-style streaming homepage with top rated, latest, and genre navigation."""
@@ -162,17 +170,15 @@ class TestAestheticFeatures(unittest.TestCase):
         texts = [[b.text for b in row] for row in kb.inline_keyboard]
 
         # Clean, emoji-box-free text
-        self.assertEqual(texts[0], ["📖 Brosur Sinopsis (Instant View)"])
-        self.assertEqual(texts[1], ["📢 Gabung @film_indonesia1", "🎬 Tonton Trailer"])
-        self.assertEqual(texts[2], ["💬 Request Film", "🔄 Bagikan Film"])
+        self.assertEqual(texts[0], ["⚡ BUKA BROSUR FILM", "🎬 TRAILER"])
+        self.assertEqual(texts[1], ["💬 REQUEST FILM", "📤 BAGIKAN"])
 
         # Native Bot API 9.4 styles
         bot_api_kb = _build_bot_api_reply_markup(kb)["inline_keyboard"]
-        self.assertEqual(bot_api_kb[0][0]["style"], "primary")   # Blue
-        self.assertEqual(bot_api_kb[1][0]["style"], "success")   # Green
-        self.assertEqual(bot_api_kb[1][1]["style"], "danger")    # Red
-        self.assertEqual(bot_api_kb[2][0]["style"], "danger")    # Request: Red
-        self.assertEqual(bot_api_kb[2][1]["style"], "success")   # Bagikan: Green
+        self.assertEqual(bot_api_kb[0][0]["style"], "primary")   # Brosur: Blue
+        self.assertEqual(bot_api_kb[0][1]["style"], "success")   # Trailer: Green
+        self.assertEqual(bot_api_kb[1][0]["style"], "danger")    # Request: Red
+        self.assertEqual(bot_api_kb[1][1]["style"], "success")   # Bagikan: Green
 
     # 6. PINNED CATALOG STYLED BUTTONS
     def test_pinned_catalog_styled_buttons(self):
