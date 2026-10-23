@@ -100,16 +100,18 @@ class BannerGenerator:
         clean_wm = wm.lstrip("@").strip()
         channel_url = f"https://t.me/{clean_wm}" if clean_wm else "https://t.me"
 
-        # 1. Load Poster Image
-        poster_img = _load_image(poster_source)
+        # 1. Load Poster & Backdrop Image
+        poster_img = _load_image(poster_source or metadata.get("poster_url"))
+        backdrop_img = _load_image(metadata.get("backdrop_url")) if metadata.get("backdrop_url") else None
+        bg_source = backdrop_img or poster_img
 
         # 2. Base Canvas & Cinematic Blurred Background
         canvas = Image.new("RGBA", (self.WIDTH, self.HEIGHT), (15, 18, 25, 255))
-        if poster_img:
-            pw, ph = poster_img.size
+        if bg_source:
+            pw, ph = bg_source.size
             scale = max(self.WIDTH / pw, self.HEIGHT / ph)
             nw, nh = int(pw * scale), int(ph * scale)
-            bg = poster_img.resize((nw, nh), Image.Resampling.LANCZOS)
+            bg = bg_source.resize((nw, nh), Image.Resampling.LANCZOS)
             left = (nw - self.WIDTH) // 2
             top = (nh - self.HEIGHT) // 2
             bg = bg.crop((left, top, left + self.WIDTH, top + self.HEIGHT))

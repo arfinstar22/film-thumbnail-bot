@@ -24,8 +24,9 @@ class MetadataEngine:
         self.banner_gen = BannerGenerator()
         self.thumb_gen = ThumbnailGenerator()
         self.cache = MetadataCache()
-        self.synopsis_service = WikipediaSynopsisService(cache=self.cache)
         self.rating_service = MovieRatingService(cache=self.cache)
+        self.tmdb_service = self.rating_service.tmdb
+        self.synopsis_service = WikipediaSynopsisService(cache=self.cache)
 
     async def process(
         self,
@@ -86,6 +87,10 @@ class MetadataEngine:
                     metadata["actors"] = rate_res["actors"]
                 if rate_res.get("poster_url") and not metadata.get("poster_url"):
                     metadata["poster_url"] = rate_res["poster_url"]
+                if rate_res.get("backdrop_url") and not metadata.get("backdrop_url"):
+                    metadata["backdrop_url"] = rate_res["backdrop_url"]
+                if rate_res.get("trailer_url") and not metadata.get("trailer_url"):
+                    metadata["trailer_url"] = rate_res["trailer_url"]
 
             if syn_res and not metadata.get("synopsis"):
                 metadata["synopsis"] = syn_res

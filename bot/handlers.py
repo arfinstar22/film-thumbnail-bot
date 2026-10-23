@@ -814,6 +814,7 @@ BOT_COMMANDS_LIST = [
     BotCommand("setrequest", "Atur link tombol Request Film"),
     BotCommand("setdivider", "Atur stiker pemisah film"),
     BotCommand("setsynopsis", "Aktif/matikan sinopsis otomatis"),
+    BotCommand("settmdb", "Hubungkan TMDb API (Poster HD & Sinopsis)"),
     BotCommand("autojoin", "Aktif/matikan auto approve join"),
     BotCommand("addadmin", "Tambah admin baru ke bot"),
     BotCommand("deladmin", "Hapus admin dari bot"),
@@ -874,6 +875,8 @@ def build_admin_dashboard_parts(chat_id: int, user_id: int, first_name: str, use
     div_status = "Logo Custom Film Indonesia" if divider == "default" else ("Mati (Off)" if divider == "off" else "Stiker Pilihan Anda")
     req_status = f"<code>{html.escape(req_link)}</code>" if req_link and req_link != "off" else ("Mati (Off)" if req_link == "off" else "<i>Belum diatur</i>")
     syn_status = "Aktif (On)" if syn_val != "off" else "Mati (Off)"
+    tmdb_key = _engine.tmdb_service.get_api_key()
+    tmdb_status = "🟢 Terhubung (TMDb)" if tmdb_key else "⚪ Belum Terhubung (OMDB/IMDb)"
     autojoin_status = "Aktif (On)" if autojoin_val != "off" else "Mati (Off)"
     if autopost_val == "schedule":
         autopost_status = "⏰ Jadwal Prime-Time (16-18 & 20-22 WIB)"
@@ -941,7 +944,10 @@ def build_admin_dashboard_parts(chat_id: int, user_id: int, first_name: str, use
         f"  <i>Stiker aktif:</i> <b>{div_status}</b>\n\n"
         "• <code>/setsynopsis on / off</code>\n"
         "  Mengatur sinopsis lipat otomatis dari Wikipedia Indonesia.\n"
-        f"  <i>Status sinopsis:</i> <b>{syn_status}</b>"
+        f"  <i>Status sinopsis:</i> <b>{syn_status}</b>\n\n"
+        "• <code>/settmdb &lt;api_key&gt;</code>\n"
+        "  Hubungkan The Movie Database (TMDb) untuk poster HD, backdrop, sinopsis resmi & trailer.\n"
+        f"  <i>Status TMDb:</i> <b>{tmdb_status}</b>"
     )
 
     part2 = (
@@ -1892,8 +1898,10 @@ async def request_movie_cmd(client: Client, msg: Message):
             [InlineKeyboardButton("🍿 Tonton Sekarang", url=ex_link)],
             [InlineKeyboardButton("💬 Request Film Lain", callback_data="btn_start_request")]
         ])
+        is_fuzzy_note = f"💡 <i>Maksud kamu: <b>{html.escape(ex_disp)}</b>?</i>\n\n" if existing.get("_is_fuzzy") else ""
         await msg.reply_text(
             f"🎉 <b>Film yang Kamu Cari Sudah Tersedia!</b>\n\n"
+            f"{is_fuzzy_note}"
             f"🎬 <b>{html.escape(ex_disp)}</b>\n"
             f"📢 Channel: @{clean_wm}\n\n"
             f"👉 <a href=\"{ex_link}\">Klik di sini untuk langsung menonton di channel</a>\n\n"
@@ -2585,8 +2593,10 @@ async def editpost_cmd(client: Client, msg: Message):
     channel_url = f"https://t.me/{target_channel}"
     share_text = f"Nonton film {title_disp} di @{target_channel}!"
     share_url = f"https://t.me/share/url?url={urllib.parse.quote(channel_url)}&text={urllib.parse.quote(share_text)}"
-    trailer_query = f"Trailer {new_title}" + (f" {new_year}" if new_year else "")
-    trailer_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(trailer_query)}"
+    trailer_url = meta.get("trailer_url")
+    if not trailer_url:
+        trailer_query = f"Trailer {new_title}" + (f" {new_year}" if new_year else "")
+        trailer_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(trailer_query)}"
 
     row1 = [
         InlineKeyboardButton(f"📢 Gabung @{target_channel}", url=channel_url),
@@ -2676,17 +2686,31 @@ async def search_movie_cmd(client: Client, msg: Message):
         return
 
     query = args[1].strip()
-    results = _engine.cache.search_catalog(query, limit=8)
+    results, did_you_mean = _engine.cache.search_catalog_with_suggestion(query, limit=8)
 
     if not results:
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 Request Film Ini", callback_data="btn_start_request")],
+            [InlineKeyboardButton("🔍 Cari Film Instan", switch_inline_query_current_chat="")]
+        ])
         await msg.reply_text(
-            f"🔍 Tidak ditemukan film dengan kata kunci '<b>{query}</b>' di katalog channel.\n\n"
-            "💡 Film akan otomatis tercatat di katalog saat Anda mempostingnya ke channel.",
-            parse_mode=ParseMode.HTML
+            f"🔍 Tidak ditemukan film dengan kata kunci '<b>{html.escape(query)}</b>' di katalog channel.\n\n"
+            "💡 <i>Tips: Coba periksa ejaan, cari menggunakan nama pemeran/genre, atau ajukan request di bawah agar admin menambahkannya ke channel!</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb
         )
         return
 
-    text = f"🍿 <b>Hasil Pencarian untuk '<code>{query}</code>':</b>\n\n"
+    safe_query = html.escape(query)
+    if did_you_mean:
+        text = (
+            f"🔍 <i>Tidak ditemukan judul persis '<b>{safe_query}</b>'.</i>\n"
+            f"💡 <b>Maksud kamu:</b> <b>{html.escape(did_you_mean)}</b>?\n\n"
+            f"🍿 <b>Film serupa yang ditemukan di katalog:</b>\n\n"
+        )
+    else:
+        text = f"🍿 <b>Hasil Pencarian untuk '<code>{safe_query}</code>':</b>\n\n"
+
     buttons = []
     for idx, item in enumerate(results, 1):
         title = item["title"]
@@ -2698,19 +2722,100 @@ async def search_movie_cmd(client: Client, msg: Message):
         msg_id = item["message_id"]
         post_url = f"https://t.me/{channel}/{msg_id}"
 
-        text += f"{idx}. 🎬 <b>{title}{year}</b>\n"
+        text += f"{idx}. 🎬 <b>{html.escape(title)}{year}</b>\n"
         if info_line:
-            text += f"   {info_line}\n"
+            text += f"   {html.escape(info_line)}\n"
         text += f"   👉 <a href='{post_url}'>Tonton di Channel</a>\n\n"
 
         buttons.append([InlineKeyboardButton(f"🎬 {idx}. {title}{year}", url=post_url)])
+
+    buttons.append([InlineKeyboardButton("🔍 Cari Koleksi Film Lainnya", switch_inline_query_current_chat="")])
 
     await msg.reply_text(
         text,
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
-        reply_markup=InlineKeyboardMarkup(buttons[:5])
+        reply_markup=InlineKeyboardMarkup(buttons[:6])
     )
+
+
+@app.on_message(filters.command(["settmdb", "tmdb"]))
+async def settmdb_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
+    args = msg.text.split(maxsplit=1)
+    if len(args) < 2 or not args[1].strip() or args[1].strip().lower() == "status":
+        curr_key = _engine.tmdb_service.get_api_key()
+        if curr_key:
+            masked = curr_key[:4] + "*" * (max(len(curr_key) - 8, 4)) + curr_key[-4:] if len(curr_key) > 8 else "****"
+            is_valid = _engine.tmdb_service.validate_key(curr_key)
+            status_text = "🟢 <b>Terhubung & Aktif</b>" if is_valid else "🔴 <b>API Key Error / Tidak Valid</b>"
+            await msg.reply_text(
+                f"🎬 <b>Status Integrasi TMDb API:</b>\n\n"
+                f"• Status: {status_text}\n"
+                f"• API Key: <code>{masked}</code>\n\n"
+                f"<b>Perintah Pengaturan:</b>\n"
+                f"• <code>/settmdb &lt;api_key&gt;</code> — Ganti API Key TMDb baru\n"
+                f"• <code>/settmdb off</code> — Matikan TMDb (kembali ke IMDb/OMDB)\n\n"
+                f"💡 <i>TMDb API memberikan poster HD original, backdrop banner, sinopsis resmi Indonesia, rating, sutradara, aktor, dan trailer YouTube resmi.</i>",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await msg.reply_text(
+                "🎬 <b>Integrasi The Movie Database (TMDb) API:</b> ⚪ <i>Belum Terpasang</i>\n\n"
+                "TMDb memberikan metadata film yang jauh lebih kaya:\n"
+                "• 🖼️ <b>Poster HD Original</b>\n"
+                "• 🌄 <b>Backdrop Landscape</b> untuk Banner Film\n"
+                "• 📝 <b>Sinopsis Resmi Bahasa Indonesia</b>\n"
+                "• ⭐ <b>Rating Resmi TMDb</b>\n"
+                "• 👥 <b>Daftar Sutradara & Pemeran Lengkap</b>\n"
+                "• 🎥 <b>Link Trailer YouTube Resmi</b>\n\n"
+                "<b>Cara Mendapatkan API Key Gratis (1-2 Menit):</b>\n"
+                "1. Daftar gratis di <a href='https://www.themoviedb.org/signup'>themoviedb.org</a>\n"
+                "2. Masuk ke Akun ➡️ Pengaturan ➡️ <b>API</b>\n"
+                "3. Klik Buat API Key (Developer), isi nama aplikasi bebas\n"
+                "4. Salin <b>API Key (v3 auth)</b> lalu kirim ke sini:\n\n"
+                "<code>/settmdb &lt;API_KEY_ANDA&gt;</code>",
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True
+            )
+        return
+
+    val = args[1].strip()
+    if val.lower() in ("off", "disable", "hapus", "clear"):
+        _engine.cache.set_setting("tmdb_api_key", "")
+        _engine.tmdb_service.api_key = None
+        await msg.reply_text(
+            "⚪ <b>Integrasi TMDb Telah Dinonaktifkan.</b>\n"
+            "Bot akan kembali menggunakan sumber data bawaan (IMDb & OMDB).",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    status_msg = await msg.reply_text("⏳ <i>Menguji koneksi ke TMDb API...</i>", parse_mode=ParseMode.HTML)
+    is_valid = _engine.tmdb_service.validate_key(val)
+    if is_valid:
+        _engine.cache.set_setting("tmdb_api_key", val)
+        _engine.tmdb_service.api_key = val
+        await status_msg.edit_text(
+            "✅ <b>TMDb API Berhasil Dihubungkan!</b>\n\n"
+            "🎉 Sekarang bot otomatis mengambil:\n"
+            "• 🖼️ Poster HD kualitas tertinggi (Original Quality)\n"
+            "• 🌄 Backdrop sinematik untuk Banner Film\n"
+            "• 📝 Sinopsis resmi bahasa Indonesia\n"
+            "• ⭐ Rating resmi TMDb\n"
+            "• 👥 Sutradara dan aktor lengkap\n"
+            "• 🎥 Trailer YouTube resmi",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        await status_msg.edit_text(
+            "❌ <b>API Key Tidak Valid atau Gagal Terhubung!</b>\n\n"
+            "Pastikan API Key TMDb v3 yang Anda masukkan sudah benar dan akun TMDb sudah terverifikasi email.",
+            parse_mode=ParseMode.HTML
+        )
 
 
 @app.on_message(filters.command("autojoin"))
@@ -4696,8 +4801,10 @@ async def publish_video_to_channel(
     share_text = f"Nonton film {title_display} di {watermark}!"
     share_url = f"https://t.me/share/url?url={urllib.parse.quote(channel_url)}&text={urllib.parse.quote(share_text)}"
 
-    trailer_query = f"Trailer {title_meta}" + (f" {year_meta}" if year_meta else "")
-    trailer_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(trailer_query)}"
+    trailer_url = meta.get("trailer_url")
+    if not trailer_url:
+        trailer_query = f"Trailer {title_meta}" + (f" {year_meta}" if year_meta else "")
+        trailer_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(trailer_query)}"
 
     row1 = [
         InlineKeyboardButton(f"📢 Gabung {watermark}", url=channel_url),
@@ -6632,9 +6739,9 @@ async def inline_search_handler(client: Client, query: InlineQuery):
         year = f" ({item['year']})" if item.get("year") else ""
         full_title = f"{title}{year}"
         rating = f"⭐ {item['rating']}" if item.get("rating") else ""
-        genre = f"🎭 {item['genre']}" if item.get("genre") else ""
         desc_parts = [p for p in [rating, genre] if p]
-        description = " | ".join(desc_parts) or "Koleksi Film Channel"
+        base_desc = " | ".join(desc_parts) or "Koleksi Film Channel"
+        description = f"💡 Maksud: {full_title} • {base_desc}" if item.get("_is_fuzzy") else base_desc
         channel = item["channel_username"].lstrip("@")
         msg_id = item["message_id"]
         post_url = f"https://t.me/{channel}/{msg_id}"

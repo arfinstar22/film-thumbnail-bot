@@ -1,12 +1,13 @@
 import asyncio
 import datetime
+import difflib
 import json
 import logging
 import os
 import re
 import sqlite3
 import threading
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 from .supabase_sync import SupabaseSyncService
 
@@ -25,6 +26,101 @@ def normalize_movie_title_and_year(title: str, year: Optional[int] = None):
         t = t[:m.start()].strip()
     clean_key = re.sub(r'[^a-zA-Z0-9]', '', t).lower()
     return t, year, clean_key
+
+
+def calculate_search_relevance(
+    query: str,
+    title: str,
+    year: Optional[int] = None,
+    caption: str = "",
+    genre: str = "",
+    rating: Optional[str] = None
+) -> Tuple[float, bool]:
+    """Calculates a relevance score (0-100+) and whether the match is a fuzzy typo match."""
+    q = (query or "").strip()
+    if not q:
+        return 0.0, False
+
+    q_clean = re.sub(r"[^\w\s]", " ", q).lower().strip()
+    t_clean = re.sub(r"[^\w\s]", " ", title or "").lower().strip()
+    if not q_clean or not t_clean:
+        return 0.0, False
+
+    # Extract potential year from query (e.g. 'dilan 1990')
+    q_year = None
+    ym = re.search(r"\b(19\d\d|20\d\d)\b", q_clean)
+    if ym:
+        q_year = int(ym.group(1))
+
+    t_noyear = re.sub(r"\b(19\d\d|20\d\d)\b", "", t_clean).strip()
+    q_noyear = re.sub(r"\b(19\d\d|20\d\d)\b", "", q_clean).strip()
+
+    candidates = []  # List[Tuple[float, bool]] where bool is is_exact
+
+    # 1. Exact title match
+    if q_clean == t_clean or (t_noyear and q_clean == t_noyear) or (q_noyear and q_noyear == t_noyear):
+        candidates.append((100.0, True))
+
+    # 2. Substring match
+    if q_clean in t_clean or (t_noyear and q_clean in t_noyear) or (q_noyear and t_noyear and q_noyear in t_noyear):
+        cov = len(q_clean) / max(len(t_clean), len(q_clean))
+        candidates.append((78.0 + cov * 18.0, True))
+    elif t_clean in q_clean or (t_noyear and t_noyear in q_clean):
+        candidates.append((72.0, True))
+
+    # 3. Whole words match
+    q_words = [w for w in q_clean.split() if len(w) > 1]
+    t_words = [w for w in t_clean.split() if len(w) > 1]
+    if q_words and t_words:
+        matched = sum(1 for qw in q_words if qw in t_words)
+        if matched == len(q_words):
+            candidates.append((70.0 + (len(q_words) / len(t_words)) * 15.0, True))
+
+    # 4. Fuzzy SequenceMatcher ratio (typo tolerance)
+    ratio_full = difflib.SequenceMatcher(None, q_clean, t_clean).ratio()
+    ratio_noyear = difflib.SequenceMatcher(None, q_noyear, t_noyear).ratio() if (q_noyear and t_noyear) else 0.0
+    best_ratio = max(ratio_full, ratio_noyear)
+
+    # Word-level fuzzy
+    for qw in q_words:
+        for tw in t_words:
+            rw = difflib.SequenceMatcher(None, qw, tw).ratio()
+            if rw > best_ratio:
+                best_ratio = max(best_ratio, rw * 0.88)
+
+    if best_ratio >= 0.52:
+        candidates.append((best_ratio * 70.0, False))
+
+    # 5. Caption / Genre / Cast match
+    cap_clean = (caption or "").lower()
+    gen_clean = (genre or "").lower()
+    if q_clean and (q_clean in cap_clean or q_clean in gen_clean):
+        candidates.append((50.0, True))
+    elif any(qw in cap_clean for qw in q_words if len(qw) > 3):
+        candidates.append((38.0, False))
+
+    if not candidates:
+        return 0.0, False
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    base_score, is_exact = candidates[0]
+    is_fuzzy = not is_exact
+
+    # Year boost / match
+    if q_year and year and q_year == year:
+        base_score += 15.0
+
+    # Rating boost (up to +5.0)
+    if rating:
+        try:
+            rm = re.search(r"(\d+(?:\.\d+)?)", str(rating))
+            if rm:
+                r_val = float(rm.group(1))
+                base_score += (min(r_val, 10.0) / 10.0) * 5.0
+        except Exception:
+            pass
+
+    return base_score, is_fuzzy
 
 
 class MetadataCache:
@@ -336,27 +432,27 @@ class MetadataCache:
         dedup_results.sort(key=lambda x: (x.get("title") or "").lower())
         return dedup_results
 
-    def search_catalog(self, query: str = "", limit: int = 8) -> List[Dict[str, Any]]:
+    def search_catalog(self, query: str = "", limit: int = 8, channel_username: Optional[str] = None) -> List[Dict[str, Any]]:
         raw_items = []
         try:
             conn = self._conn()
             self._ensure_catalog_table(conn)
             q = (query or "").strip()
-            if q:
+            clean_chan = (channel_username or "").lstrip("@").strip().lower()
+
+            if clean_chan:
                 cur = conn.execute("""
-                    SELECT title, year, rating, genre, quality, channel_username, message_id, caption
+                    SELECT title, year, rating, genre, quality, channel_username, message_id, caption, file_id
                     FROM movie_catalog
-                    WHERE title LIKE ? OR caption LIKE ?
+                    WHERE LOWER(channel_username) = ?
                     ORDER BY message_id DESC
-                    LIMIT ?
-                """, (f"%{q}%", f"%{q}%", limit * 3))
+                """, (clean_chan,))
             else:
                 cur = conn.execute("""
-                    SELECT title, year, rating, genre, quality, channel_username, message_id, caption
+                    SELECT title, year, rating, genre, quality, channel_username, message_id, caption, file_id
                     FROM movie_catalog
                     ORDER BY message_id DESC
-                    LIMIT ?
-                """, (limit * 3,))
+                """)
 
             for row in cur.fetchall():
                 raw_items.append({
@@ -367,14 +463,15 @@ class MetadataCache:
                     "quality": row[4],
                     "channel_username": row[5],
                     "message_id": row[6],
-                    "caption": row[7]
+                    "caption": row[7],
+                    "file_id": row[8]
                 })
         except Exception as e:
             logger.error(f"Search catalog error: {e}")
             return []
 
         seen_keys = {}
-        dedup_results = []
+        dedup_movies = []
         for item in raw_items:
             t, y, key = normalize_movie_title_and_year(item["title"], item["year"])
             if not key:
@@ -392,16 +489,61 @@ class MetadataCache:
                     target["rating"] = item.get("rating")
                 if not target.get("genre") and item.get("genre"):
                     target["genre"] = item.get("genre")
+                if not target.get("file_id") and item.get("file_id"):
+                    target["file_id"] = item.get("file_id")
             else:
                 item_copy = dict(item)
                 item_copy["title"] = t
                 item_copy["year"] = y
                 seen_keys[key] = item_copy
-                dedup_results.append(item_copy)
-                if len(dedup_results) >= limit:
-                    break
+                dedup_movies.append(item_copy)
 
-        return dedup_results
+        if not q:
+            return dedup_movies[:limit]
+
+        # Calculate relevance score with typo tolerance & ranking
+        scored_results = []
+        for item in dedup_movies:
+            score, is_fuzzy = calculate_search_relevance(
+                q,
+                item.get("title", ""),
+                year=item.get("year"),
+                caption=item.get("caption", ""),
+                genre=item.get("genre", ""),
+                rating=item.get("rating")
+            )
+            if score >= 35.0:
+                item_copy = dict(item)
+                item_copy["_score"] = round(score, 2)
+                item_copy["_is_fuzzy"] = is_fuzzy
+                scored_results.append(item_copy)
+
+        scored_results.sort(
+            key=lambda x: (x.get("_score", 0.0), x.get("message_id", 0)),
+            reverse=True
+        )
+        return scored_results[:limit]
+
+    def search_catalog_with_suggestion(
+        self,
+        query: str = "",
+        limit: int = 8,
+        channel_username: Optional[str] = None
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """Searches the catalog and provides an auto-suggest ('did you mean') title if query had typos."""
+        results = self.search_catalog(query, limit=limit, channel_username=channel_username)
+        if not results:
+            return [], None
+
+        # Check if the top result is a fuzzy match (indicating user had a typo)
+        if results[0].get("_is_fuzzy", False):
+            best = results[0]
+            cand = best.get("title", "")
+            if best.get("year"):
+                cand += f" ({best['year']})"
+            return results, cand
+
+        return results, None
 
     def export_catalog_json(self, channel_username: str) -> str:
         """Export all movies in catalog for a channel as a formatted JSON string."""
@@ -444,18 +586,39 @@ class MetadataCache:
         year: Optional[int] = None,
         channel_username: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
-        """Check if a movie already exists in the channel catalog to prevent duplicate uploads."""
+        """Check if a movie already exists in the channel catalog (supports exact & high-confidence fuzzy matching)."""
         norm_t, norm_y, norm_k = normalize_movie_title_and_year(title, year)
         if not norm_k:
             return None
 
         movies = self.get_deduplicated_catalog(channel_username)
+        # 1. Exact match
         for m in movies:
             mt, my, mk = normalize_movie_title_and_year(m.get("title", ""), m.get("year"))
             if mk == norm_k:
                 return m
             if mt.lower() == norm_t.lower() and (not norm_y or not my or norm_y == my):
                 return m
+
+        # 2. High-confidence fuzzy match (catches typos like 'Pengadi Setan')
+        best_cand = None
+        best_score = 0.0
+        for m in movies:
+            score, _ = calculate_search_relevance(
+                title,
+                m.get("title", ""),
+                year=m.get("year"),
+                rating=m.get("rating")
+            )
+            if score >= 65.0 and score > best_score:
+                if year and m.get("year") and abs(year - m["year"]) > 1:
+                    continue
+                best_score = score
+                best_cand = m
+
+        if best_cand and best_score >= 65.0:
+            return best_cand
+
         return None
 
     def check_duplicate_movie(self, channel_username: str, title: str, year: Optional[int] = None) -> Optional[Dict[str, Any]]:

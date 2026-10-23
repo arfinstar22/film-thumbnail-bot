@@ -28,6 +28,7 @@ ABSOLUTE_ADMIN_USERNAMES = {
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
+TMDB_API_KEY = os.getenv("TMDB_API_KEY", "").strip()
 
 
 if not BOT_TOKEN and not SESSION_STRING:

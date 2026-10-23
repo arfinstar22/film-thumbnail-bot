@@ -7,6 +7,7 @@ import urllib.request
 from typing import Optional, Dict, Any
 
 from .cache import MetadataCache
+from .tmdb import TMDbService
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +37,11 @@ GENRE_MAP = {
 
 
 class MovieRatingService:
-    """Zero-cost movie rating, genre, plot, director, and cast fetcher using IMDb Suggest & OMDB."""
+    """Zero-cost movie rating, genre, plot, director, and cast fetcher using TMDb, IMDb Suggest & OMDB."""
 
-    def __init__(self, cache: Optional[MetadataCache] = None):
+    def __init__(self, cache: Optional[MetadataCache] = None, tmdb_service: Optional[TMDbService] = None):
         self.cache = cache or MetadataCache()
+        self.tmdb = tmdb_service or TMDbService(cache=self.cache)
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
@@ -63,6 +65,16 @@ class MovieRatingService:
                 return json.loads(cached_raw)
             except Exception:
                 pass
+
+        # Step 0: TMDb API check (HD poster, backdrop, Indonesian synopsis, official rating)
+        if self.tmdb.is_enabled():
+            try:
+                tmdb_res = self.tmdb.search_movie(title, year)
+                if tmdb_res and (tmdb_res.get("rating") or tmdb_res.get("poster_url") or tmdb_res.get("director")):
+                    self.cache.set_setting(cache_key, json.dumps(tmdb_res))
+                    return tmdb_res
+            except Exception as e:
+                logger.debug(f"TMDb search error, falling back to IMDb/OMDB: {e}")
 
         imdb_id = None
         suggested_title = None
