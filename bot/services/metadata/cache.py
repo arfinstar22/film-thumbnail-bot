@@ -351,28 +351,21 @@ class MetadataCache:
             cur = conn.execute("SELECT id, file_id, season, episode FROM movie_catalog WHERE LOWER(channel_username) = ? AND message_id = ?", (clean_channel, message_id))
             row = cur.fetchone()
             if row:
-                updates = []
-                params = []
-                if file_id and not row[1]:
-                    updates.append("file_id = ?")
-                    params.append(file_id)
-                if season is not None and row[2] is None:
-                    updates.append("season = ?")
-                    params.append(season)
-                if episode is not None and row[3] is None:
-                    updates.append("episode = ?")
-                    params.append(episode)
-                if updates:
-                    params.append(row[0])
-                    conn.execute(f"UPDATE movie_catalog SET {', '.join(updates)} WHERE id = ?", params)
-                    conn.commit()
-                return
-
-            conn.execute("""
-                INSERT INTO movie_catalog (title, year, rating, genre, quality, channel_username, message_id, caption, file_id, season, episode)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (clean_title, year, rating, genre, quality, clean_channel, message_id, caption, file_id, season, episode))
-            conn.commit()
+                conn.execute("""
+                    UPDATE movie_catalog
+                    SET title = ?, year = ?, rating = ?, genre = ?, quality = ?, caption = ?,
+                        file_id = COALESCE(?, file_id),
+                        season = COALESCE(?, season),
+                        episode = COALESCE(?, episode)
+                    WHERE id = ?
+                """, (clean_title, year, rating, genre, quality, caption, file_id, season, episode, row[0]))
+                conn.commit()
+            else:
+                conn.execute("""
+                    INSERT INTO movie_catalog (title, year, rating, genre, quality, channel_username, message_id, caption, file_id, season, episode)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (clean_title, year, rating, genre, quality, clean_channel, message_id, caption, file_id, season, episode))
+                conn.commit()
         except Exception as e:
             logger.error(f"Save movie catalog error: {e}")
         else:

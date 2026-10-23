@@ -4797,7 +4797,7 @@ async def update_pinned_catalog(
     req_link = _get_user_request_link(chat_id or 0, bot_username=bot_username)
     if req_link and req_link != "off":
         btn_req = InlineKeyboardButton("💬 Request Film", url=req_link)
-        btn_req.style = "danger"
+        btn_req.style = "success"
         buttons.append([btn_search, btn_req])
     else:
         buttons.append([btn_search])
@@ -7422,6 +7422,37 @@ async def auto_sync_deleted_movies(client: Client, messages: List[Message]):
             await update_pinned_catalog(client, channel)
     except Exception as e:
         logger.error(f"Error handling deleted messages sync: {e}")
+
+
+@app.on_edited_message(filters.channel)
+async def auto_sync_edited_movie_post(client: Client, msg: Message):
+    """Automatically updates movie metadata in catalog when a channel post is edited,
+    and refreshes the pinned catalog message in real-time."""
+    if not msg or not msg.chat:
+        return
+
+    clean_channel = (msg.chat.username or "").lstrip("@").strip().lower()
+    if not clean_channel:
+        return
+
+    try:
+        info = parse_movie_from_channel_message(msg)
+        if info:
+            _engine.cache.save_movie_post(
+                title=info["title"],
+                year=info["year"],
+                rating=info["rating"],
+                genre=info["genre"],
+                quality=info["quality"],
+                channel_username=clean_channel,
+                message_id=info["message_id"],
+                caption=info["caption"],
+                file_id=info.get("file_id")
+            )
+            logger.info(f"Updated edited movie #{msg.id} in @{clean_channel}: {info['title']} (rating: {info['rating']})")
+            await update_pinned_catalog(client, clean_channel)
+    except Exception as e:
+        logger.error(f"Error handling edited channel message #{msg.id}: {e}")
 
 
 @app.on_message(filters.channel & (filters.service | filters.pinned_message))
