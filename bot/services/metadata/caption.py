@@ -13,6 +13,8 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 
+from .hashtags import generate_smart_hashtags
+
 
 class CaptionGenerator:
     """Generates clean Telegram HTML article post captions."""
@@ -195,6 +197,40 @@ class CaptionGenerator:
         spec_lines.append("</blockquote>")
 
         lines.extend(spec_lines)
+
+        # 4. Expandable Block: Tonton Juga Film Serupa
+        if f["clean_wm"] and f["genre"]:
+            try:
+                from .cache import MetadataCache
+                c = self.cache or MetadataCache()
+                if hasattr(c, "get_similar_movies"):
+                    sims = c.get_similar_movies(f["clean_wm"], genre=f["genre"], exclude_title=f["title"], limit=2)
+                    if sims:
+                        sim_lines = [
+                            "",
+                            "<blockquote expandable>",
+                            "🍿 <b>TONTON JUGA FILM SERUPA:</b>",
+                        ]
+                        for sm in sims:
+                            sm_title = html.escape(sm.get("title") or "Film")
+                            sm_year = f" ({sm['year']})" if sm.get("year") else ""
+                            sm_mid = sm.get("message_id")
+                            sim_lines.append(f'• <a href="https://t.me/{f["clean_wm"]}/{sm_mid}">🎬 {sm_title}{sm_year}</a>')
+                        sim_lines.append("</blockquote>")
+                        lines.extend(sim_lines)
+            except Exception:
+                pass
+
+        # 5. Smart Hashtags
+        tags = generate_smart_hashtags(
+            title=f["title"],
+            year=f["year"],
+            genre=f["genre"],
+            actors=f["actors"]
+        )
+        if tags:
+            lines.append("")
+            lines.append(html.escape(tags))
 
         return self._clamp_caption(lines, synopsis, synopsis_idx)
 

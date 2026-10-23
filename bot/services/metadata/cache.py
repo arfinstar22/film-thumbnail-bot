@@ -476,6 +476,43 @@ class MetadataCache:
         dedup_results.sort(key=lambda x: (x.get("title") or "").lower())
         return dedup_results
 
+    def get_similar_movies(
+        self,
+        channel_username: str,
+        genre: Optional[str] = None,
+        exclude_title: Optional[str] = None,
+        limit: int = 3
+    ) -> List[Dict[str, Any]]:
+        """Find up to `limit` published movies from the same channel sharing similar genres."""
+        if not channel_username or not genre:
+            return []
+
+        movies = self.get_deduplicated_catalog(channel_username)
+        if not movies:
+            return []
+
+        genre_tokens = [g.strip().lower() for g in genre.replace("/", ",").split(",") if len(g.strip()) >= 3]
+        if not genre_tokens:
+            return []
+
+        exclude_clean = (exclude_title or "").strip().lower()
+
+        candidates = []
+        for m in movies:
+            m_title = (m.get("title") or "").strip()
+            if not m_title or not m.get("message_id"):
+                continue
+            if exclude_clean and m_title.lower() == exclude_clean:
+                continue
+
+            m_genre = (m.get("genre") or "").lower()
+            score = sum(1 for gt in genre_tokens if gt in m_genre)
+            if score > 0:
+                candidates.append((score, int(m.get("message_id", 0)), m))
+
+        candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        return [c[2] for c in candidates[:limit]]
+
     def search_catalog(self, query: str = "", limit: int = 8, channel_username: Optional[str] = None) -> List[Dict[str, Any]]:
         raw_items = []
         try:

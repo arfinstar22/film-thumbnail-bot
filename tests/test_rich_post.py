@@ -1,4 +1,9 @@
+import os
+import sys
 import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from bot.services.metadata.rich_post import build_rich_article_payload
 
 
@@ -71,6 +76,60 @@ class TestRichArticlePost(unittest.TestCase):
         self.assertIn("film_video", media_ids)
         self.assertIn("banner_img", media_ids)
         self.assertIn("poster_img", media_ids)
+
+        # Check smart hashtags
+        self.assertIn("#IparItuBenalu", html_content)
+        self.assertIn("#Film2026", html_content)
+        self.assertIn("#Drama", html_content)
+
+    def test_similar_movies_catalog(self):
+        from bot.services.metadata.cache import MetadataCache
+        import tempfile
+        import os
+
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
+            db_path = tf.name
+
+        try:
+            cache = MetadataCache(db_path=db_path)
+            cache.save_movie_post(
+                title="Pengabdi Setan",
+                year=2017,
+                rating="7.2",
+                genre="Horor, Misteri",
+                quality="1080p",
+                channel_username="testchannel",
+                message_id=101
+            )
+            cache.save_movie_post(
+                title="Siksa Kubur",
+                year=2024,
+                rating="7.0",
+                genre="Horor, Thriller",
+                quality="1080p",
+                channel_username="testchannel",
+                message_id=102
+            )
+            cache.save_movie_post(
+                title="Dilan 1990",
+                year=2018,
+                rating="7.5",
+                genre="Romantis, Drama",
+                quality="1080p",
+                channel_username="testchannel",
+                message_id=103
+            )
+
+            # Khadam is Horor, Thriller
+            similar = cache.get_similar_movies("testchannel", genre="Horor, Thriller", exclude_title="Khadam", limit=2)
+            self.assertEqual(len(similar), 2)
+            titles = [s["title"] for s in similar]
+            self.assertIn("Siksa Kubur", titles)
+            self.assertIn("Pengabdi Setan", titles)
+            self.assertNotIn("Dilan 1990", titles)
+        finally:
+            if os.path.exists(db_path):
+                os.remove(db_path)
 
 
 if __name__ == "__main__":

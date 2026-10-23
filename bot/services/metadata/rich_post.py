@@ -21,6 +21,7 @@ import urllib.request
 import uuid
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from .hashtags import generate_smart_hashtags
 from .synopsis import ensure_indonesian_text
 
 logger = logging.getLogger(__name__)
@@ -227,9 +228,39 @@ def build_rich_article_payload(
             f"</details>"
         )
 
+    # 7. EXPANDABLE DETAILS — Tonton Juga Film Serupa (Rekomendasi Pintar Katalog Channel)
+    if clean_wm and genre:
+        try:
+            from .cache import MetadataCache
+            _mc = MetadataCache()
+            similar_movies = _mc.get_similar_movies(clean_wm, genre=genre, exclude_title=title, limit=3)
+            if similar_movies:
+                sim_links = []
+                for sm in similar_movies:
+                    sm_title = html_mod.escape(sm.get("title") or "Film")
+                    sm_year = f" ({sm['year']})" if sm.get("year") else ""
+                    sm_mid = sm.get("message_id")
+                    sm_genre = f" — <i>{html_mod.escape(sm['genre'])}</i>" if sm.get("genre") else ""
+                    sim_links.append(f'• <a href="https://t.me/{clean_wm}/{sm_mid}">🎬 <b>{sm_title}{sm_year}</b>{sm_genre}</a>')
+
+                sim_body = "<br/>\n".join(sim_links)
+                html_parts.append(
+                    f"<details>\n"
+                    f"<summary>🍿 Tonton Juga Film Serupa</summary>\n"
+                    f"{sim_body}\n"
+                    f"</details>"
+                )
+        except Exception as se:
+            logger.debug(f"Failed to fetch similar movies: {se}")
+
+    # 8. SMART HASHTAGS
+    hashtags = generate_smart_hashtags(title=title, year=year, genre=genre, actors=actors)
+    if hashtags:
+        html_parts.append(f"<p>{html_mod.escape(hashtags)}</p>")
+
     html_parts.append("<hr/>")
 
-    # 7. FOOTER
+    # 9. FOOTER
     html_parts.append(f"<footer>🍿 Channel Resmi: {channel_display}</footer>")
 
     # Compile rich_message object
