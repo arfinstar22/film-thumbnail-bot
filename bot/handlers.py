@@ -37,10 +37,15 @@ from .services.metadata.cache import WIB, get_next_prime_time_slots, normalize_m
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-if SESSION_STRING:
+if BOT_TOKEN:
+    masked_tok = BOT_TOKEN[:10] + "..." + BOT_TOKEN[-4:] if len(BOT_TOKEN) > 14 else "NONE"
+    logger.info("🔑 Inisialisasi Client dengan BOT_TOKEN: %s", masked_tok)
+    app = Client("thumb_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
+elif SESSION_STRING:
+    logger.info("🔑 Inisialisasi Client dengan SESSION_STRING (panjang %s)", len(SESSION_STRING))
     app = Client("thumb_bot", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING, in_memory=True)
 else:
-    app = Client("thumb_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
+    raise RuntimeError("BOT_TOKEN atau SESSION_STRING harus diisi.")
 
 # Defense-in-depth: Safely handle expired callback query answers across all handlers
 _orig_cb_answer = CallbackQuery.answer

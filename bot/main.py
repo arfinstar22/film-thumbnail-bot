@@ -12,6 +12,7 @@ from pyrogram import idle
 from pyrogram.errors import FloodWait, SessionRevoked
 
 from .handlers import app, on_bot_startup
+from .config import BOT_TOKEN
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
@@ -111,9 +112,14 @@ def run_bot():
             )
             time.sleep(wait_time + 5)
         except SessionRevoked as e:
-            logging.error(f"⚠️ Telegram SessionRevoked terdeteksi ({e}). Membersihkan file sesi usang...")
+            token_preview = (BOT_TOKEN[:10] + "..." + BOT_TOKEN[-4:]) if BOT_TOKEN and len(BOT_TOKEN) > 14 else str(BOT_TOKEN)
+            logging.error(
+                f"🚨 TELEGRAM [401 SESSION_REVOKED]: Sesi/token di server ini sudah DI-REVOKE oleh Telegram!\n"
+                f"ℹ️ Token yang aktif di environment server: {token_preview}\n"
+                f"👉 Harap update BOT_TOKEN di Dashboard hosting (Render/AWS) dengan token bot baru!"
+            )
             _clean_stale_sessions()
-            time.sleep(3)
+            time.sleep(15)
         except (KeyboardInterrupt, SystemExit):
             break
         except Exception as e:
