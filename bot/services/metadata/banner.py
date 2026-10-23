@@ -105,8 +105,8 @@ class BannerGenerator:
         backdrop_img = _load_image(metadata.get("backdrop_url")) if metadata.get("backdrop_url") else None
         bg_source = backdrop_img or poster_img
 
-        # 2. Base Canvas & Cinematic Blurred Background
-        canvas = Image.new("RGBA", (self.WIDTH, self.HEIGHT), (15, 18, 25, 255))
+        # 2. Base Canvas & Cinematic Atmospheric Background
+        canvas = Image.new("RGBA", (self.WIDTH, self.HEIGHT), (12, 14, 20, 255))
         if bg_source:
             pw, ph = bg_source.size
             scale = max(self.WIDTH / pw, self.HEIGHT / ph)
@@ -115,24 +115,37 @@ class BannerGenerator:
             left = (nw - self.WIDTH) // 2
             top = (nh - self.HEIGHT) // 2
             bg = bg.crop((left, top, left + self.WIDTH, top + self.HEIGHT))
-            bg = bg.filter(ImageFilter.GaussianBlur(radius=28))
+            bg = bg.filter(ImageFilter.GaussianBlur(radius=18))
             canvas.paste(bg, (0, 0))
 
-        # 3. Apply Dark Cinematic Vignette & Gradient Overlays
+        # 3. Apply Multi-Stage Film Vignette & Horizontal Contrast Gradient
         overlay = Image.new("RGBA", (self.WIDTH, self.HEIGHT), (0, 0, 0, 0))
         draw_ov = ImageDraw.Draw(overlay)
+        # Horizontal gradient: Darker on left (under poster/text) transitioning smoothly
         for x in range(self.WIDTH):
-            alpha = int(145 + (x / self.WIDTH) * 95)
-            draw_ov.line([(x, 0), (x, self.HEIGHT)], fill=(10, 13, 20, alpha))
-        canvas = Image.alpha_composite(canvas, overlay)
+            if x < 480:
+                alpha = int(210 + (1.0 - x / 480.0) * 35)  # 245 -> 210 on left
+            else:
+                progress = (x - 480) / float(self.WIDTH - 480)
+                alpha = int(210 - progress * 80)          # 210 -> 130 on right
+            draw_ov.line([(x, 0), (x, self.HEIGHT)], fill=(8, 10, 16, alpha))
 
+        # Subtle vertical vignette (top & bottom edges)
+        for y in range(80):
+            top_a = int(140 * (1.0 - y / 80.0))
+            draw_ov.line([(0, y), (self.WIDTH, y)], fill=(5, 6, 10, top_a))
+            bot_y = self.HEIGHT - 1 - y
+            bot_a = int(160 * (1.0 - y / 80.0))
+            draw_ov.line([(0, bot_y), (self.WIDTH, bot_y)], fill=(5, 6, 10, bot_a))
+
+        canvas = Image.alpha_composite(canvas, overlay)
         draw = ImageDraw.Draw(canvas)
 
-        # 4. Render Poster Box (Left Side)
-        poster_x = 70
-        poster_y = 65
-        poster_w = 380
-        poster_h = 590
+        # 4. Render Floating 3D Poster (Left Side)
+        poster_x = 60
+        poster_y = 55
+        poster_w = 390
+        poster_h = 610
 
         if poster_img:
             pw, ph = poster_img.size
@@ -143,32 +156,52 @@ class BannerGenerator:
             draw_px = poster_x + (poster_w - fit_w) // 2
             draw_py = poster_y + (poster_h - fit_h) // 2
 
-            # Drop shadow
-            shadow = Image.new("RGBA", (fit_w + 30, fit_h + 30), (0, 0, 0, 0))
-            s_draw = ImageDraw.Draw(shadow)
-            s_draw.rounded_rectangle([10, 10, fit_w + 20, fit_h + 20], radius=16, fill=(0, 0, 0, 190))
-            shadow = shadow.filter(ImageFilter.GaussianBlur(radius=10))
-            canvas.paste(shadow, (draw_px - 5, draw_py - 5), shadow)
+            # Realistic Multi-Layer Floating Drop Shadow
+            for s_rad, s_alpha in [(22, 110), (12, 160), (4, 210)]:
+                shadow = Image.new("RGBA", (fit_w + s_rad * 2, fit_h + s_rad * 2), (0, 0, 0, 0))
+                s_draw = ImageDraw.Draw(shadow)
+                s_draw.rounded_rectangle([s_rad, s_rad + 6, fit_w + s_rad, fit_h + s_rad + 6], radius=18, fill=(0, 0, 0, s_alpha))
+                shadow = shadow.filter(ImageFilter.GaussianBlur(radius=s_rad // 2))
+                canvas.paste(shadow, (draw_px - s_rad, draw_py - s_rad), shadow)
 
-            # Rounded poster mask
+            # Rounded poster mask with subtle corner radius
             mask = Image.new("L", (fit_w, fit_h), 0)
             mask_draw = ImageDraw.Draw(mask)
-            mask_draw.rounded_rectangle([0, 0, fit_w, fit_h], radius=14, fill=255)
+            mask_draw.rounded_rectangle([0, 0, fit_w, fit_h], radius=16, fill=255)
             canvas.paste(fitted_poster, (draw_px, draw_py), mask)
 
-            # Sleek Border around poster
+            # Elegant Sleek Glass Border
             draw.rounded_rectangle(
                 [draw_px, draw_py, draw_px + fit_w, draw_py + fit_h],
-                radius=14,
-                outline=(255, 255, 255, 60),
+                radius=16,
+                outline=(255, 255, 255, 65),
                 width=2
             )
+
+            # Top Rated Pill Badge on poster if rating >= 7.0
+            r_num = 0.0
+            if rating:
+                m_r = re.search(r"([\d\.]+)", str(rating))
+                if m_r:
+                    try:
+                        r_num = float(m_r.group(1))
+                    except ValueError:
+                        pass
+            if r_num >= 7.0:
+                ribbon_txt = "★ POPULAR" if r_num < 8.0 else "★ TOP RATED"
+                r_box = draw.textbbox((0, 0), ribbon_txt, font=self.font_pill)
+                rw = r_box[2] - r_box[0] + 20
+                rh = 28
+                rx0 = draw_px + 14
+                ry0 = draw_py + 14
+                draw.rounded_rectangle([rx0, ry0, rx0 + rw, ry0 + rh], radius=6, fill=(180, 83, 9, 230), outline=(245, 158, 11, 240), width=1)
+                draw.text((rx0 + 10, ry0 + 5), ribbon_txt, fill=(255, 251, 235), font=self.font_pill)
         else:
             draw.rounded_rectangle(
                 [poster_x, poster_y, poster_x + poster_w, poster_y + poster_h],
-                radius=16,
-                fill=(22, 27, 38, 220),
-                outline=(255, 255, 255, 40),
+                radius=18,
+                fill=(18, 22, 32, 230),
+                outline=(255, 255, 255, 45),
                 width=2
             )
             draw.text(
@@ -179,33 +212,50 @@ class BannerGenerator:
                 anchor="mm"
             )
 
-        # 5. Render Info Section (Right Side)
+        # 5. Right Info Section (x = 490 to 1220)
         info_x = 490
-        curr_y = 65
+        curr_y = 55
 
-        # Top Pill (Clean typography, no missing emoji)
-        top_tag = "PREMIERE  •  FILM INDONESIA"
+        # Top Header Bar: Premiere Tag (Left) + Frosted Glass Watermark Badge (Right)
+        top_tag = "CINEMA PREMIERE  •  INDONESIA"
         t_box = draw.textbbox((0, 0), top_tag, font=self.font_pill)
-        tw = t_box[2] - t_box[0] + 28
-        th = 32
+        tw = t_box[2] - t_box[0] + 24
+        th = 30
         draw.rounded_rectangle(
             [info_x, curr_y, info_x + tw, curr_y + th],
-            radius=16,
-            fill=(255, 255, 255, 20),
-            outline=(255, 255, 255, 40),
+            radius=15,
+            fill=(30, 41, 59, 180),
+            outline=(56, 189, 248, 160),
             width=1
         )
-        draw.text((info_x + 14, curr_y + 7), top_tag, fill=(230, 240, 255), font=self.font_pill)
+        draw.text((info_x + 12, curr_y + 6), top_tag, fill=(186, 230, 253), font=self.font_pill)
+
+        # Frosted Glass Watermark Pill on the far right
+        wm_label = wm.upper()
+        wm_box = draw.textbbox((0, 0), wm_label, font=self.font_subtitle)
+        wm_w = wm_box[2] - wm_box[0] + 28
+        wm_h = 36
+        wm_x0 = self.WIDTH - wm_w - 60
+        wm_y0 = curr_y - 3
+        draw.rounded_rectangle(
+            [wm_x0, wm_y0, wm_x0 + wm_w, wm_y0 + wm_h],
+            radius=18,
+            fill=(15, 23, 42, 210),
+            outline=(14, 165, 233, 200),
+            width=2
+        )
+        draw.text((wm_x0 + 14, wm_y0 + 6), wm_label, fill=(240, 249, 255), font=self.font_subtitle)
+
         curr_y += th + 18
 
-        # Title (Big Bold, smart wrap)
+        # Title (Big Bold with subtle text shadow, smart line break)
         title_lines = []
         words = title.split()
         current_line = []
         for w in words:
             test_line = " ".join(current_line + [w])
             bbox = draw.textbbox((0, 0), test_line, font=self.font_title)
-            if (bbox[2] - bbox[0]) > 700:
+            if (bbox[2] - bbox[0]) > 680:
                 if current_line:
                     title_lines.append(" ".join(current_line))
                     current_line = [w]
@@ -217,102 +267,125 @@ class BannerGenerator:
         if current_line:
             title_lines.append(" ".join(current_line))
 
-        for i, tl in enumerate(title_lines[:2]):
+        for tl in title_lines[:2]:
+            # Soft shadow
+            draw.text((info_x + 2, curr_y + 2), tl, fill=(0, 0, 0, 180), font=self.font_title)
             draw.text((info_x, curr_y), tl, fill=(255, 255, 255), font=self.font_title)
-            curr_y += 44
-        curr_y += 4
+            curr_y += 46
+        curr_y += 2
 
-        # Year & Duration Line
-        meta_sub_parts = []
+        # Sub-header: Year, Duration, Country & Rating Pill
+        meta_items = []
         if year:
-            meta_sub_parts.append(str(year))
+            meta_items.append(str(year))
         if duration:
-            meta_sub_parts.append(str(duration))
-        if meta_sub_parts:
-            sub_str = "   •   ".join(meta_sub_parts)
-            draw.text((info_x, curr_y), sub_str, fill=(175, 195, 220), font=self.font_subtitle)
-            curr_y += 32
+            meta_items.append(str(duration))
+        meta_items.append("Indonesia")
 
-        # Rating (using Unicode black star U+2605 in gold)
+        sub_text = "   •   ".join(meta_items)
+        draw.text((info_x, curr_y + 4), sub_text, fill=(186, 202, 224), font=self.font_subtitle)
+
+        # Rating Badge (Pill)
         if rating:
-            clean_rating = str(rating).replace("• IMDb", "").replace("IMDb", "").strip()
-            draw.text((info_x, curr_y), f"★ {clean_rating} • IMDb", fill=(255, 205, 55), font=self.font_subtitle)
-            curr_y += 32
+            clean_rating = str(rating).replace("• IMDb", "").replace("IMDb", "").replace("• TMDb", "").replace("TMDb", "").strip()
+            r_str = f"★ {clean_rating}"
+            r_box = draw.textbbox((0, 0), r_str, font=self.font_subtitle)
+            rw = r_box[2] - r_box[0] + 24
+            rh = 32
+            rx = info_x + draw.textbbox((0, 0), sub_text, font=self.font_subtitle)[2] + 24
+            if rx + rw < self.WIDTH - 60:
+                draw.rounded_rectangle([rx, curr_y, rx + rw, curr_y + rh], radius=16, fill=(45, 30, 5, 220), outline=(245, 158, 11, 220), width=1)
+                draw.text((rx + 12, curr_y + 4), r_str, fill=(251, 191, 36), font=self.font_subtitle)
 
-        # Genre
+        curr_y += 42
+
+        # Metadata Specs (Genre, Sutradara, Pemeran)
         if genre:
-            draw.text((info_x, curr_y), "GENRE :", fill=(140, 160, 185), font=self.font_label)
-            genre_val = str(genre)[:42] + ("..." if len(str(genre)) > 42 else "")
-            draw.text((info_x + 85, curr_y), genre_val, fill=(235, 240, 250), font=self.font_body)
-            curr_y += 28
-
-        # Director
-        if director:
-            draw.text((info_x, curr_y), "SUTRADARA :", fill=(140, 160, 185), font=self.font_label)
-            dir_val = str(director)[:38] + ("..." if len(str(director)) > 38 else "")
-            draw.text((info_x + 130, curr_y), dir_val, fill=(235, 240, 250), font=self.font_body)
-            curr_y += 28
-
-        # Actors
-        if actors:
-            draw.text((info_x, curr_y), "PEMERAN :", fill=(140, 160, 185), font=self.font_label)
-            act_val = str(actors)[:38] + ("..." if len(str(actors)) > 38 else "")
-            draw.text((info_x + 105, curr_y), act_val, fill=(235, 240, 250), font=self.font_body)
+            draw.text((info_x, curr_y), "GENRE", fill=(56, 189, 248), font=self.font_label)
+            genre_val = str(genre)[:46] + ("..." if len(str(genre)) > 46 else "")
+            draw.text((info_x + 130, curr_y), genre_val, fill=(241, 245, 249), font=self.font_body)
             curr_y += 30
 
-        # Quality Badges (Pills)
+        if director:
+            draw.text((info_x, curr_y), "SUTRADARA", fill=(56, 189, 248), font=self.font_label)
+            dir_val = str(director)[:42] + ("..." if len(str(director)) > 42 else "")
+            draw.text((info_x + 130, curr_y), dir_val, fill=(241, 245, 249), font=self.font_body)
+            curr_y += 30
+
+        if actors:
+            draw.text((info_x, curr_y), "PEMERAN", fill=(56, 189, 248), font=self.font_label)
+            act_val = str(actors)[:42] + ("..." if len(str(actors)) > 42 else "")
+            draw.text((info_x + 130, curr_y), act_val, fill=(241, 245, 249), font=self.font_body)
+            curr_y += 32
+
+        # Quality & Tech Badges (Pills)
         badges = []
         if res:
-            res_label = "1080p Full HD" if res == "1080p" else ("2160p 4K" if res == "2160p" else res)
-            badges.append((res_label, (40, 160, 240)))
+            res_label = "2160p 4K UHD" if res == "2160p" else ("1080p Full HD" if res == "1080p" else res)
+            badges.append((res_label, (14, 165, 233)))   # Sky Blue
+        audio_preset = metadata.get("audio") or ac
+        if audio_preset:
+            badges.append((str(audio_preset).upper(), (16, 185, 129))) # Emerald
+        sub_preset = metadata.get("subtitle")
+        if sub_preset:
+            badges.append((str(sub_preset).upper(), (139, 92, 246)))   # Purple
         if src:
-            badges.append((src, (70, 80, 100)))
-        if ac:
-            badges.append((ac, (70, 80, 100)))
+            badges.append((str(src).upper(), (100, 116, 139)))        # Slate
 
         badge_x = info_x
-        curr_y += 6
-        for b_text, b_col in badges:
+        curr_y += 4
+        for b_text, b_col in badges[:4]:
             b_box = draw.textbbox((0, 0), b_text, font=self.font_badge)
             bw = b_box[2] - b_box[0] + 24
             bh = 28
+            if badge_x + bw > self.WIDTH - 60:
+                break
             draw.rounded_rectangle(
                 [badge_x, curr_y, badge_x + bw, curr_y + bh],
                 radius=8,
-                fill=(b_col[0], b_col[1], b_col[2], 55),
-                outline=(b_col[0], b_col[1], b_col[2], 180),
+                fill=(b_col[0], b_col[1], b_col[2], 65),
+                outline=(b_col[0], b_col[1], b_col[2], 210),
                 width=1
             )
             draw.text((badge_x + 12, curr_y + 5), b_text, fill=(255, 255, 255), font=self.font_badge)
             badge_x += bw + 12
 
-        # 6. DEDICATED CHANNEL WATERMARK SHOWCASE CARD (Fills the bottom area perfectly!)
-        card_x = info_x
-        card_y = 505
-        card_w = 720
-        card_h = 150
+        # 6. Sleek Modern Bottom Branding Bar (Apple TV / Streaming style)
+        bar_y0 = 600
+        bar_y1 = 665
+        bar_x0 = info_x
+        bar_x1 = self.WIDTH - 60
 
-        # Glassmorphic card container with glowing cyan border
         draw.rounded_rectangle(
-            [card_x, card_y, card_x + card_w, card_y + card_h],
-            radius=16,
-            fill=(20, 26, 40, 220),
-            outline=(56, 189, 248, 120),
-            width=2
-        )
-
-        # Inner decorative highlight line
-        draw.line(
-            [(card_x + 20, card_y + 36), (card_x + card_w - 20, card_y + 36)],
-            fill=(255, 255, 255, 25),
+            [bar_x0, bar_y0, bar_x1, bar_y1],
+            radius=14,
+            fill=(15, 23, 42, 220),
+            outline=(56, 189, 248, 90),
             width=1
         )
 
-        # Card Content
-        draw.text((card_x + 24, card_y + 14), "CHANNEL RESMI TELEGRAM", fill=(56, 189, 248), font=self.font_card_tag)
-        draw.text((card_x + 24, card_y + 45), wm.upper(), fill=(255, 255, 255), font=self.font_card_wm)
-        draw.text((card_x + 24, card_y + 88), "Nonton & Download Film Indonesia Terlengkap", fill=(190, 205, 225), font=self.font_card_sub)
-        draw.text((card_x + 24, card_y + 116), f"Tautan Resmi : {channel_url}", fill=(125, 211, 252), font=self.font_card_sub)
+        draw.text(
+            (bar_x0 + 20, bar_y0 + 13),
+            "▶️ TAYANG EKSKLUSIF DI TELEGRAM",
+            fill=(56, 189, 248),
+            font=self.font_pill
+        )
+        draw.text(
+            (bar_x0 + 20, bar_y0 + 36),
+            "Koleksi Film Indonesia Terlengkap & Kualitas Terbaik",
+            fill=(148, 163, 184),
+            font=self.font_badge
+        )
+
+        cta_link = f"t.me/{clean_wm}"
+        c_box = draw.textbbox((0, 0), cta_link, font=self.font_subtitle)
+        cw = c_box[2] - c_box[0]
+        draw.text(
+            (bar_x1 - cw - 20, bar_y0 + 20),
+            cta_link,
+            fill=(248, 250, 252),
+            font=self.font_subtitle
+        )
 
         # 7. Convert to RGB and Save / Return
         final_rgb = canvas.convert("RGB")

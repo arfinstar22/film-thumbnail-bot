@@ -21,10 +21,10 @@ class MetadataEngine:
 
     def __init__(self, groq_api_key: Optional[str] = None):
         self.parser = FilenameParser()
-        self.caption_gen = CaptionGenerator()
         self.banner_gen = BannerGenerator()
         self.thumb_gen = ThumbnailGenerator()
         self.cache = MetadataCache()
+        self.caption_gen = CaptionGenerator(cache=self.cache)
         self.rating_service = MovieRatingService(cache=self.cache)
         self.tmdb_service = self.rating_service.tmdb
         self.synopsis_service = WikipediaSynopsisService(cache=self.cache)

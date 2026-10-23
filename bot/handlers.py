@@ -31,7 +31,7 @@ from .services.video import (
     inspect_media_streams
 )
 from .services.metadata.engine import MetadataEngine
-from .services.metadata.catalog import format_pinned_catalog, publish_or_update_telegraph_catalog
+from .services.metadata.catalog import format_pinned_catalog, publish_or_update_telegraph_catalog, publish_movie_instant_view
 from .services.metadata.cache import WIB, get_next_prime_time_slots, normalize_movie_title_and_year
 
 logging.basicConfig(level=logging.INFO)
@@ -832,6 +832,7 @@ BOT_COMMANDS_LIST = [
     BotCommand("banner", "Buat gambar banner promosi sinematik film"),
     BotCommand("setbanner", "Atur banner otomatis terbit (on/off)"),
     BotCommand("broadcast", "Kirim pengumuman ke seluruh member bot"),
+    BotCommand("captionstyle", "Pilih preset gaya tampilan caption (Minimalis/Streaming/Editorial)"),
     BotCommand("pingsupabase", "Cek koneksi & keepalive anti-jeda Supabase")
 ]
 
@@ -3003,6 +3004,121 @@ async def settmdb_cmd(client: Client, msg: Message):
         )
 
 
+@app.on_message(filters.command(["captionstyle", "setcaption"]))
+async def captionstyle_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
+    curr_style = (_engine.cache.get_setting("caption_style", "minimalist") or "minimalist").lower()
+    style_names = {
+        "minimalist": "💎 Minimalis Elegan (Chips & Spacing Bersih)",
+        "streaming": "📺 Streaming Netflix (Struktur Emoji Rinci)",
+        "editorial": "✒️ Editorial Bioskop (Cinephile Showcase)"
+    }
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                f"{'✅ ' if curr_style == 'minimalist' else ''}💎 Minimalis Elegan",
+                callback_data="set_capstyle:minimalist"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"{'✅ ' if curr_style == 'streaming' else ''}📺 Streaming Netflix",
+                callback_data="set_capstyle:streaming"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"{'✅ ' if curr_style == 'editorial' else ''}✒️ Editorial Bioskop",
+                callback_data="set_capstyle:editorial"
+            )
+        ],
+        [
+            InlineKeyboardButton("🗑️ Tutup Menu", callback_data="close_capstyle")
+        ]
+    ])
+
+    await msg.reply_text(
+        f"🎨 <b>PILIH PRESET GAYA TAMPILAN CAPTION CHANNEL:</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 <b>Gaya Aktif Saat Ini:</b>\n"
+        f"👉 <b>{style_names.get(curr_style, curr_style.title())}</b>\n\n"
+        f"<b>Karakteristik Gaya:</b>\n"
+        f"• 💎 <b>Minimalis Elegan:</b> Mengelompokkan info dalam chip horizontal <code>[1080p • Dub Indo]</code> dengan pemisah halus dan sinopsis expandable.\n"
+        f"• 📺 <b>Streaming Netflix:</b> Struktur vertikal rapi dengan ikon modern, sutradara & pemain.\n"
+        f"• ✒️ <b>Editorial Bioskop:</b> Format ulasan estetik dengan penekanan sutradara dan kutipan sinopsis sinematik.\n\n"
+        f"<i>Pilih gaya tampilan di bawah ini untuk diterapkan ke setiap postingan film:</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb
+    )
+
+
+@app.on_callback_query(filters.regex(r"^set_capstyle:(minimalist|streaming|editorial)$"))
+async def handle_set_capstyle(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Hanya Administrator!", show_alert=True)
+        return
+
+    chosen = call.matches[0].group(1)
+    _engine.cache.set_setting("caption_style", chosen)
+
+    style_names = {
+        "minimalist": "💎 Minimalis Elegan (Chips & Spacing Bersih)",
+        "streaming": "📺 Streaming Netflix (Struktur Emoji Rinci)",
+        "editorial": "✒️ Editorial Bioskop (Cinephile Showcase)"
+    }
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                f"{'✅ ' if chosen == 'minimalist' else ''}💎 Minimalis Elegan",
+                callback_data="set_capstyle:minimalist"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"{'✅ ' if chosen == 'streaming' else ''}📺 Streaming Netflix",
+                callback_data="set_capstyle:streaming"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"{'✅ ' if chosen == 'editorial' else ''}✒️ Editorial Bioskop",
+                callback_data="set_capstyle:editorial"
+            )
+        ],
+        [
+            InlineKeyboardButton("🗑️ Tutup Menu", callback_data="close_capstyle")
+        ]
+    ])
+
+    await call.answer(f"✅ Gaya caption diubah ke {chosen.title()}!", show_alert=True)
+    try:
+        await call.message.edit_text(
+            f"🎨 <b>PILIH PRESET GAYA TAMPILAN CAPTION CHANNEL:</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📌 <b>Gaya Aktif Saat Ini:</b>\n"
+            f"👉 <b>{style_names.get(chosen, chosen.title())}</b>\n\n"
+            f"✨ <i>Semua postingan film channel berikutnya akan menggunakan format tampilan ini!</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb
+        )
+    except Exception:
+        pass
+
+
+@app.on_callback_query(filters.regex(r"^close_capstyle$"))
+async def handle_close_capstyle(client: Client, call: CallbackQuery):
+    await call.answer("Ditutup")
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
+
 @app.on_message(filters.command("autojoin"))
 async def autojoin_cmd(client: Client, msg: Message):
     if not check_admin(msg):
@@ -5032,6 +5148,18 @@ async def publish_video_to_channel(
             nav_row.append(InlineKeyboardButton(f"Eps {curr_ep + 1} ▶️", url=f"https://t.me/{clean_wm}/{next_mid}"))
 
         kb_rows.append(nav_row)
+
+    # ⚡ Telegraph Instant View Digital Brochure Button
+    instant_view_url = None
+    try:
+        instant_view_url = publish_movie_instant_view(meta, watermark, _engine.cache)
+    except Exception as ie:
+        logger.debug(f"Failed to generate instant view brochure: {ie}")
+
+    if instant_view_url:
+        kb_rows.append([
+            InlineKeyboardButton("📖 Brosur Sinopsis (Instant View)", url=instant_view_url)
+        ])
 
     kb_rows.append(row1)
     kb_rows.append(row2)

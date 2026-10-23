@@ -1,6 +1,7 @@
 import json
 import logging
 import math
+import re
 import urllib.parse
 import urllib.request
 from collections import defaultdict
@@ -361,98 +362,206 @@ def format_pinned_catalog(
     bot_username: str = "",
     telegraph_url: Optional[str] = None
 ) -> str:
-    """Format an aesthetic A-Z alphabetical directory with native Telegram links.
-    If catalog exceeds character limit, switches to an Executive Hub layout with Telegraph Instant View.
+    """Format an aesthetic 'Netflix Homepage' style directory with native Telegram links,
+    top-rated curation, latest releases, genre mood navigator, and Instant View Telegraph master catalog.
     """
     clean_channel = channel_username.lstrip("@").strip()
     total = len(movies)
 
-    groups = defaultdict(list)
-    for m in movies:
-        title = (m.get("title") or "").strip()
-        first_char = title[0].upper() if title else "#"
-        if not first_char.isalpha():
-            first_char = "#"
-        groups[first_char].append(m)
-
-    sorted_keys = sorted([k for k in groups.keys() if k != "#"])
-    if "#" in groups:
-        sorted_keys.append("#")
-
-    # If small list (< 60 movies), display direct list
-    if total <= 60:
-        header = (
-            "📚 <b>KATALOG & DAFTAR ISI FILM LENGKAP</b>\n"
-            f"📢 <b>Channel:</b> @{clean_channel}\n"
-            f"🔄 <i>Diperbarui otomatis • Total: {total} Koleksi</i>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-        )
-
-        body_lines = []
-        for char in sorted_keys:
-            body_lines.append(f"🔤 <b>[ {char} ]</b>")
-            for m in groups[char]:
-                title = m["title"]
-                year_str = f" ({m['year']})" if m.get("year") else ""
-                msg_id = m["message_id"]
-                post_url = f"https://t.me/{clean_channel}/{msg_id}"
-                meta_parts = []
-                if m.get("rating"):
-                    meta_parts.append(f"⭐ {m['rating']}")
-                if m.get("quality"):
-                    meta_parts.append(f"🎞️ {m['quality']}")
-                meta_str = f" • {' '.join(meta_parts)}" if meta_parts else ""
-                body_lines.append(f"• <a href=\"{post_url}\">{title}{year_str}</a>{meta_str}")
-            body_lines.append("")
-
-        body_text = "\n".join(body_lines).strip()
-        if not body_text:
-            body_text = "<i>Belum ada film di katalog. Gunakan /synckatalog untuk memindai channel.</i>"
-
-        footer = (
-            "\n\n━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔍 <i>Gunakan tombol di bawah untuk cari film instan atau buka Instant View ⚡!</i>"
-        )
-
-        full_text = header + body_text + footer
-        if len(full_text) <= 3800:
-            return full_text
-
-    # Executive Hub layout for large catalogs (prevents character limit overflow)
     header = (
-        "📚 <b>KATALOG KOLEKSI FILM LENGKAP</b>\n"
+        "🎬 <b>PUSAT FILM INDONESIA • KATALOG RESMI</b>\n"
         f"📢 <b>Channel:</b> @{clean_channel}\n"
-        f"🎬 <b>Total Koleksi:</b> <b>{total} Film (A - Z)</b>\n"
-        "⚡ <b>Mode:</b> Instant View (Buka kilat tanpa lag)\n"
+        f"🍿 <i>Pusat Streaming & Download Film Indonesia Terlengkap</i>\n"
+        f"📊 <i>Total Koleksi: <b>{total} Judul Film</b> • Update Otomatis</i>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
     )
 
-    index_letters = " ".join([f"<b>[{k}]</b>" for k in sorted_keys])
-    index_section = (
-        "🔤 <b>Indeks Abjad Tersedia:</b>\n"
-        f"{index_letters}\n\n"
+    # 1. Top 5 Rating Tertinggi (Pilihan Komunitas)
+    rated_movies = []
+    for m in movies:
+        r_str = m.get("rating") or ""
+        m_r = re.search(r"([\d\.]+)", str(r_str))
+        if m_r:
+            try:
+                val = float(m_r.group(1))
+                if 1.0 <= val <= 10.0:
+                    rated_movies.append((val, m))
+            except ValueError:
+                pass
+
+    rated_movies.sort(key=lambda x: (x[0], x[1].get("year") or 0), reverse=True)
+    top_5 = [item[1] for item in rated_movies[:5]]
+
+    top_section = ""
+    if top_5:
+        top_lines = ["🏆 <b>TOP 5 FILM RATING TERTINGGI:</b>"]
+        for idx, m in enumerate(top_5, 1):
+            title = m["title"]
+            year_str = f" ({m['year']})" if m.get("year") else ""
+            msg_id = m.get("message_id")
+            post_url = f"https://t.me/{clean_channel}/{msg_id}" if msg_id else f"https://t.me/{clean_channel}"
+            q_badge = f" <code>[{m['quality']}]</code>" if m.get("quality") else ""
+            r_val = m.get("rating") or ""
+            clean_r = str(r_val).split('/')[0].replace('⭐', '').replace('★', '').strip() if r_val else "8.0"
+            top_lines.append(f"{idx}. ⭐ <b>{clean_r}</b> • <a href=\"{post_url}\">{title}{year_str}</a>{q_badge}")
+        top_section = "\n".join(top_lines) + "\n\n"
+
+    # 2. Update Rilis Terbaru (5 film terakhir)
+    latest_movies = sorted(movies, key=lambda x: x.get("message_id") or 0, reverse=True)[:5]
+    latest_section = ""
+    if latest_movies:
+        latest_lines = ["🆕 <b>UPDATE RILIS TERBARU:</b>"]
+        for m in latest_movies:
+            title = m["title"]
+            year_str = f" ({m['year']})" if m.get("year") else ""
+            msg_id = m.get("message_id")
+            post_url = f"https://t.me/{clean_channel}/{msg_id}" if msg_id else f"https://t.me/{clean_channel}"
+            meta_chips = []
+            if m.get("quality"):
+                meta_chips.append(m["quality"])
+            chips_str = f" <code>[{' • '.join(meta_chips)}]</code>" if meta_chips else ""
+            latest_lines.append(f"• <a href=\"{post_url}\">{title}{year_str}</a>{chips_str}")
+        latest_section = "\n".join(latest_lines) + "\n\n"
+
+    # 3. Jelajahi Koleksi Berdasarkan Mood / Genre
+    bot_ref = f"https://t.me/{bot_username}" if bot_username else f"https://t.me/{clean_channel}"
+    genre_section = (
+        "🎭 <b>JELAJAHI GENRE POPULER:</b>\n"
+        f"• 👻 <b>Horor & Misteri</b> — Kisah mistis & uji nyali\n"
+        f"• 😂 <b>Komedi & Santai</b> — Hiburan tawa keluarga\n"
+        f"• 💥 <b>Aksi & Petualangan</b> — Ketegangan & adrenalin\n"
+        f"• ❤️ <b>Romantis & Drama</b> — Cerita cinta & emosional\n"
+        f"👉 <i>Temukan rekomendasi instan via <a href=\"{bot_ref}?start=mood\">Menu Mood Bot</a></i>\n\n"
     )
 
-    latest_movies = sorted(movies, key=lambda x: x.get("message_id") or 0, reverse=True)[:8]
-    latest_lines = ["🆕 <b>Update Film Terbaru:</b>"]
-    for m in latest_movies:
-        title = m["title"]
-        year_str = f" ({m['year']})" if m.get("year") else ""
-        msg_id = m["message_id"]
-        post_url = f"https://t.me/{clean_channel}/{msg_id}"
-        meta_parts = []
-        if m.get("rating"):
-            meta_parts.append(f"⭐ {m['rating']}")
-        if m.get("quality"):
-            meta_parts.append(f"🎞️ {m['quality']}")
-        meta_str = f" • {' '.join(meta_parts)}" if meta_parts else ""
-        latest_lines.append(f"• <a href=\"{post_url}\">{title}{year_str}</a>{meta_str}")
-
-    latest_section = "\n".join(latest_lines) + "\n\n"
+    # 4. Pencarian & Navigasi Cepat
+    nav_section = (
+        "🔍 <b>NAVIGASI & PENCARIAN CEPAT:</b>\n"
+        f"• <a href=\"{bot_ref}?start=cari\">🔎 Cari Judul Film Instan</a>\n"
+        f"• <a href=\"{bot_ref}?start=request\">💬 Request Film yang Belum Ada</a>\n"
+        f"• <a href=\"{bot_ref}?start=mood\">🎲 Acak Film Sesuai Mood</a>\n\n"
+    )
 
     footer = (
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "📖 <i>Klik tombol <b>[ ⚡ BUKA KATALOG LENGKAP ]</b> di bawah untuk membuka daftar lengkap via Instant View tanpa limit karakter!</i>"
+        "📖 <i>Katalog lengkap seluruh film (A - Z) dapat dibuka tanpa batas melalui tombol <b>[ ⚡ BUKA KATALOG LENGKAP ]</b> di bawah!</i>"
     )
 
-    return header + index_section + latest_section + footer
+    return header + top_section + latest_section + genre_section + nav_section + footer
+
+
+def publish_movie_instant_view(
+    metadata: Dict[str, Any],
+    channel_username: str,
+    cache: Any,
+    post_message_id: Optional[int] = None
+) -> Optional[str]:
+    """Publishes a rich, cinematic Telegraph Instant View page for a single movie.
+    Returns the Telegraph URL for inclusion in channel post buttons.
+    """
+    clean_channel = channel_username.lstrip("@").strip()
+    title = (metadata.get("title") or "Film").strip()
+    year = metadata.get("year")
+    title_disp = f"{title} ({year})" if year else title
+
+    clean_key_title = re.sub(r'[^a-zA-Z0-9]', '', title).lower()
+    cache_key = f"telegraph_movie_{clean_channel}_{clean_key_title}_{year or 0}"
+    cached_url = cache.get_setting(cache_key, "")
+    if cached_url and str(cached_url).startswith("http"):
+        return cached_url
+
+    token = _ensure_token(cache, clean_channel)
+    if not token:
+        return None
+
+    # Telegraph Nodes
+    nodes = []
+
+    # 1. Header Image (Backdrop or Poster)
+    img_src = metadata.get("backdrop_url") or metadata.get("poster_url")
+    if img_src and str(img_src).startswith("http"):
+        nodes.append({
+            "tag": "figure",
+            "children": [
+                {"tag": "img", "attrs": {"src": img_src}},
+                {"tag": "figcaption", "children": [f"🎬 {title_disp} • Channel Resmi @{clean_channel}"]}
+            ]
+        })
+
+    # 2. Main Title & Badges
+    nodes.append({"tag": "h3", "children": [f"🎬 {title_disp}"]})
+
+    specs = []
+    if metadata.get("rating"):
+        specs.append(f"⭐ {metadata['rating']}")
+    if metadata.get("genre"):
+        specs.append(f"🎭 {metadata['genre']}")
+    if metadata.get("duration"):
+        specs.append(f"⏳ {metadata['duration']}")
+    if metadata.get("resolution"):
+        specs.append(f"🎞️ {metadata['resolution']}")
+    if metadata.get("audio"):
+        specs.append(f"🔊 {metadata['audio']}")
+    if metadata.get("subtitle"):
+        specs.append(f"💬 {metadata['subtitle']}")
+
+    if specs:
+        nodes.append({
+            "tag": "blockquote",
+            "children": [" • ".join(specs)]
+        })
+
+    nodes.append({"tag": "hr"})
+
+    # 3. Synopsis Section
+    synopsis = (metadata.get("synopsis") or metadata.get("plot") or "").strip()
+    if synopsis:
+        nodes.append({"tag": "h4", "children": ["📖 SINOPSIS RESMI"]})
+        paras = [p.strip() for p in re.split(r'\n\n+|\.\s+(?=[A-Z])', synopsis) if p.strip()]
+        if len(paras) > 1 and len(synopsis) > 200:
+            for p in paras[:4]:
+                p_text = p if p.endswith('.') else p + '.'
+                nodes.append({"tag": "p", "children": [p_text]})
+        else:
+            nodes.append({"tag": "p", "children": [synopsis]})
+        nodes.append({"tag": "hr"})
+
+    # 4. Cast & Crew Section
+    cast_children = []
+    if metadata.get("director"):
+        cast_children.append(f"🎬 Sutradara: {metadata['director']}\n")
+    if metadata.get("actors"):
+        cast_children.append(f"👥 Pemeran Utama: {metadata['actors']}\n")
+    if metadata.get("source") or metadata.get("releaseGroup"):
+        rel = f"{metadata.get('source', '')} {metadata.get('releaseGroup', '')}".strip()
+        cast_children.append(f"📦 Release / Source: {rel}\n")
+
+    if cast_children:
+        nodes.append({"tag": "h4", "children": ["👥 INFORMASI PRODUKSI"]})
+        nodes.append({"tag": "blockquote", "children": cast_children})
+        nodes.append({"tag": "hr"})
+
+    # 5. Direct Action CTA
+    channel_url = f"https://t.me/{clean_channel}"
+    watch_url = f"{channel_url}/{post_message_id}" if post_message_id else channel_url
+    nodes.append({"tag": "h4", "children": ["🍿 NONTON & DOWNLOAD FILM"]})
+    nodes.append({
+        "tag": "p",
+        "children": [
+            {"tag": "b", "children": [
+                {"tag": "a", "attrs": {"href": watch_url}, "children": ["▶️ Klik Di Sini Untuk Menonton / Download di Channel"]}
+            ]}
+        ]
+    })
+    nodes.append({
+        "tag": "p",
+        "children": [
+            {"tag": "a", "attrs": {"href": channel_url}, "children": [f"📢 Gabung Channel @{clean_channel} untuk film lainnya!"]}
+        ]
+    })
+
+    page_title = f"{title_disp} — Brosur Resmi"
+    url = _publish_page(token, page_title, nodes, clean_channel, cache, cache_key)
+    if url:
+        cache.set_setting(cache_key, url)
+    return url
