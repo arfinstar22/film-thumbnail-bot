@@ -59,6 +59,12 @@ class TestRichArticlePost(unittest.TestCase):
         self.assertIn("📦 <b>Ukuran :</b> 1.5 GB", html_content)
         self.assertIn("⏱️ <b>Durasi :</b> 1 jam 40 menit", html_content)
 
+        # Check badges row: Rating and Genre only (no duplicate resolution/duration in badges)
+        self.assertIn("<p>⭐ <b>7.0/10</b> • 🎭 Drama, Keluarga</p>", html_content)
+        badge_section = html_content.split("<details>")[0] if "<details>" in html_content else ""
+        self.assertNotIn("1080p", badge_section)
+        self.assertNotIn("1 jam 40 menit", badge_section)
+
         # Check media mapping
         self.assertIn("media", rich_msg)
         media_ids = [m["id"] for m in rich_msg["media"]]

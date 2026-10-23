@@ -15,6 +15,7 @@ import html as html_mod
 import json
 import logging
 import os
+import re
 import urllib.parse
 import urllib.request
 import uuid
@@ -125,24 +126,45 @@ def build_rich_article_payload(
             f"</details>"
         )
 
-    # 4. BADGES (Rating, Genre, Resolution, Duration)
+    # Fallback retrieve rating/genre if missing
+    if not rating and title:
+        try:
+            from .cache import MetadataCache
+            _c = MetadataCache()
+            clean_t = re.sub(r"[^\w\s]", "", title).strip()
+            c_key = f"rating_v2_{clean_t.lower()}_{year}" if year else f"rating_v2_{clean_t.lower()}"
+            cached_raw = _c.get_setting(c_key, "")
+            if cached_raw:
+                c_data = json.loads(cached_raw)
+                if c_data.get("rating"):
+                    rating = c_data["rating"]
+                if not genre and c_data.get("genre"):
+                    genre = c_data["genre"]
+                if not director and c_data.get("director"):
+                    director = c_data["director"]
+                if not actors and c_data.get("actors"):
+                    actors = c_data["actors"]
+        except Exception:
+            pass
+
+    # 4. BADGES (Rating & Genre only — zero duplication, resolution and duration stay in details)
     badge_items: List[str] = []
+
+    clean_rating = None
     if rating:
-        clean_rating = str(rating).replace("• IMDb", "").replace("IMDb", "").replace("• TMDb", "").replace("TMDb", "").strip()
-        badge_items.append(f"⭐ <b>{html_mod.escape(clean_rating)}/10</b>")
+        m = re.search(r"(\d+(?:\.\d+)?)", str(rating))
+        if m:
+            clean_rating = f"{m.group(1)}/10"
+        elif str(rating).strip().lower() not in ("none", "n/a", "-", "", "0", "0.0"):
+            clean_rating = str(rating).strip()
+
+    if clean_rating:
+        badge_items.append(f"⭐ <b>{html_mod.escape(clean_rating)}</b>")
+    else:
+        badge_items.append("⭐ <b>Belum ada</b>")
+
     if genre:
         badge_items.append(f"🎭 {html_mod.escape(str(genre))}")
-    if resolution:
-        res_label = resolution
-        if resolution == "1080p":
-            res_label = "1080p FHD"
-        elif resolution == "2160p":
-            res_label = "2160p 4K UHD"
-        elif resolution == "720p":
-            res_label = "720p HD"
-        badge_items.append(f"🎞️ {html_mod.escape(res_label)}")
-    if duration:
-        badge_items.append(f"⏳ {html_mod.escape(str(duration))}")
 
     if badge_items:
         html_parts.append(f"<p>{' • '.join(badge_items)}</p>")

@@ -10,6 +10,7 @@ Guaranteed to be valid HTML and strictly <= 1024 characters.
 
 import html
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 
@@ -48,7 +49,11 @@ class CaptionGenerator:
 
         clean_rating = ""
         if rating:
-            clean_rating = str(rating).replace("• IMDb", "").replace("IMDb", "").replace("• TMDb", "").replace("TMDb", "").strip()
+            m = re.search(r"(\d+(?:\.\d+)?)", str(rating))
+            if m:
+                clean_rating = f"{m.group(1)}/10"
+            elif str(rating).strip().lower() not in ("none", "n/a", "-", "", "0", "0.0"):
+                clean_rating = str(rating).strip()
 
         res_disp = res or ""
         if res == "1080p":
@@ -123,15 +128,14 @@ class CaptionGenerator:
 
         lines = [header]
 
-        # Badges row: Rating, Genre, Resolution
+        # Badges row: Rating & Genre only (no duplicate resolution/duration)
         badges = []
         if f["clean_rating"]:
-            badges.append(f"⭐ <b>{html.escape(f['clean_rating'])}/10</b>")
+            badges.append(f"⭐ <b>{html.escape(f['clean_rating'])}</b>")
+        else:
+            badges.append("⭐ <b>Belum ada</b>")
         if f["genre"]:
             badges.append(f"🎭 <i>{html.escape(str(f['genre']))}</i>")
-        if f["res_disp"]:
-            res_disp = "1080p FHD" if f["res"] == "1080p" else f["res_disp"]
-            badges.append(f"🎞️ <code>{html.escape(res_disp)}</code>")
         if badges:
             lines.append(" • ".join(badges))
 
