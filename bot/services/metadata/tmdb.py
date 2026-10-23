@@ -6,7 +6,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .cache import MetadataCache
 
@@ -58,7 +58,7 @@ class TMDbService:
         self.cache = cache or MetadataCache()
         self.api_key = api_key
         self.headers = {
-            "User-Agent": "FilmThumbnailBot/2.0 (Telegram Bot; TMDb Integration)",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json"
         }
 
@@ -393,3 +393,139 @@ class TMDbService:
     ) -> Dict[str, Any]:
         """Asynchronously searches TMDb in a background thread."""
         return await asyncio.to_thread(self.search_movie, title, year, is_series)
+
+    def suggest_movie_correction(self, raw_query: str) -> Optional[Dict[str, Any]]:
+        """Intelligently detects typos and release year mismatches for movie queries.
+        Returns suggestion dictionary with rich metadata if a typo/mismatch is found, or None if exact/no match.
+        """
+        if not self.is_enabled() or not raw_query or not raw_query.strip():
+            return None
+
+        from .cache import normalize_movie_title_and_year
+        clean_title, year, _ = normalize_movie_title_and_year(raw_query)
+        if not clean_title:
+            return None
+
+        clean_q = re.sub(r"[^\w\s]", " ", clean_title).strip()
+        if not clean_q:
+            return None
+
+        direct_resp = self._http_get("search/movie", {"query": clean_q, "language": "id-ID"})
+        items = direct_resp.get("results", []) if direct_resp else []
+
+        if not items:
+            direct_resp_en = self._http_get("search/movie", {"query": clean_q, "language": "en-US"})
+            items = direct_resp_en.get("results", []) if direct_resp_en else []
+
+        def _score_item(it: Dict[str, Any]) -> Tuple[float, str, Optional[int], str, int, Dict[str, Any]]:
+            import difflib
+            cand_t = it.get("title") or it.get("name") or ""
+            cand_orig = it.get("original_title") or it.get("original_name") or ""
+            d_str = it.get("release_date") or it.get("first_air_date") or ""
+            cand_y = int(d_str[:4]) if d_str and len(d_str) >= 4 and d_str[:4].isdigit() else None
+            cand_lang = it.get("original_language") or ""
+            tmdb_id = it.get("id") or 0
+
+            r_title = difflib.SequenceMatcher(None, clean_q.lower(), cand_t.lower()).ratio()
+            r_orig = difflib.SequenceMatcher(None, clean_q.lower(), cand_orig.lower()).ratio()
+            base_r = max(r_title, r_orig)
+
+            score = base_r
+            if cand_lang == "id":
+                score += 0.25
+            elif cand_lang == "ms":
+                score += 0.05
+
+            if year and cand_y:
+                if cand_y == year:
+                    score += 0.30
+                elif abs(cand_y - year) == 1:
+                    score += 0.15
+                else:
+                    score -= 0.15
+            elif not year and cand_y:
+                pop = it.get("popularity", 0.0)
+                score += min(0.10, pop / 100.0)
+
+            return score, cand_t, cand_y, cand_lang, tmdb_id, it
+
+        if items:
+            best_direct = max(items, key=lambda x: _score_item(x)[0])
+            score, cand_t, cand_y, cand_lang, tmdb_id, it = _score_item(best_direct)
+            is_exact = (cand_t.lower() == clean_q.lower() or (it.get("original_title") or "").lower() == clean_q.lower())
+
+            # Year correction (exact or near-exact title match, but year is wrong)
+            if is_exact and year and cand_y and cand_y != year:
+                meta = self.search_movie(cand_t, cand_y)
+                return {
+                    "title": cand_t,
+                    "year": cand_y,
+                    "is_typo": False,
+                    "is_year_corrected": True,
+                    "original_query": raw_query.strip(),
+                    "reason": f"Film dirilis pada tahun {cand_y} (bukan {year})",
+                    "rating": meta.get("rating") or (f"{round(it.get('vote_average', 0.0), 1)} / 10 • TMDb" if it.get("vote_average") else "-"),
+                    "genre": meta.get("genre") or "-",
+                    "plot": meta.get("plot") or it.get("overview") or "",
+                    "poster_url": meta.get("poster_url") or (f"https://image.tmdb.org/t/p/w500{it['poster_path']}" if it.get("poster_path") else "")
+                }
+
+            # Typo in direct results (e.g. "Pengabdi Satan" -> "Pengabdi Setan")
+            if not is_exact and score >= 0.90:
+                meta = self.search_movie(cand_t, cand_y)
+                return {
+                    "title": cand_t,
+                    "year": cand_y,
+                    "is_typo": True,
+                    "is_year_corrected": bool(year and cand_y and cand_y != year),
+                    "original_query": raw_query.strip(),
+                    "reason": f"Koreksi ejaan dari \"{clean_q}\"",
+                    "rating": meta.get("rating") or (f"{round(it.get('vote_average', 0.0), 1)} / 10 • TMDb" if it.get("vote_average") else "-"),
+                    "genre": meta.get("genre") or "-",
+                    "plot": meta.get("plot") or it.get("overview") or "",
+                    "poster_url": meta.get("poster_url") or (f"https://image.tmdb.org/t/p/w500{it['poster_path']}" if it.get("poster_path") else "")
+                }
+
+        # Typo candidate search (vowel substitutions)
+        vowels = "aiueo"
+        words = clean_q.split()
+        cand_queries = []
+        for w_idx, w in enumerate(words):
+            w_low = w.lower()
+            for i, ch in enumerate(w_low):
+                if ch in vowels:
+                    for v in vowels:
+                        if v != ch:
+                            nw = list(words)
+                            nw[w_idx] = w_low[:i] + v + w_low[i+1:]
+                            cand_queries.append(" ".join(nw))
+
+        all_candidates = []
+        for cq in cand_queries[:6]:
+            resp = self._http_get("search/movie", {"query": cq, "language": "id-ID"})
+            for it in (resp.get("results", []) if resp else []):
+                all_candidates.append(it)
+
+        if all_candidates:
+            best_typo = max(all_candidates, key=lambda x: _score_item(x)[0])
+            score, cand_t, cand_y, cand_lang, tmdb_id, it = _score_item(best_typo)
+            if score >= 0.95 and cand_t.lower() != clean_q.lower():
+                meta = self.search_movie(cand_t, cand_y)
+                return {
+                    "title": cand_t,
+                    "year": cand_y,
+                    "is_typo": True,
+                    "is_year_corrected": bool(year and cand_y and cand_y != year),
+                    "original_query": raw_query.strip(),
+                    "reason": f"Koreksi ejaan dari \"{clean_q}\"",
+                    "rating": meta.get("rating") or (f"{round(it.get('vote_average', 0.0), 1)} / 10 • TMDb" if it.get("vote_average") else "-"),
+                    "genre": meta.get("genre") or "-",
+                    "plot": meta.get("plot") or it.get("overview") or "",
+                    "poster_url": meta.get("poster_url") or (f"https://image.tmdb.org/t/p/w500{it['poster_path']}" if it.get("poster_path") else "")
+                }
+
+        return None
+
+    async def async_suggest_movie_correction(self, raw_query: str) -> Optional[Dict[str, Any]]:
+        """Asynchronously calls suggest_movie_correction in a background thread."""
+        return await asyncio.to_thread(self.suggest_movie_correction, raw_query)

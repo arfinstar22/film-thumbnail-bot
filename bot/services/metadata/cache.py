@@ -13,6 +13,8 @@ from .supabase_sync import SupabaseSyncService
 
 logger = logging.getLogger(__name__)
 
+WIB = datetime.timezone(datetime.timedelta(hours=7))
+
 
 def normalize_movie_title_and_year(title: str, year: Optional[int] = None) -> Tuple[str, Optional[int], str]:
     raw_t = (title or "").strip()
@@ -863,7 +865,32 @@ class MetadataCache:
             except Exception:
                 pass
 
-        return {"success": True, "is_new": True, "title": movie_title, "id": new_id}
+        count_today = self.get_user_daily_request_count(user_id)
+        remaining = max(0, 5 - count_today)
+        return {"success": True, "is_new": True, "title": movie_title, "id": new_id, "count_today": count_today, "remaining": remaining}
+
+    def get_user_daily_request_count(self, user_id: int) -> int:
+        """Returns number of movie requests submitted by the user today (WIB timezone, resets at 00:00 WIB)."""
+        conn = self._conn()
+        self._ensure_requests_table(conn)
+        now_wib = datetime.datetime.now(WIB)
+        start_of_day_wib = now_wib.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_of_day_utc = start_of_day_wib.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+        cur = conn.execute(
+            "SELECT COUNT(*) FROM movie_requests WHERE user_id = ? AND created_at >= ?",
+            (user_id, start_of_day_utc)
+        )
+        row = cur.fetchone()
+        return row[0] if row else 0
+
+    def check_user_request_quota(self, user_id: int, max_limit: int = 5) -> Tuple[bool, int, int]:
+        """Checks if the user has remaining daily movie request quota.
+        Returns: (allowed: bool, count_today: int, remaining_quota: int)"""
+        count_today = self.get_user_daily_request_count(user_id)
+        allowed = count_today < max_limit
+        remaining = max(0, max_limit - count_today)
+        return allowed, count_today, remaining
 
     def get_pending_requests(self, channel_username: Optional[str] = None, limit: int = 50) -> List[dict]:
         conn = self._conn()
