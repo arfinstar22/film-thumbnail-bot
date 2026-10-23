@@ -109,13 +109,13 @@ def build_rich_article_payload(
         })
 
     if slideshow_imgs:
-        gallery_content = (
-            f"<tg-slideshow>{''.join(slideshow_imgs)}</tg-slideshow>"
-            if len(slideshow_imgs) > 1
-            else slideshow_imgs[0]
+        imgs_html = "\n".join(slideshow_imgs)
+        html_parts.append(
+            f"<details>\n"
+            f"<summary>🖼️ Poster &amp; Banner HD</summary>\n"
+            f"{imgs_html}\n"
+            f"</details>"
         )
-        html_parts.append(f"<p>🖼️ <b>Poster &amp; Banner HD</b></p>")
-        html_parts.append(gallery_content)
 
     # 4. BADGES (Rating, Genre, Resolution, Duration)
     badge_items: List[str] = []

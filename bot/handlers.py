@@ -863,16 +863,15 @@ def get_caption_kb(message_id: int, watermark: str):
 
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🚀 Posting ke Channel", callback_data=f"post_video:{message_id}"),
-            InlineKeyboardButton("📸 Posting + Banner HD", callback_data=f"post_banner:{message_id}")
+            InlineKeyboardButton("🚀 Posting ke Channel", callback_data=f"post_banner:{message_id}")
         ],
         [
             InlineKeyboardButton("⏰ Jadwal Prime-Time", callback_data=f"sched:{message_id}"),
-            InlineKeyboardButton("🎨 Lihat Banner HD", callback_data=f"banner:{message_id}")
+            InlineKeyboardButton("👁️ Preview", callback_data=f"banner:{message_id}")
         ],
         [
-            InlineKeyboardButton("🔊 Audio & Sub", callback_data=f"audiosub:{message_id}"),
-            InlineKeyboardButton("🖼️ Perbaiki Poster", callback_data=f"fixbanner:{message_id}")
+            InlineKeyboardButton("🖼️ Perbaiki Poster", callback_data=f"fixbanner:{message_id}"),
+            InlineKeyboardButton("🔊 Audio & Sub", callback_data=f"audiosub:{message_id}")
         ],
         [
             InlineKeyboardButton("✏️ Edit Caption", callback_data=f"edit:{message_id}"),
