@@ -146,5 +146,28 @@ class TestAestheticFeatures(unittest.TestCase):
         self.assertEqual(url, "https://telegra.ph/Gundala-2019-Brochure")
 
 
+    # 5. VIBRANT COLORFUL CHANNEL BUTTONS
+    def test_channel_post_colorful_buttons(self):
+        """Should build 5 distinct color-coded buttons: Blue, Green, Red, Purple, Orange."""
+        from bot.handlers import build_channel_post_keyboard
+
+        kb = build_channel_post_keyboard(
+            watermark="@film_indonesia1",
+            title="Agak Laen",
+            year=2024,
+            trailer_url="https://youtube.com/watch?v=123",
+            instant_view_url="https://telegra.ph/Agak-Laen-2024",
+            request_link="https://t.me/filmin_bot?start=req"
+        )
+        texts = [[b.text for b in row] for row in kb.inline_keyboard]
+
+        # Row 1: Sapphire Blue
+        self.assertEqual(texts[0], ["🔷 Brosur Sinopsis (Instant View)"])
+        # Row 2: Emerald Green & Crimson Red
+        self.assertEqual(texts[1], ["🟩 Gabung @film_indonesia1", "🟥 Tonton Trailer"])
+        # Row 3: Violet Purple & Amber Orange
+        self.assertEqual(texts[2], ["🟪 Request Film", "🟧 Bagikan Film"])
+
+
 if __name__ == "__main__":
     unittest.main()

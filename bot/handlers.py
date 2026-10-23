@@ -741,6 +741,65 @@ def extract_filename(media, msg: Message) -> str:
     return name or "Film"
 
 
+def build_channel_post_keyboard(
+    watermark: str,
+    title: str,
+    year: Optional[int] = None,
+    trailer_url: Optional[str] = None,
+    instant_view_url: Optional[str] = None,
+    request_link: Optional[str] = None,
+    series_nav_row: Optional[List[InlineKeyboardButton]] = None
+) -> InlineKeyboardMarkup:
+    """Builds a luxury, color-differentiated channel button layout:
+    - 🔷 Biru: Brosur Sinopsis (Instant View)
+    - 🟩 Hijau: Gabung Channel
+    - 🟥 Merah: Tonton Trailer Resmi
+    - 🟪 Ungu: Request Film
+    - 🟧 Oranye: Bagikan Film
+    """
+    clean_wm = (watermark or "").lstrip("@").strip()
+    channel_url = f"https://t.me/{clean_wm}" if clean_wm else "https://t.me"
+
+    title_display = f"{title} ({year})" if year else title
+    share_text = f"Nonton film {title_display} di {watermark}!"
+    share_url = f"https://t.me/share/url?url={urllib.parse.quote(channel_url)}&text={urllib.parse.quote(share_text)}"
+
+    if not trailer_url:
+        trailer_query = f"Trailer {title}" + (f" {year}" if year else "")
+        trailer_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(trailer_query)}"
+
+    kb_rows = []
+
+    # Optional Series/Drakor Navigation (Row 0)
+    if series_nav_row:
+        kb_rows.append(series_nav_row)
+
+    # 1. 🔷 Brosur Sinopsis (Full Width Top Card - Sapphire Blue)
+    if instant_view_url:
+        kb_rows.append([
+            InlineKeyboardButton("🔷 Brosur Sinopsis (Instant View)", url=instant_view_url)
+        ])
+
+    # 2. 🟩 Gabung Channel (Emerald Green) + 🟥 Tonton Trailer (Crimson Red)
+    kb_rows.append([
+        InlineKeyboardButton(f"🟩 Gabung {watermark}", url=channel_url),
+        InlineKeyboardButton("🟥 Tonton Trailer", url=trailer_url)
+    ])
+
+    # 3. 🟪 Request Film (Violet Purple) + 🟧 Bagikan Film (Amber Orange)
+    if request_link and request_link.lower() != "off":
+        kb_rows.append([
+            InlineKeyboardButton("🟪 Request Film", url=request_link),
+            InlineKeyboardButton("🟧 Bagikan Film", url=share_url)
+        ])
+    else:
+        kb_rows.append([
+            InlineKeyboardButton("🟧 Bagikan Film", url=share_url)
+        ])
+
+    return InlineKeyboardMarkup(kb_rows)
+
+
 def get_caption_kb(message_id: int, watermark: str):
     clean_wm = watermark.lstrip("@").strip()
     channel_url = f"https://t.me/{clean_wm}" if clean_wm else "https://t.me"
@@ -2777,28 +2836,22 @@ async def editpost_cmd(client: Client, msg: Message):
     title_disp = f"{new_title} ({new_year})" if new_year else new_title
     channel_url = f"https://t.me/{target_channel}"
     share_text = f"Nonton film {title_disp} di @{target_channel}!"
-    share_url = f"https://t.me/share/url?url={urllib.parse.quote(channel_url)}&text={urllib.parse.quote(share_text)}"
-    trailer_url = meta.get("trailer_url")
-    if not trailer_url:
-        trailer_query = f"Trailer {new_title}" + (f" {new_year}" if new_year else "")
-        trailer_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(trailer_query)}"
-
-    row1 = [
-        InlineKeyboardButton(f"📢 Gabung @{target_channel}", url=channel_url),
-        InlineKeyboardButton("🎬 Tonton Trailer", url=trailer_url)
-    ]
     bot_uname = (client.me.username if getattr(client, "me", None) else "") or _engine.cache.get_setting("bot_username", "")
     req_link = _get_user_request_link(chat_id, bot_username=bot_uname)
-    if req_link and req_link.lower() != "off":
-        row2 = [
-            InlineKeyboardButton("💬 Request Film", url=req_link),
-            InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
-        ]
-    else:
-        row2 = [
-            InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
-        ]
-    new_kb = InlineKeyboardMarkup([row1, row2])
+    iv_url = None
+    try:
+        iv_url = publish_movie_instant_view(meta, f"@{target_channel}", _engine.cache)
+    except Exception:
+        pass
+
+    new_kb = build_channel_post_keyboard(
+        watermark=f"@{target_channel}",
+        title=new_title,
+        year=new_year,
+        trailer_url=meta.get("trailer_url"),
+        instant_view_url=iv_url,
+        request_link=req_link
+    )
 
     try:
         await client.edit_message_caption(
@@ -4227,23 +4280,12 @@ async def retarget_posts_cmd(client: Client, msg: Message):
 
             share_text = f"Nonton film {t_disp} di @{clean_wm}!"
             share_url = f"https://t.me/share/url?url={urllib.parse.quote(channel_url)}&text={urllib.parse.quote(share_text)}"
-            trailer_query = f"Trailer {t_title}" + (f" {t_year}" if t_year else "")
-            trailer_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(trailer_query)}"
-
-            row1 = [
-                InlineKeyboardButton(f"📢 Gabung @{clean_wm}", url=channel_url),
-                InlineKeyboardButton("🎬 Tonton Trailer", url=trailer_url)
-            ]
-            if req_link and req_link.lower() != "off":
-                row2 = [
-                    InlineKeyboardButton("💬 Request Film", url=req_link),
-                    InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
-                ]
-            else:
-                row2 = [
-                    InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
-                ]
-            new_kb = InlineKeyboardMarkup([row1, row2])
+            new_kb = build_channel_post_keyboard(
+                watermark=f"@{clean_wm}",
+                title=t_title,
+                year=t_year,
+                request_link=req_link
+            )
 
             for attempt in range(3):
                 try:
@@ -5024,27 +5066,13 @@ async def _update_previous_episode_post(
     # Right button: forward to newly posted episode!
     nav_row.append(InlineKeyboardButton(f"Eps {next_ep} ▶️", url=f"https://t.me/{clean_wm}/{next_mid}"))
 
-    channel_url = f"https://t.me/{clean_wm}"
-    trailer_query = f"Trailer {title_meta}"
-    trailer_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(trailer_query)}"
-    row1 = [
-        InlineKeyboardButton(f"📢 Gabung {watermark}", url=channel_url),
-        InlineKeyboardButton("🎬 Tonton Trailer", url=trailer_url)
-    ]
     req_link = _get_user_request_link(chat_id, bot_username=bot_uname)
-    share_text = f"Nonton film {title_meta} di {watermark}!"
-    share_url = f"https://t.me/share/url?url={urllib.parse.quote(channel_url)}&text={urllib.parse.quote(share_text)}"
-    if req_link and req_link.lower() != "off":
-        row2 = [
-            InlineKeyboardButton("💬 Request Film", url=req_link),
-            InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
-        ]
-    else:
-        row2 = [
-            InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
-        ]
-
-    updated_kb = InlineKeyboardMarkup([nav_row, row1, row2])
+    updated_kb = build_channel_post_keyboard(
+        watermark=watermark,
+        title=title_meta,
+        request_link=req_link,
+        series_nav_row=nav_row
+    )
     try:
         await client.edit_message_reply_markup(
             chat_id=watermark,
@@ -5084,29 +5112,11 @@ async def publish_video_to_channel(
     share_url = f"https://t.me/share/url?url={urllib.parse.quote(channel_url)}&text={urllib.parse.quote(share_text)}"
 
     trailer_url = meta.get("trailer_url")
-    if not trailer_url:
-        trailer_query = f"Trailer {title_meta}" + (f" {year_meta}" if year_meta else "")
-        trailer_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(trailer_query)}"
-
-    row1 = [
-        InlineKeyboardButton(f"📢 Gabung {watermark}", url=channel_url),
-        InlineKeyboardButton("🎬 Tonton Trailer", url=trailer_url)
-    ]
-
     bot_uname = (client.me.username if getattr(client, "me", None) else "") or _engine.cache.get_setting("bot_username", "")
     req_link = _get_user_request_link(chat_id, bot_username=bot_uname)
-    if req_link and req_link.lower() != "off":
-        row2 = [
-            InlineKeyboardButton("💬 Request Film", url=req_link),
-            InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
-        ]
-    else:
-        row2 = [
-            InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
-        ]
 
-    kb_rows = []
     # Series & Drakor Auto-Navigation Row
+    nav_row = None
     if episode_meta is not None:
         curr_ep = int(episode_meta)
         curr_s = int(season_meta or 1)
@@ -5123,28 +5133,27 @@ async def publish_video_to_channel(
         list_url = f"https://t.me/{bot_uname}?start=series_{clean_slug}" if bot_uname else f"https://t.me/{clean_wm}?q={urllib.parse.quote(title_meta)}"
         nav_row.append(InlineKeyboardButton("📑 List Episode", url=list_url))
 
-        # Next episode button (if next was posted earlier or out of order)
+        # Next episode button
         if (curr_ep + 1) in existing_eps:
             next_mid = existing_eps[curr_ep + 1]
             nav_row.append(InlineKeyboardButton(f"Eps {curr_ep + 1} ▶️", url=f"https://t.me/{clean_wm}/{next_mid}"))
 
-        kb_rows.append(nav_row)
-
-    # ⚡ Telegraph Instant View Digital Brochure Button
+    # Telegraph Instant View Digital Brochure Button
     instant_view_url = None
     try:
         instant_view_url = publish_movie_instant_view(meta, watermark, _engine.cache)
     except Exception as ie:
         logger.debug(f"Failed to generate instant view brochure: {ie}")
 
-    if instant_view_url:
-        kb_rows.append([
-            InlineKeyboardButton("📖 Brosur Sinopsis (Instant View)", url=instant_view_url)
-        ])
-
-    kb_rows.append(row1)
-    kb_rows.append(row2)
-    channel_kb = InlineKeyboardMarkup(kb_rows)
+    channel_kb = build_channel_post_keyboard(
+        watermark=watermark,
+        title=title_meta,
+        year=year_meta,
+        trailer_url=trailer_url,
+        instant_view_url=instant_view_url,
+        request_link=req_link,
+        series_nav_row=nav_row
+    )
 
     protect_flag = _engine.cache.get_protect_content(chat_id)
 
