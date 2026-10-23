@@ -131,6 +131,32 @@ class TestRichArticlePost(unittest.TestCase):
             if os.path.exists(db_path):
                 os.remove(db_path)
 
+    def test_franchise_collection_fold(self):
+        meta = {
+            "title": "Dilan 1991",
+            "year": 2019,
+            "rating": "7.0",
+            "genre": "Drama, Romantis",
+            "collection": {
+                "name": "Seri Dilan",
+                "parts": [
+                    {"title": "Dilan 1990", "year": 2018},
+                    {"title": "Dilan 1991", "year": 2019},
+                    {"title": "Milea: Suara dari Dilan", "year": 2020}
+                ]
+            }
+        }
+        payload = build_rich_article_payload(
+            chat_id="@testchannel",
+            metadata=meta,
+            watermark="@testchannel"
+        )
+        html_content = payload["rich_message"]["html"]
+        self.assertIn("🗺️ Urutan Nonton: Seri Dilan", html_content)
+        self.assertIn("1️⃣ Dilan 1990 (2018)", html_content)
+        self.assertIn("2️⃣ <b>Dilan 1991 (2019)</b> 📍 <i>(Film Ini)</i>", html_content)
+        self.assertIn("3️⃣ Milea: Suara dari Dilan (2020)", html_content)
+
 
 if __name__ == "__main__":
     unittest.main()

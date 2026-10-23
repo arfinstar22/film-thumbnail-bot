@@ -11,6 +11,7 @@ Implements native Telegram Rich Article cards:
 """
 
 import asyncio
+import difflib
 import html as html_mod
 import json
 import logging
@@ -253,14 +254,68 @@ def build_rich_article_payload(
         except Exception as se:
             logger.debug(f"Failed to fetch similar movies: {se}")
 
-    # 8. SMART HASHTAGS
+    # 8. EXPANDABLE DETAILS — Urutan Nonton (Franchise / Universe Collection)
+    collection = metadata.get("collection")
+    if not collection and title:
+        try:
+            from .cache import MetadataCache
+            _c = MetadataCache()
+            clean_t = re.sub(r"[^\w\s]", "", title).strip()
+            c_key = f"rating_v2_{clean_t.lower()}_{year}" if year else f"rating_v2_{clean_t.lower()}"
+            cached_raw = _c.get_setting(c_key, "")
+            if cached_raw:
+                c_data = json.loads(cached_raw)
+                if c_data.get("collection"):
+                    collection = c_data["collection"]
+        except Exception:
+            pass
+
+    if collection and isinstance(collection, dict) and len(collection.get("parts", [])) > 1:
+        parts = collection.get("parts", [])
+        col_name = collection.get("name") or "Universe"
+        from .cache import MetadataCache
+        _mc = MetadataCache()
+
+        number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+        part_lines = []
+        for idx, part in enumerate(parts):
+            num = number_emojis[idx] if idx < len(number_emojis) else f"{idx + 1}."
+            p_title = (part.get("title") or "Film").strip()
+            p_year = part.get("year")
+            p_year_str = f" ({p_year})" if p_year else ""
+
+            # Check if this part is the current movie being posted
+            is_current = (p_title.lower() == title.lower().strip())
+            if not is_current and year and p_year and p_year == year:
+                is_current = (difflib.SequenceMatcher(None, p_title.lower(), title.lower().strip()).ratio() >= 0.85)
+
+            if is_current:
+                part_lines.append(f"{num} <b>{html_mod.escape(p_title)}{p_year_str}</b> 📍 <i>(Film Ini)</i>")
+            else:
+                existing = _mc.find_existing_movie(p_title, p_year, clean_wm) if clean_wm else None
+                if existing and existing.get("message_id"):
+                    mid = existing["message_id"]
+                    part_lines.append(f'{num} <a href="https://t.me/{clean_wm}/{mid}">{html_mod.escape(p_title)}{p_year_str}</a>')
+                else:
+                    part_lines.append(f"{num} {html_mod.escape(p_title)}{p_year_str}")
+
+        if part_lines:
+            col_body = "<br/>\n".join(part_lines)
+            html_parts.append(
+                f"<details>\n"
+                f"<summary>🗺️ Urutan Nonton: {html_mod.escape(col_name)}</summary>\n"
+                f"{col_body}\n"
+                f"</details>"
+            )
+
+    # 9. SMART HASHTAGS
     hashtags = generate_smart_hashtags(title=title, year=year, genre=genre, actors=actors)
     if hashtags:
         html_parts.append(f"<p>{html_mod.escape(hashtags)}</p>")
 
     html_parts.append("<hr/>")
 
-    # 9. FOOTER
+    # 10. FOOTER
     html_parts.append(f"<footer>🍿 Channel Resmi: {channel_display}</footer>")
 
     # Compile rich_message object

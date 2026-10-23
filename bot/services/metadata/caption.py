@@ -97,6 +97,7 @@ class CaptionGenerator:
             "rg": rg,
             "synopsis": synopsis,
             "poster_url": poster_url,
+            "collection": metadata.get("collection"),
             "wm": wm,
             "clean_wm": clean_wm,
             "channel_url": channel_url,
@@ -221,7 +222,36 @@ class CaptionGenerator:
             except Exception:
                 pass
 
-        # 5. Smart Hashtags
+        # 5. Expandable Block: Urutan Nonton (Franchise Collection)
+        collection = f.get("collection")
+        if collection and isinstance(collection, dict) and len(collection.get("parts", [])) > 1:
+            parts = collection.get("parts", [])
+            col_name = collection.get("name") or "Universe"
+            number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+            col_lines = [
+                "",
+                "<blockquote expandable>",
+                f"🗺️ <b>URUTAN NONTON: {html.escape(col_name).upper()}</b>",
+            ]
+            for idx, part in enumerate(parts):
+                num = number_emojis[idx] if idx < len(number_emojis) else f"{idx + 1}."
+                p_title = (part.get("title") or "Film").strip()
+                p_year = part.get("year")
+                p_year_str = f" ({p_year})" if p_year else ""
+
+                is_current = (p_title.lower() == f["title"].lower().strip())
+                if is_current:
+                    col_lines.append(f"{num} <b>{html.escape(p_title)}{p_year_str}</b> 📍 <i>(Film Ini)</i>")
+                else:
+                    existing = self.cache.find_existing_movie(p_title, p_year, f["clean_wm"]) if (self.cache and f["clean_wm"]) else None
+                    if existing and existing.get("message_id"):
+                        col_lines.append(f'{num} <a href="https://t.me/{f["clean_wm"]}/{existing["message_id"]}">{html.escape(p_title)}{p_year_str}</a>')
+                    else:
+                        col_lines.append(f"{num} {html.escape(p_title)}{p_year_str}")
+            col_lines.append("</blockquote>")
+            lines.extend(col_lines)
+
+        # 6. Smart Hashtags
         tags = generate_smart_hashtags(
             title=f["title"],
             year=f["year"],

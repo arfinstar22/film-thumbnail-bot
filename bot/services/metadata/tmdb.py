@@ -385,7 +385,75 @@ class TMDbService:
         if trailer_url:
             res["trailer_url"] = trailer_url
 
+        # Franchise / Universe Collection
+        collection_raw = main.get("belongs_to_collection") or fallback.get("belongs_to_collection")
+        if collection_raw and isinstance(collection_raw, dict) and collection_raw.get("id"):
+            try:
+                cid = collection_raw["id"]
+                col_data = self.get_collection(cid)
+                if col_data and len(col_data.get("parts", [])) > 1:
+                    res["collection"] = col_data
+            except Exception as ce:
+                logger.debug(f"Failed to fetch collection {collection_raw}: {ce}")
+
         return res
+
+    def get_collection(self, collection_id: int) -> Optional[Dict[str, Any]]:
+        """Fetch details of a movie franchise/collection and all its parts in chronological order."""
+        if not self.is_enabled() or not collection_id:
+            return None
+
+        cache_key = f"tmdb_col_{collection_id}"
+        cached = self.cache.get_setting(cache_key, "")
+        if cached:
+            try:
+                return json.loads(cached)
+            except Exception:
+                pass
+
+        col = self._http_get(f"collection/{collection_id}", {"language": "id-ID"})
+        if not col or not col.get("parts"):
+            col = self._http_get(f"collection/{collection_id}", {"language": "en-US"})
+        if not col:
+            return None
+
+        raw_name = (col.get("name") or "").strip()
+        clean_name = raw_name
+        if clean_name.lower().endswith(" collection"):
+            clean_name = f"Seri {clean_name[:-11].strip()}"
+        elif clean_name.lower().endswith(" koleksi"):
+            clean_name = f"Seri {clean_name[:-8].strip()}"
+        elif not clean_name.lower().startswith("seri ") and not clean_name.lower().startswith("koleksi "):
+            clean_name = f"Seri {clean_name}"
+
+        parts_raw = col.get("parts", [])
+        clean_parts = []
+        for p in parts_raw:
+            p_title = (p.get("title") or p.get("original_title") or "").strip()
+            p_date = (p.get("release_date") or "").strip()
+            p_year = int(p_date[:4]) if p_date and len(p_date) >= 4 and p_date[:4].isdigit() else None
+            if p_title:
+                clean_parts.append({
+                    "id": p.get("id"),
+                    "title": p_title,
+                    "year": p_year,
+                    "release_date": p_date,
+                })
+
+        # Sort chronologically by release_date / year ascending
+        clean_parts.sort(key=lambda x: (x.get("release_date") or "9999", x.get("year") or 9999))
+
+        result = {
+            "id": collection_id,
+            "name": clean_name,
+            "parts": clean_parts
+        }
+        try:
+            self.cache.set_setting(cache_key, json.dumps(result))
+        except Exception:
+            pass
+
+        return result
 
     async def async_search_movie(
         self,

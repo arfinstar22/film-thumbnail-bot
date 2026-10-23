@@ -98,6 +98,8 @@ class MetadataEngine:
                     metadata["backdrop_url"] = rate_res["backdrop_url"]
                 if rate_res.get("trailer_url") and not metadata.get("trailer_url"):
                     metadata["trailer_url"] = rate_res["trailer_url"]
+                if rate_res.get("collection") and not metadata.get("collection"):
+                    metadata["collection"] = rate_res["collection"]
 
             if syn_res and not metadata.get("synopsis"):
                 metadata["synopsis"] = syn_res
