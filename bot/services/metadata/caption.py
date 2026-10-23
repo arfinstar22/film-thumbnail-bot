@@ -135,13 +135,6 @@ class CaptionGenerator:
         if badges:
             lines.append(" • ".join(badges))
 
-        # Short teaser/hook if synopsis exists
-        synopsis = (f.get("synopsis") or "").strip()
-        if synopsis:
-            first_sentence = synopsis.split(".")[0].strip()
-            if 15 <= len(first_sentence) <= 90:
-                lines.append(f"<i>{html.escape(first_sentence)}..</i>")
-
         lines.append("")
 
         # 1. Expandable Block: Poster Resmi Film & Banner HD
@@ -156,6 +149,7 @@ class CaptionGenerator:
         lines.append("")
 
         # 2. Expandable Block: Sinopsis Lengkap
+        synopsis = (f.get("synopsis") or "").strip()
         synopsis_idx = None
         if synopsis:
             synopsis_idx = len(lines)
@@ -166,24 +160,34 @@ class CaptionGenerator:
         spec_lines = [
             "<blockquote expandable>",
             "ℹ️ <b>DETAIL SPESIFIKASI & PEMAIN:</b>",
+            "📌 <b>Informasi Film:</b>",
         ]
-        if f["duration"]:
-            spec_lines.append(f"• ⏳ <b>Durasi:</b> {html.escape(str(f['duration']))}")
-        if f["res_disp"]:
-            size_part = f" ({html.escape(str(f['file_size']))})" if f["file_size"] else ""
-            spec_lines.append(f"• 🎞️ <b>Kualitas:</b> {html.escape(f['res_disp'])}{size_part}")
-        elif f["file_size"]:
-            spec_lines.append(f"• 📦 <b>Ukuran:</b> {html.escape(str(f['file_size']))}")
-        if f["actors"]:
-            spec_lines.append(f"• 👥 <b>Pemain:</b> {html.escape(str(f['actors']))}")
+        if f["year"]:
+            spec_lines.append(f"🗓️ <b>Tahun :</b> {html.escape(str(f['year']))}")
+        if f["genre"]:
+            spec_lines.append(f"🎭 <b>Genre :</b> {html.escape(str(f['genre']))}")
         if f["director"]:
-            spec_lines.append(f"• 🎬 <b>Sutradara:</b> {html.escape(str(f['director']))}")
+            spec_lines.append(f"🎬 <b>Sutradara :</b> {html.escape(str(f['director']))}")
+        if f["actors"]:
+            spec_lines.append(f"👥 <b>Pemeran :</b> {html.escape(str(f['actors']))}")
+        if f["res_disp"]:
+            spec_lines.append(f"🎞️ <b>Kualitas :</b> {html.escape(f['res_disp'])}")
+        if f["src"]:
+            spec_lines.append(f"📡 <b>Source :</b> {html.escape(str(f['src']))}")
+        if f["vc"]:
+            spec_lines.append(f"💿 <b>Video :</b> {html.escape(str(f['vc']))}")
+        if f["rg"]:
+            spec_lines.append(f"🏷️ <b>Release :</b> {html.escape(str(f['rg']))}")
+        if f["file_size"]:
+            spec_lines.append(f"📦 <b>Ukuran :</b> {html.escape(str(f['file_size']))}")
+        if f["duration"]:
+            spec_lines.append(f"⏱️ <b>Durasi :</b> {html.escape(str(f['duration']))}")
         if f["audio"]:
-            spec_lines.append(f"• 🔊 <b>Audio:</b> {html.escape(str(f['audio']))}")
+            spec_lines.append(f"🔊 <b>Audio :</b> {html.escape(str(f['audio']))}")
         if f["sub"]:
-            spec_lines.append(f"• 💬 <b>Subtitle:</b> {html.escape(str(f['sub']))}")
+            spec_lines.append(f"💬 <b>Subtitle :</b> {html.escape(str(f['sub']))}")
         if f["wm"]:
-            spec_lines.append(f"• 🍿 <b>Channel:</b> <a href=\"{html.escape(f['channel_url'], quote=True)}\">{html.escape(f['wm'])}</a>")
+            spec_lines.append(f"🍿 <b>Channel :</b> <a href=\"{html.escape(f['channel_url'], quote=True)}\">{html.escape(f['wm'])}</a>")
         spec_lines.append("</blockquote>")
 
         lines.extend(spec_lines)

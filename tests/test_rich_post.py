@@ -43,6 +43,22 @@ class TestRichArticlePost(unittest.TestCase):
         self.assertIn("<summary>ℹ️ Detail Spesifikasi &amp; Pemain</summary>", html_content)
         self.assertIn("<footer>🍿 Channel Resmi: @testchannel</footer>", html_content)
 
+        # Ensure synopsis is NOT double outside details
+        before_hr = html_content.split("<hr/>")[0]
+        self.assertNotIn("Kisah rumah tangga Rina", before_hr)
+        after_hr = html_content.split("<hr/>")[1]
+        self.assertIn("Kisah rumah tangga Rina", after_hr)
+
+        # Ensure detailed film info specifications
+        self.assertIn("📌 <b>Informasi Film:</b>", html_content)
+        self.assertIn("🗓️ <b>Tahun :</b> 2026", html_content)
+        self.assertIn("🎭 <b>Genre :</b> Drama, Keluarga", html_content)
+        self.assertIn("🎬 <b>Sutradara :</b> Budi Santoso", html_content)
+        self.assertIn("👥 <b>Pemeran :</b> Rina, Dimas, Siti", html_content)
+        self.assertIn("🎞️ <b>Kualitas :</b> 1080p • Full HD", html_content)
+        self.assertIn("📦 <b>Ukuran :</b> 1.5 GB", html_content)
+        self.assertIn("⏱️ <b>Durasi :</b> 1 jam 40 menit", html_content)
+
         # Check media mapping
         self.assertIn("media", rich_msg)
         media_ids = [m["id"] for m in rich_msg["media"]]

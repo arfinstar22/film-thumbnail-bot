@@ -135,18 +135,9 @@ def build_rich_article_payload(
     if badge_items:
         html_parts.append(f"<p>{' • '.join(badge_items)}</p>")
 
-    # Short teaser synopsis (first 1-2 sentences)
-    if synopsis:
-        sentences = [s.strip() for s in synopsis.replace("\n", " ").split(". ") if s.strip()]
-        teaser = ". ".join(sentences[:2])
-        if teaser and not teaser.endswith("."):
-            teaser += "."
-        if teaser:
-            html_parts.append(f"<p>{html_mod.escape(teaser)}</p>")
-
     html_parts.append("<hr/>")
 
-    # 5. EXPANDABLE DETAILS — Sinopsis Lengkap
+    # 5. EXPANDABLE DETAILS — Sinopsis Lengkap (hanya di dalam lipatan agar tidak double)
     if synopsis:
         clean_synopsis = html_mod.escape(synopsis)
         html_parts.append(
@@ -156,36 +147,44 @@ def build_rich_article_payload(
             f"</details>"
         )
 
-    # 6. EXPANDABLE DETAILS — Spesifikasi & Pemain
-    spec_lines: List[str] = []
-    if duration:
-        spec_lines.append(f"• ⏳ <b>Durasi:</b> {html_mod.escape(str(duration))}")
-    if resolution:
-        res_display = "1080p Full HD" if resolution == "1080p" else resolution
-        size_part = f" ({html_mod.escape(str(file_size))})" if file_size else ""
-        spec_lines.append(f"• 🎞️ <b>Kualitas:</b> {html_mod.escape(str(res_display))}{size_part}")
-    elif file_size:
-        spec_lines.append(f"• 📦 <b>Ukuran:</b> {html_mod.escape(str(file_size))}")
-    if actors:
-        spec_lines.append(f"• 👥 <b>Pemain:</b> {html_mod.escape(str(actors))}")
+    # 6. EXPANDABLE DETAILS — Spesifikasi & Pemain Lengkap
+    spec_lines: List[str] = ["📌 <b>Informasi Film:</b>"]
+    if year:
+        spec_lines.append(f"🗓️ <b>Tahun :</b> {html_mod.escape(str(year))}")
+    if genre:
+        spec_lines.append(f"🎭 <b>Genre :</b> {html_mod.escape(str(genre))}")
     if director:
-        spec_lines.append(f"• 🎬 <b>Sutradara:</b> {html_mod.escape(str(director))}")
+        spec_lines.append(f"🎬 <b>Sutradara :</b> {html_mod.escape(str(director))}")
+    if actors:
+        spec_lines.append(f"👥 <b>Pemeran :</b> {html_mod.escape(str(actors))}")
+    if resolution:
+        res_display = str(resolution)
+        if resolution == "1080p":
+            res_display = "1080p • Full HD"
+        elif resolution == "720p":
+            res_display = "720p • HD"
+        elif resolution == "2160p":
+            res_display = "2160p • 4K UHD"
+        spec_lines.append(f"🎞️ <b>Kualitas :</b> {html_mod.escape(res_display)}")
+    if source:
+        spec_lines.append(f"📡 <b>Source :</b> {html_mod.escape(str(source))}")
+    if video_codec:
+        spec_lines.append(f"💿 <b>Video :</b> {html_mod.escape(str(video_codec))}")
+    if release_group:
+        spec_lines.append(f"🏷️ <b>Release :</b> {html_mod.escape(str(release_group))}")
+    if file_size:
+        spec_lines.append(f"📦 <b>Ukuran :</b> {html_mod.escape(str(file_size))}")
+    if duration:
+        spec_lines.append(f"⏱️ <b>Durasi :</b> {html_mod.escape(str(duration))}")
     if audio:
-        spec_lines.append(f"• 🔊 <b>Audio:</b> {html_mod.escape(str(audio))}")
+        spec_lines.append(f"🔊 <b>Audio :</b> {html_mod.escape(str(audio))}")
     elif audio_codec:
         ac_str = f"{audio_codec} {audio_channels}" if audio_channels else audio_codec
-        spec_lines.append(f"• 🔊 <b>Audio:</b> {html_mod.escape(str(ac_str))}")
+        spec_lines.append(f"🔊 <b>Audio :</b> {html_mod.escape(str(ac_str))}")
     if subtitle:
-        spec_lines.append(f"• 💬 <b>Subtitle:</b> {html_mod.escape(str(subtitle))}")
-    if source:
-        src_str = source
-        if release_group:
-            src_str += f" ({release_group})"
-        spec_lines.append(f"• 📡 <b>Source:</b> {html_mod.escape(str(src_str))}")
-    if video_codec:
-        spec_lines.append(f"• 💿 <b>Video Codec:</b> {html_mod.escape(str(video_codec))}")
+        spec_lines.append(f"💬 <b>Subtitle :</b> {html_mod.escape(str(subtitle))}")
 
-    if spec_lines:
+    if len(spec_lines) > 1:
         specs_body = "<br/>\n".join(spec_lines)
         html_parts.append(
             f"<details>\n"
