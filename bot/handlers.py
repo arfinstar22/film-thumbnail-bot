@@ -28,9 +28,7 @@ from .config import (
 )
 from .services.video import (
     photo_thumbnail,
-    inspect_media_streams,
-    generate_scene_collage,
-    generate_collage_from_images
+    inspect_media_streams
 )
 from .services.metadata.engine import MetadataEngine
 from .services.metadata.catalog import format_pinned_catalog, publish_or_update_telegraph_catalog
@@ -758,7 +756,6 @@ def get_caption_kb(message_id: int, watermark: str):
             InlineKeyboardButton("🎨 Lihat Banner HD", callback_data=f"banner:{message_id}")
         ],
         [
-            InlineKeyboardButton("📸 Kolase 4-Grid", callback_data=f"collage:{message_id}"),
             InlineKeyboardButton("🔊 Audio & Sub", callback_data=f"audiosub:{message_id}")
         ],
         [
@@ -5778,7 +5775,7 @@ async def _process_video_task(client: Client, msg: Message):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-# ================= SMART BATCH REVIEW & COLLAGE & MOOD =================
+# ================= SMART BATCH REVIEW & MOOD =================
 
 async def send_batch_review_dashboard(client: Client, chat_id: int):
     jobs = _batch_collector.get(chat_id, [])
@@ -5936,159 +5933,6 @@ async def handle_batch_cancel(client: Client, call: CallbackQuery):
         "Anda tetap dapat mengunggah atau menjadwalkan film satu per satu melalui kartu pratinjau masing-masing di atas.",
         parse_mode=ParseMode.HTML
     )
-
-
-@app.on_callback_query(filters.regex(r"^collage:(\d+)$"))
-async def handle_collage_callback(client: Client, call: CallbackQuery):
-    if not check_admin(call):
-        await call.answer("⛔ Hanya Administrator!", show_alert=True)
-        return
-
-    chat_id = call.message.chat.id
-    msg_id = call.matches[0].group(1)
-    job = _jobs_by_msg.get(int(msg_id)) or _jobs.get(chat_id)
-    if not job:
-        await call.answer("Job tidak ditemukan atau kadaluarsa.", show_alert=True)
-        return
-
-    await call.answer("⏳ Menyiapkan kolase 4-grid adegan...")
-    status_msg = await call.message.reply_text("⏳ <i>Sedang membuat kolase pratinjau 4 adegan...</i>", parse_mode=ParseMode.HTML)
-
-    wm = job.get("watermark") or _get_user_watermark(chat_id)
-    title = job.get("metadata", {}).get("title") or job.get("filename") or "Film"
-    year = job.get("metadata", {}).get("year")
-    title_disp = f"{title} ({year})" if year else title
-
-    tmp = job.get("temp_dir")
-    if not tmp or not os.path.isdir(tmp):
-        tmp = tempfile.mkdtemp()
-        job["temp_dir"] = tmp
-
-    collage_out = os.path.join(tmp, f"collage_{msg_id}.jpg")
-
-    try:
-        video_path = job.get("video_path")
-        generated = False
-        if video_path and os.path.exists(video_path):
-            await generate_scene_collage(video_path, collage_out, watermark=wm)
-            generated = os.path.exists(collage_out)
-
-        if not generated:
-            raw_thumb = job.get("raw_thumb_path")
-            thumb_p = job.get("thumb_path")
-            poster_url = job.get("poster_url")
-
-            sources = []
-            if raw_thumb and os.path.exists(raw_thumb):
-                sources.append(raw_thumb)
-            if thumb_p and os.path.exists(thumb_p):
-                sources.append(thumb_p)
-
-            if poster_url and str(poster_url).startswith("http"):
-                try:
-                    import urllib.request
-                    p_file = os.path.join(tmp, "poster_downloaded.jpg")
-                    if not os.path.exists(p_file):
-                        urllib.request.urlretrieve(poster_url, p_file)
-                    if os.path.exists(p_file):
-                        sources.append(p_file)
-                except Exception:
-                    pass
-
-            if not sources and thumb_p and os.path.exists(thumb_p):
-                sources.append(thumb_p)
-
-            if sources:
-                while len(sources) < 4:
-                    sources.append(sources[0])
-                generate_collage_from_images(sources[:4], collage_out, watermark=wm)
-                generated = os.path.exists(collage_out)
-
-        if generated and os.path.exists(collage_out):
-            job["collage_path"] = collage_out
-            await status_msg.delete()
-            kb = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("🚀 Posting Kolase ke Channel", callback_data=f"post_collage:{msg_id}"),
-                    InlineKeyboardButton("🗑️ Tutup", callback_data="close_collage")
-                ]
-            ])
-            await client.send_photo(
-                chat_id=chat_id,
-                photo=collage_out,
-                caption=(
-                    f"📸 <b>KOLASE PRATINJAU ADEGAN (4-GRID HD)</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🎬 <b>Film:</b> {title_disp}\n"
-                    f"📢 <b>Watermark:</b> {wm}\n\n"
-                    f"✨ <i>Kolase ini siap dijadikan foto pratinjau promosi di channel Telegram Anda.</i>"
-                ),
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb
-            )
-        else:
-            await status_msg.edit_text("❌ Gagal membuat kolase adegan: visual tidak tersedia.")
-    except Exception as e:
-        logger.exception("Collage generation failed")
-        await status_msg.edit_text(f"❌ Error membuat kolase: <code>{e}</code>", parse_mode=ParseMode.HTML)
-
-
-@app.on_callback_query(filters.regex(r"^post_collage:(\d+)$"))
-async def handle_post_collage_callback(client: Client, call: CallbackQuery):
-    if not check_admin(call):
-        await call.answer("⛔ Hanya Administrator!", show_alert=True)
-        return
-
-    chat_id = call.message.chat.id
-    msg_id = call.matches[0].group(1)
-    job = _jobs_by_msg.get(int(msg_id)) or _jobs.get(chat_id)
-    if not job or not job.get("collage_path") or not os.path.exists(job["collage_path"]):
-        await call.answer("File kolase tidak ditemukan.", show_alert=True)
-        return
-
-    wm = job.get("watermark") or _get_user_watermark(chat_id)
-    clean_wm = (wm or "").lstrip("@").strip()
-    if not clean_wm:
-        await call.answer("Channel belum diatur.", show_alert=True)
-        return
-
-    meta = job.get("metadata", {})
-    t = meta.get("title") or job.get("filename") or "Film"
-    y = meta.get("year")
-    title_disp = f"{t} ({y})" if y else t
-
-    await call.answer("🚀 Mengirim kolase ke channel...")
-    try:
-        sent_c = await client.send_photo(
-            chat_id=f"@{clean_wm}",
-            photo=job["collage_path"],
-            caption=(
-                f"📸 <b>KOLASE ADEGAN RESMI</b>\n\n"
-                f"🎬 <b>{title_disp}</b>\n"
-                f"🍿 Tayang di channel @{clean_wm}!\n\n"
-                f"👉 <i>Tonton film lengkapnya di postingan video di atas!</i>"
-            ),
-            parse_mode=ParseMode.HTML
-        )
-        post_link = f"https://t.me/{clean_wm}/{sent_c.id}"
-        await call.message.reply_text(
-            f"✅ <b>Kolase Adegan Berhasil Terbit ke Channel!</b>\n\n"
-            f"👉 <a href=\"{post_link}\">Lihat di @{clean_wm}</a>",
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True
-        )
-    except Exception as e:
-        logger.exception("Failed to post collage")
-        await call.message.reply_text(f"❌ Gagal memposting kolase ke channel: <code>{e}</code>")
-
-
-@app.on_callback_query(filters.regex(r"^close_collage$"))
-async def handle_close_collage(client: Client, call: CallbackQuery):
-    await call.answer("Ditutup")
-    try:
-        await call.message.delete()
-    except Exception:
-        pass
 
 
 @app.on_callback_query(filters.regex(r"^probe_streams:(\d+)$"))

@@ -2,7 +2,6 @@ import asyncio
 import os
 import sys
 import unittest
-from PIL import Image
 from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -10,7 +9,7 @@ load_dotenv("/home/darfinstar/projectTumbnail/.env")
 
 from bot.services.metadata.cache import MetadataCache
 from bot.services.metadata.parser import FilenameParser
-from bot.services.video import generate_collage_from_images, inspect_media_streams
+from bot.services.video import inspect_media_streams
 
 
 class TestAdvancedFeatures(unittest.TestCase):
@@ -86,31 +85,6 @@ class TestAdvancedFeatures(unittest.TestCase):
         meta4 = self.parser.parse("Avatar.2009.Dual.Audio.1080p.mkv")
         self.assertEqual(meta4.get("audio"), "Dual Audio (ID+EN)")
 
-    # ================= 3. SCENE COLLAGE (4-GRID) =================
-    def test_generate_collage_from_images(self):
-        """Should stitch 4 images into a 1280x720 HD collage with subtle watermark badge."""
-        temp_tiles = [f"/tmp/tile_{i}.jpg" for i in range(4)]
-        colors = [(200, 50, 50), (50, 200, 50), (50, 50, 200), (200, 200, 50)]
-        for i, path in enumerate(temp_tiles):
-            Image.new("RGB", (320, 180), colors[i]).save(path)
-
-        out_collage = "/tmp/test_final_collage.jpg"
-        if os.path.exists(out_collage):
-            os.remove(out_collage)
-
-        generate_collage_from_images(temp_tiles, out_collage, watermark="@film_indonesia1")
-        self.assertTrue(os.path.exists(out_collage))
-
-        with Image.open(out_collage) as img:
-            self.assertEqual(img.size, (1280, 720))
-            self.assertEqual(img.format, "JPEG")
-
-        # Cleanup
-        for path in temp_tiles:
-            if os.path.exists(path):
-                os.remove(path)
-        if os.path.exists(out_collage):
-            os.remove(out_collage)
 
     # ================= 4. SMART BATCH SCHEDULING =================
     def test_smart_batch_scheduling_queue(self):
