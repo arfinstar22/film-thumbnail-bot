@@ -345,12 +345,11 @@ def format_schedule_announcement(pending_posts: list, watermark: str, bot_userna
     lines.append("🔔 <i>Nyalakan notifikasi channel agar langsung dapat menonton saat film rilis!</i>")
 
     btn_req_url = f"https://t.me/{bot_username}?start=request" if bot_username else channel_url
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("💬 Request Judul Lain", url=btn_req_url),
-            InlineKeyboardButton("📌 Pinned Katalog A-Z", url=channel_url)
-        ]
-    ])
+    btn_req = InlineKeyboardButton("💬 Request Judul Lain", url=btn_req_url)
+    btn_req.style = "danger"
+    btn_pin = InlineKeyboardButton("📌 Pinned Katalog A-Z", url=channel_url)
+    btn_pin.style = "primary"
+    kb = InlineKeyboardMarkup([[btn_req, btn_pin]])
     return "\n".join(lines), kb
 
 
@@ -611,16 +610,22 @@ def _build_bot_api_reply_markup(reply_markup):
                 b["url"] = btn.url
             elif getattr(btn, "callback_data", None):
                 b["callback_data"] = btn.callback_data
+            elif getattr(btn, "switch_inline_query_current_chat", None) is not None:
+                b["switch_inline_query_current_chat"] = btn.switch_inline_query_current_chat
+            elif getattr(btn, "switch_inline_query", None) is not None:
+                b["switch_inline_query"] = btn.switch_inline_query
+            elif getattr(btn, "web_app", None):
+                b["web_app"] = {"url": btn.web_app.url}
 
             # Check explicit style or auto-detect based on text
             style = getattr(btn, "style", None)
             if not style:
                 text_lower = (btn.text or "").lower()
-                if "brosur" in text_lower or "sinopsis" in text_lower:
+                if "brosur" in text_lower or "sinopsis" in text_lower or "katalog" in text_lower or "eps" in text_lower:
                     style = "primary"
-                elif "gabung" in text_lower or "join" in text_lower or "bagikan" in text_lower or "share" in text_lower:
+                elif "gabung" in text_lower or "join" in text_lower or "bagikan" in text_lower or "share" in text_lower or "cari" in text_lower or "list" in text_lower:
                     style = "success"
-                elif "trailer" in text_lower or "request" in text_lower:
+                elif "trailer" in text_lower or "request" in text_lower or "tonton" in text_lower:
                     style = "danger"
 
             if style in ("primary", "success", "danger"):
@@ -3857,6 +3862,8 @@ async def post_schedule_to_channel_action(client: Client, chat_id: int) -> Tuple
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True
         )
+        if sent:
+            await _apply_channel_post_styling(channel_target, sent.id, ann_kb)
         post_link = f"https://t.me/{clean_wm}/{sent.id}" if getattr(sent, "id", None) else f"https://t.me/{clean_wm}"
         return True, (
             f"✅ <b>Jadwal Tayang Berhasil Diposting ke Channel @{clean_wm}!</b>\n\n"
@@ -4453,13 +4460,13 @@ async def send_channel_recommendation(client: Client, channel_username: str, cha
         highlight_text += f"\n<blockquote expandable>{synopsis_excerpt}</blockquote>\n"
     highlight_text += f"\n🍿 <i>Mau nonton sekarang? Langsung klik tombol di bawah untuk menuju ke videonya!</i>"
 
+    btn_watch = InlineKeyboardButton("🎬 Tonton Film Ini Sekarang", url=watch_url)
+    btn_watch.style = "primary"
+    btn_search = InlineKeyboardButton("🔍 Cari Koleksi Film Lainnya", switch_inline_query_current_chat="")
+    btn_search.style = "success"
     hl_kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🎬 Tonton Film Ini Sekarang", url=watch_url)
-        ],
-        [
-            InlineKeyboardButton("🔍 Cari Koleksi Film Lainnya", switch_inline_query_current_chat="")
-        ]
+        [btn_watch],
+        [btn_search]
     ])
 
     sent_hl = await client.send_message(
@@ -4780,17 +4787,21 @@ async def update_pinned_catalog(
 
     buttons = []
     if telegraph_url:
-        buttons.append([
-            InlineKeyboardButton(f"⚡ BUKA KATALOG LENGKAP ({len(movies)} Film)", url=telegraph_url)
-        ])
-    buttons.append([
-        InlineKeyboardButton("🔍 Cari Koleksi Film", switch_inline_query_current_chat="")
-    ])
+        btn_cat = InlineKeyboardButton(f"⚡ BUKA KATALOG LENGKAP ({len(movies)} Film)", url=telegraph_url)
+        btn_cat.style = "primary"
+        buttons.append([btn_cat])
+
+    btn_search = InlineKeyboardButton("🔍 Cari Koleksi Film", switch_inline_query_current_chat="")
+    btn_search.style = "success"
+
     req_link = _get_user_request_link(chat_id or 0, bot_username=bot_username)
     if req_link and req_link != "off":
-        buttons.append([
-            InlineKeyboardButton("💬 Request Film", url=req_link)
-        ])
+        btn_req = InlineKeyboardButton("💬 Request Film", url=req_link)
+        btn_req.style = "danger"
+        buttons.append([btn_search, btn_req])
+    else:
+        buttons.append([btn_search])
+
     catalog_kb = InlineKeyboardMarkup(buttons)
 
     pinned_key = f"pinned_catalog_{clean_channel}"
@@ -4830,6 +4841,7 @@ async def update_pinned_catalog(
                 disable_web_page_preview=True,
                 reply_markup=catalog_kb
             )
+            await _apply_channel_post_styling(channel_username, target_msg_id, catalog_kb)
             edited_successfully = True
             logger.info(f"Edited active catalog in {channel_username} (msg {target_msg_id})")
         except Exception as e:
@@ -4845,6 +4857,7 @@ async def update_pinned_catalog(
                 reply_markup=catalog_kb
             )
             target_msg_id = new_msg.id
+            await _apply_channel_post_styling(channel_username, target_msg_id, catalog_kb)
             logger.info(f"Created new catalog message in {channel_username} (msg {target_msg_id})")
         except Exception as e:
             logger.error(f"Failed to send catalog message in {channel_username}: {e}")
@@ -5120,15 +5133,21 @@ async def _update_previous_episode_post(
     # If prev_ep - 1 exists, add left button
     if (prev_ep - 1) in existing_eps:
         p_mid = existing_eps[prev_ep - 1]
-        nav_row.append(InlineKeyboardButton(f"◀️ Eps {prev_ep - 1}", url=f"https://t.me/{clean_wm}/{p_mid}"))
+        btn_prev = InlineKeyboardButton(f"◀️ Eps {prev_ep - 1}", url=f"https://t.me/{clean_wm}/{p_mid}")
+        btn_prev.style = "primary"
+        nav_row.append(btn_prev)
 
     bot_uname = (client.me.username if getattr(client, "me", None) else "") or _engine.cache.get_setting("bot_username", "")
     clean_slug = re.sub(r'[^a-zA-Z0-9]', '_', title_meta).strip('_')[:32]
     list_url = f"https://t.me/{bot_uname}?start=series_{clean_slug}" if bot_uname else f"https://t.me/{clean_wm}?q={urllib.parse.quote(title_meta)}"
-    nav_row.append(InlineKeyboardButton("📑 List Episode", url=list_url))
+    btn_list = InlineKeyboardButton("📑 List Episode", url=list_url)
+    btn_list.style = "success"
+    nav_row.append(btn_list)
 
     # Right button: forward to newly posted episode!
-    nav_row.append(InlineKeyboardButton(f"Eps {next_ep} ▶️", url=f"https://t.me/{clean_wm}/{next_mid}"))
+    btn_next = InlineKeyboardButton(f"Eps {next_ep} ▶️", url=f"https://t.me/{clean_wm}/{next_mid}")
+    btn_next.style = "primary"
+    nav_row.append(btn_next)
 
     req_link = _get_user_request_link(chat_id, bot_username=bot_uname)
     updated_kb = build_channel_post_keyboard(
@@ -5191,17 +5210,23 @@ async def publish_video_to_channel(
         # Previous episode button
         if (curr_ep - 1) in existing_eps:
             prev_mid = existing_eps[curr_ep - 1]
-            nav_row.append(InlineKeyboardButton(f"◀️ Eps {curr_ep - 1}", url=f"https://t.me/{clean_wm}/{prev_mid}"))
+            btn_prev = InlineKeyboardButton(f"◀️ Eps {curr_ep - 1}", url=f"https://t.me/{clean_wm}/{prev_mid}")
+            btn_prev.style = "primary"
+            nav_row.append(btn_prev)
 
         # Middle button: List Episode
         clean_slug = re.sub(r'[^a-zA-Z0-9]', '_', title_meta).strip('_')[:32]
         list_url = f"https://t.me/{bot_uname}?start=series_{clean_slug}" if bot_uname else f"https://t.me/{clean_wm}?q={urllib.parse.quote(title_meta)}"
-        nav_row.append(InlineKeyboardButton("📑 List Episode", url=list_url))
+        btn_list = InlineKeyboardButton("📑 List Episode", url=list_url)
+        btn_list.style = "success"
+        nav_row.append(btn_list)
 
         # Next episode button
         if (curr_ep + 1) in existing_eps:
             next_mid = existing_eps[curr_ep + 1]
-            nav_row.append(InlineKeyboardButton(f"Eps {curr_ep + 1} ▶️", url=f"https://t.me/{clean_wm}/{next_mid}"))
+            btn_next = InlineKeyboardButton(f"Eps {curr_ep + 1} ▶️", url=f"https://t.me/{clean_wm}/{next_mid}")
+            btn_next.style = "primary"
+            nav_row.append(btn_next)
 
     # Telegraph Instant View Digital Brochure Button
     instant_view_url = None

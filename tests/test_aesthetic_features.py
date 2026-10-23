@@ -174,6 +174,27 @@ class TestAestheticFeatures(unittest.TestCase):
         self.assertEqual(bot_api_kb[2][0]["style"], "danger")    # Request: Red
         self.assertEqual(bot_api_kb[2][1]["style"], "success")   # Bagikan: Green
 
+    # 6. PINNED CATALOG STYLED BUTTONS
+    def test_pinned_catalog_styled_buttons(self):
+        """Should serialize pinned catalog buttons with Blue, Green, and Red styles."""
+        from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        from bot.handlers import _build_bot_api_reply_markup
+
+        btn_cat = InlineKeyboardButton("⚡ BUKA KATALOG LENGKAP (50 Film)", url="https://telegra.ph/cat")
+        btn_cat.style = "primary"
+        btn_search = InlineKeyboardButton("🔍 Cari Koleksi Film", switch_inline_query_current_chat="")
+        btn_search.style = "success"
+        btn_req = InlineKeyboardButton("💬 Request Film", url="https://t.me/filmin_bot?start=req")
+        btn_req.style = "danger"
+
+        kb = InlineKeyboardMarkup([[btn_cat], [btn_search, btn_req]])
+        res = _build_bot_api_reply_markup(kb)["inline_keyboard"]
+
+        self.assertEqual(res[0][0]["style"], "primary")
+        self.assertEqual(res[1][0]["style"], "success")
+        self.assertEqual(res[1][1]["style"], "danger")
+        self.assertEqual(res[1][0]["switch_inline_query_current_chat"], "")
+
 
 if __name__ == "__main__":
     unittest.main()
