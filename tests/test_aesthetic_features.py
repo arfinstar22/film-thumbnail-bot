@@ -72,7 +72,7 @@ class TestAestheticFeatures(unittest.TestCase):
         cap = self.caption_gen.generate(meta, custom_watermark="@film_indonesia1")
         self.assertLessEqual(len(cap), 1024)
         self.assertIn("THE RAID: REDEMPTION &lt;SPECIAL&gt;", cap)
-        self.assertIn("POSTER RESMI & BANNER HD", cap)
+        self.assertIn("POSTER & BANNER HD", cap)
         self.assertIn("SINOPSIS LENGKAP:", cap)
         self.assertIn("DETAIL SPESIFIKASI & PEMAIN:", cap)
         self.assertIn("<blockquote expandable>", cap)

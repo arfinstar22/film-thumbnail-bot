@@ -5318,7 +5318,7 @@ async def publish_video_to_channel(
             v_lines.append(f"🍿 <b>Channel Resmi:</b> <a href=\"{html.escape(channel_url, quote=True)}\">{html.escape(watermark)}</a>")
             video_caption = "\n".join(v_lines)
         else:
-            if "POSTER RESMI FILM" not in caption_text:
+            if "POSTER & BANNER HD" not in caption_text:
                 try:
                     article_caption = _engine.caption_gen.generate(meta, custom_watermark=watermark, style="article")
                     video_caption = article_caption or caption_text

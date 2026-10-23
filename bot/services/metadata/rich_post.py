@@ -83,7 +83,7 @@ def build_rich_article_payload(
     # 2. HEADING (Film Title)
     html_parts.append(f"<h1>🎬 {title_disp}</h1>")
 
-    # 3. SLIDESHOW (Banner & Poster swipeable gallery)
+    # 3. SLIDESHOW (Banner & Poster swipeable gallery — collapsible)
     slideshow_imgs: List[str] = []
     if banner_file_id_or_url and not str(banner_file_id_or_url).startswith("http"):
         slideshow_imgs.append('<img src="tg://photo?id=banner_img"/>')
@@ -108,10 +108,18 @@ def build_rich_article_payload(
             }
         })
 
-    if len(slideshow_imgs) > 1:
-        html_parts.append(f"<tg-slideshow>{''.join(slideshow_imgs)}</tg-slideshow>")
-    elif len(slideshow_imgs) == 1:
-        html_parts.append(slideshow_imgs[0])
+    if slideshow_imgs:
+        gallery_content = (
+            f"<tg-slideshow>{''.join(slideshow_imgs)}</tg-slideshow>"
+            if len(slideshow_imgs) > 1
+            else slideshow_imgs[0]
+        )
+        html_parts.append(
+            f"<details>\n"
+            f"<summary>🖼️ Poster &amp; Banner HD</summary>\n"
+            f"{gallery_content}\n"
+            f"</details>"
+        )
 
     # 4. BADGES (Rating, Genre, Resolution, Duration)
     badge_items: List[str] = []
