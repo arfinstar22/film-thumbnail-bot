@@ -1205,7 +1205,7 @@ async def start_cmd(client: Client, msg: Message):
             f"• <code>Mencuri Raden Saleh</code>\n"
             f"• <code>Agak Laen</code>\n"
             f"• <code>Pengabdi Setan 2</code>\n\n"
-            f"💡 <i>Bot akan otomatis mengecek ketersediaan film di channel @{clean_wm}, atau mencatatnya ke antrean admin dan langsung memberi tahu kamu lewat DM saat film sudah tayang!</i>"
+            f"💡 <i>Judul film yang kamu kirim akan langsung dicatat ke antrean admin dan kamu akan mendapat notifikasi lewat DM saat film sudah tayang!</i>"
         )
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("❌ Batal", callback_data="cancel_movie_request")]
@@ -1604,7 +1604,7 @@ async def cb_btn_start_request(client: Client, query: CallbackQuery):
         f"• <code>Mencuri Raden Saleh</code>\n"
         f"• <code>Agak Laen</code>\n"
         f"• <code>Pengabdi Setan 2</code>\n\n"
-        f"💡 <i>Bot akan otomatis mengecek apakah film sudah ada di channel @{clean_wm}, atau mencatatnya ke antrean admin dan langsung memberi tahu kamu lewat DM saat film sudah tayang!</i>"
+        f"💡 <i>Judul film yang kamu kirim akan langsung dicatat ke antrean admin dan kamu akan mendapat notifikasi lewat DM saat film sudah tayang!</i>"
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("❌ Batal", callback_data="cancel_movie_request")]
@@ -1943,130 +1943,9 @@ async def execute_movie_request_flow(
                 await reply_msg.reply_text(quota_text, parse_mode=ParseMode.HTML, reply_markup=kb)
             return
 
-    # 2. Check if film already exists in channel
-    existing = _engine.cache.find_existing_movie(query, channel_username=clean_wm)
-    if not existing:
-        search_res = _engine.cache.search_catalog(query, limit=1)
-        if search_res:
-            existing = search_res[0]
-
-    if existing and not force_submit:
-        ex_title = existing.get("title") or query
-        ex_year = existing.get("year")
-        ex_disp = f"{ex_title} ({ex_year})" if ex_year else ex_title
-        ex_msg_id = existing.get("message_id")
-        ex_link = f"https://t.me/{clean_wm}/{ex_msg_id}" if ex_msg_id else f"https://t.me/{clean_wm}"
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🍿 Tonton Sekarang", url=ex_link)],
-            [InlineKeyboardButton("💬 Request Film Lain", callback_data="btn_start_request")]
-        ])
-        is_fuzzy_note = f"💡 <i>Maksud kamu: <b>{html.escape(ex_disp)}</b>?</i>\n\n" if existing.get("_is_fuzzy") else ""
-        msg_text = (
-            f"🎉 <b>Film yang Kamu Cari Sudah Tersedia!</b>\n\n"
-            f"{is_fuzzy_note}"
-            f"🎬 <b>{html.escape(ex_disp)}</b>\n"
-            f"📢 Channel: @{clean_wm}\n\n"
-            f"👉 <a href=\"{ex_link}\">Klik di sini untuk langsung menonton di channel</a>\n\n"
-            f"<i>Selamat menonton! 🍿</i>"
-        )
-        if edit_msg:
-            try:
-                await edit_msg.edit_text(msg_text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
-                return
-            except Exception:
-                pass
-        if reply_msg:
-            await reply_msg.reply_text(msg_text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
-        return
-
-    # 3. Smart Typo / Year Suggestion (if not force_submit)
-    if not force_submit:
-        suggestion = await _engine.tmdb_service.async_suggest_movie_correction(query)
-        if suggestion:
-            sug_title = suggestion.get("title") or ""
-            sug_year = suggestion.get("year")
-            sug_disp = f"{sug_title} ({sug_year})" if sug_year else sug_title
-
-            # Check if suggested movie already exists in channel!
-            sug_existing = _engine.cache.find_existing_movie(sug_disp, channel_username=clean_wm)
-            if not sug_existing:
-                sug_res = _engine.cache.search_catalog(sug_disp, limit=1)
-                if sug_res:
-                    sug_existing = sug_res[0]
-
-            if sug_existing:
-                ex_m_id = sug_existing.get("message_id")
-                ex_link = f"https://t.me/{clean_wm}/{ex_m_id}" if ex_m_id else f"https://t.me/{clean_wm}"
-                kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🍿 Tonton Sekarang", url=ex_link)],
-                    [InlineKeyboardButton("💬 Request Film Lain", callback_data="btn_start_request")]
-                ])
-                exist_text = (
-                    f"🎉 <b>Film yang Kamu Maksud Sudah Ada di Channel!</b>\n\n"
-                    f"💡 <i>Mungkin maksud kamu: <b>{html.escape(sug_disp)}</b>?</i>\n"
-                    f"<i>({html.escape(suggestion.get('reason', ''))})</i>\n\n"
-                    f"🎬 <b>{html.escape(sug_disp)}</b>\n"
-                    f"📢 Channel: @{clean_wm}\n\n"
-                    f"👉 <a href=\"{ex_link}\">Klik di sini untuk langsung menonton</a>"
-                )
-                if edit_msg:
-                    try:
-                        await edit_msg.edit_text(exist_text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
-                        return
-                    except Exception:
-                        pass
-                if reply_msg:
-                    await reply_msg.reply_text(exist_text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
-                return
-
-            # Store pending suggestion
-            token = f"{user_id}_{int(time.time())}_{random.randint(100, 999)}"
-            _pending_smart_requests[token] = {
-                "user_id": user_id,
-                "username": username,
-                "raw_username": raw_username,
-                "first_name": first_name,
-                "clean_wm": clean_wm,
-                "original_query": query,
-                "suggested_title": sug_disp,
-                "created_at": time.time()
-            }
-
-            s_rating = suggestion.get("rating") or "-"
-            s_genre = suggestion.get("genre") or "-"
-            s_plot = (suggestion.get("plot") or "").strip()
-            plot_snippet = f"\n📖 <b>Sinopsis Singkat:</b>\n<i>{html.escape(s_plot[:240])}...</i>\n" if s_plot else ""
-
-            suggest_text = (
-                f"🔍 <b>Apakah Maksud Kamu Film Ini?</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"🎬 <b>{html.escape(sug_disp)}</b>\n"
-                f"⭐ <b>Rating:</b> {s_rating}\n"
-                f"🎭 <b>Genre:</b> {s_genre}\n"
-                f"💡 <i>{html.escape(suggestion.get('reason', ''))}</i>\n"
-                f"{plot_snippet}\n"
-                f"<i>Kamu menulis: <code>{html.escape(query)}</code></i>\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"<i>Tekan tombol di bawah untuk langsung mengirimkan request:</i>"
-            )
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"✅ Ya, Request {sug_disp[:24]}", callback_data=f"smart_req:{token}")],
-                [InlineKeyboardButton(f"✍️ Tetap Request '{query[:16]}'", callback_data=f"force_req:{token}")],
-                [InlineKeyboardButton("❌ Batal", callback_data="cancel_movie_request")]
-            ])
-
-            if edit_msg:
-                try:
-                    await edit_msg.edit_text(suggest_text, parse_mode=ParseMode.HTML, reply_markup=kb)
-                    return
-                except Exception:
-                    pass
-            if reply_msg:
-                await reply_msg.reply_text(suggest_text, parse_mode=ParseMode.HTML, reply_markup=kb)
-            return
-
-    # 4. Save Request to Database & Enforce Quota
-    res = _engine.cache.add_movie_request(user_id, username, query, clean_wm)
+    # 2. Save Request Directly to Database & Enforce Quota (No parser/interception)
+    clean_query = query.strip()
+    res = _engine.cache.add_movie_request(user_id, username, clean_query, clean_wm)
     remaining_quota = res.get("remaining", 0)
     count_today = res.get("count_today", 1)
 
@@ -2084,19 +1963,19 @@ async def execute_movie_request_flow(
             requester_user_id=user_id,
             requester_username=raw_username,
             requester_name=first_name,
-            movie_title=query,
+            movie_title=clean_query,
             channel_wm=clean_wm
         ))
         success_text = (
             f"✅ <b>Permintaan Film Berhasil Dicatat!</b>\n\n"
-            f"🎬 <b>Judul:</b> {html.escape(query)}\n"
+            f"🎬 <b>Judul:</b> {html.escape(clean_query)}\n"
             f"📢 <b>Target Channel:</b> @{clean_wm}{quota_badge}\n\n"
             f"<i>Permintaanmu sudah masuk antrean admin. Begitu film ini diunggah atau ditinjau, bot akan otomatis mengirimkan notifikasi kepadamu lewat DM! 🔔🍿</i>"
         )
     else:
         success_text = (
             f"ℹ️ <b>Permintaan Sudah Terdaftar Sebelumnya:</b>\n\n"
-            f"Kamu sudah pernah me-request film <b>{html.escape(query)}</b>.\n"
+            f"Kamu sudah pernah me-request film <b>{html.escape(clean_query)}</b>.\n"
             f"Permintaanmu masih aktif dan bot akan tetap mengirimkan notifikasi saat film sudah diunggah. Mohon ditunggu ya! 🙏{quota_badge}"
         )
 
@@ -2208,7 +2087,7 @@ async def request_movie_cmd(client: Client, msg: Message):
             f"• <code>Mencuri Raden Saleh</code>\n"
             f"• <code>Agak Laen</code>\n"
             f"• <code>Pengabdi Setan 2</code>\n\n"
-            f"💡 <i>Bot akan otomatis mengecek apakah film sudah ada di channel @{clean_wm}, atau mencatatnya ke antrean admin dan langsung memberi tahu kamu lewat DM saat film sudah tayang!</i>"
+            f"💡 <i>Judul film yang kamu kirim akan langsung dicatat ke antrean admin dan kamu akan mendapat notifikasi lewat DM saat film sudah tayang!</i>"
         )
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("❌ Batal", callback_data="cancel_movie_request")]

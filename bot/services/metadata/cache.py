@@ -119,6 +119,8 @@ def calculate_search_relevance(
     # 3. Whole words match
     q_words = [w for w in q_clean.split() if len(w) > 1]
     t_words = [w for w in t_clean.split() if len(w) > 1]
+    q_words_text = [w for w in q_words if not w.isdigit()]
+    t_words_text = [w for w in t_words if not w.isdigit()]
     if q_words and t_words:
         matched = sum(1 for qw in q_words if qw in t_words)
         if matched == len(q_words):
@@ -129,15 +131,24 @@ def calculate_search_relevance(
     ratio_noyear = difflib.SequenceMatcher(None, q_noyear, t_noyear).ratio() if (q_noyear and t_noyear) else 0.0
     best_ratio = max(ratio_full, ratio_noyear)
 
-    # Word-level fuzzy
-    for qw in q_words:
-        for tw in t_words:
-            rw = difflib.SequenceMatcher(None, qw, tw).ratio()
-            if rw > best_ratio:
-                best_ratio = max(best_ratio, rw * 0.88)
+    # Word-level fuzzy on text words only (ignore numbers/years)
+    if q_words_text and t_words_text:
+        for qw in q_words_text:
+            for tw in t_words_text:
+                rw = difflib.SequenceMatcher(None, qw, tw).ratio()
+                if rw > best_ratio:
+                    best_ratio = max(best_ratio, rw * 0.88)
 
     if best_ratio >= 0.52:
-        candidates.append((best_ratio * 70.0, False))
+        if q_words_text and t_words_text:
+            has_text_sim = any(
+                difflib.SequenceMatcher(None, qw, tw).ratio() >= 0.65
+                for qw in q_words_text for tw in t_words_text
+            )
+            if has_text_sim:
+                candidates.append((best_ratio * 70.0, False))
+        elif not q_words_text and not t_words_text:
+            candidates.append((best_ratio * 70.0, False))
 
     # 5. Caption / Genre / Cast match
     cap_clean = (caption or "").lower()
