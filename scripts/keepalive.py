@@ -96,7 +96,7 @@ def ping_render_web(render_url: str) -> bool:
         headers={"User-Agent": "FilmBot-Keepalive-Runner/1.0"}
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             print(f"✅ Render web wake-up SUCCESS! (HTTP {resp.status})")
             return True
     except Exception as e:

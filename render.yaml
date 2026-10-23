@@ -22,5 +22,7 @@ services:
         sync: false
       - key: SUPABASE_KEY
         sync: false
+      - key: RENDER_EXTERNAL_URL
+        value: https://film-thumbnail-bot.onrender.com
     healthCheckPath: /
     autoDeploy: true

@@ -24,7 +24,7 @@ from pyrogram.errors import FloodWait, UserIsBlocked, InputUserDeactivated
 from .config import (
     BOT_TOKEN, API_ID, API_HASH, SESSION_STRING, CHANNEL_WATERMARK,
     DEFAULT_REQUEST_LINK, ADMIN_USER_IDS, ABSOLUTE_ADMIN_USER_IDS,
-    ABSOLUTE_ADMIN_USERNAMES, VAULT_CHANNEL
+    ABSOLUTE_ADMIN_USERNAMES, VAULT_CHANNEL, MAX_FILE_BYTES
 )
 from .services.video import photo_thumbnail
 from .services.metadata.engine import MetadataEngine
@@ -5556,6 +5556,20 @@ async def receive_video(client: Client, msg: Message):
                 os.remove(temp_file)
             except Exception:
                 pass
+
+    # Check file size against Telegram Bot upload limit (2 GB)
+    file_size = getattr(media, "file_size", 0) or 0
+    if file_size > MAX_FILE_BYTES:
+        size_str = format_size(file_size)
+        max_str = format_size(MAX_FILE_BYTES)
+        await msg.reply_text(
+            f"⚠️ <b>Ukuran File Melebihi Batas Telegram ({size_str}):</b>\n\n"
+            f"Telegram membatasi akun bot hanya dapat mengunggah file maksimal <b>{max_str} (2 GB)</b>.\n"
+            f"File ini melebihi kapasitas Telegram untuk akun bot sehingga tidak dapat diproses atau diunggah ke channel.\n\n"
+            f"💡 <b>Solusi:</b> Unggah versi film yang ukurannya di bawah 2.000 MB (misal 720p atau 1080p hasil kompresi).",
+            parse_mode=ParseMode.HTML
+        )
+        return
 
     global _queue_worker_task
     if _queue_worker_task is None or _queue_worker_task.done():

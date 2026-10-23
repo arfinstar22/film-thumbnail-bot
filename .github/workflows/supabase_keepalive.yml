@@ -2,8 +2,8 @@ name: Supabase Anti-Pause Keepalive
 
 on:
   schedule:
-    # Runs at 02:00 UTC every 3 days (Aman dari batas 7 hari jeda Supabase Free Tier)
-    - cron: '0 2 */3 * *'
+    # Runs every 12 hours (keeps Supabase alive within 7-day free tier limit + wakes Render)
+    - cron: '0 */12 * * *'
   workflow_dispatch: # Memungkinkan tombol "Run workflow" manual kapan saja dari GitHub
 
 jobs:

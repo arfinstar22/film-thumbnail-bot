@@ -4,6 +4,8 @@ import os
 import sys
 import threading
 import time
+import urllib.request
+import urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from pyrogram import idle
@@ -15,6 +17,11 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+
     def do_GET(self):
         if self.path in ("/keepalive", "/ping-supabase"):
             import json
@@ -51,6 +58,24 @@ def run_health_server():
         logging.warning("Could not start health check server on port %s: %s", port, e)
 
 
+def run_self_ping():
+    """Ping own health endpoint every 10 min to prevent Render free-tier spin-down (15 min timeout)."""
+    time.sleep(30)  # Wait for health server to start
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+    port = os.getenv("PORT", "8080").strip()
+    targets = [f"http://localhost:{port}/"]
+    if render_url:
+        targets.append(f"{render_url.rstrip('/')}/")
+    while True:
+        for url in targets:
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "SelfPing/1.0"})
+                urllib.request.urlopen(req, timeout=10)
+            except Exception:
+                pass
+        time.sleep(600)  # 10 minutes
+
+
 
 async def start_with_hydration():
     await app.start()
@@ -83,4 +108,5 @@ def run_bot():
 if __name__ == "__main__":
     if os.getenv("PORT"):
         threading.Thread(target=run_health_server, daemon=True).start()
+        threading.Thread(target=run_self_ping, daemon=True).start()
     run_bot()
