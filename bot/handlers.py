@@ -5222,20 +5222,27 @@ async def publish_video_to_channel(
 
     if BOT_TOKEN:
         try:
+            # Upload to a hidden channel to get file_ids (avoids visible messages in bot chat)
+            upload_target = VAULT_CHANNEL or chat_id
+
             # Upload banner to Telegram to get file_id for slideshow
             if banner_path and os.path.exists(banner_path):
                 try:
                     tmp_banner = await client.send_photo(
-                        chat_id=chat_id,
+                        chat_id=upload_target,
                         photo=banner_path,
                         disable_notification=True
                     )
                     if tmp_banner and tmp_banner.photo:
                         banner_file_id = tmp_banner.photo[-1].file_id
+                    await asyncio.sleep(0.3)
                     try:
                         await tmp_banner.delete()
                     except Exception:
-                        pass
+                        try:
+                            await client.delete_messages(upload_target, tmp_banner.id)
+                        except Exception:
+                            pass
                 except Exception as ue:
                     logger.debug(f"Banner upload for file_id failed: {ue}")
 
@@ -5243,16 +5250,20 @@ async def publish_video_to_channel(
             if poster_path and os.path.exists(poster_path):
                 try:
                     tmp_poster = await client.send_photo(
-                        chat_id=chat_id,
+                        chat_id=upload_target,
                         photo=poster_path,
                         disable_notification=True
                     )
                     if tmp_poster and tmp_poster.photo:
                         poster_file_id = tmp_poster.photo[-1].file_id
+                    await asyncio.sleep(0.3)
                     try:
                         await tmp_poster.delete()
                     except Exception:
-                        pass
+                        try:
+                            await client.delete_messages(upload_target, tmp_poster.id)
+                        except Exception:
+                            pass
                 except Exception as pe:
                     logger.debug(f"Poster upload for file_id failed: {pe}")
 

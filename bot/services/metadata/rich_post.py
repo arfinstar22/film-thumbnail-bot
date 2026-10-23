@@ -114,12 +114,8 @@ def build_rich_article_payload(
             if len(slideshow_imgs) > 1
             else slideshow_imgs[0]
         )
-        html_parts.append(
-            f"<details>\n"
-            f"<summary>🖼️ Poster &amp; Banner HD</summary>\n"
-            f"{gallery_content}\n"
-            f"</details>"
-        )
+        html_parts.append(f"<p>🖼️ <b>Poster &amp; Banner HD</b></p>")
+        html_parts.append(gallery_content)
 
     # 4. BADGES (Rating, Genre, Resolution, Duration)
     badge_items: List[str] = []
