@@ -38,9 +38,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 if SESSION_STRING:
-    app = Client("thumb_bot", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
+    app = Client("thumb_bot", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING, in_memory=True)
 else:
-    app = Client("thumb_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+    app = Client("thumb_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
 
 # Defense-in-depth: Safely handle expired callback query answers across all handlers
 _orig_cb_answer = CallbackQuery.answer

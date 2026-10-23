@@ -9,7 +9,7 @@ import urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from pyrogram import idle
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, SessionRevoked
 
 from .handlers import app, on_bot_startup
 
@@ -85,7 +85,19 @@ async def start_with_hydration():
     await app.stop()
 
 
+def _clean_stale_sessions():
+    """Removes stale .session files from disk to prevent SESSION_REVOKED errors."""
+    for root, _, files in os.walk("."):
+        for f in files:
+            if f.endswith(".session") or f.endswith(".session-journal"):
+                try:
+                    os.remove(os.path.join(root, f))
+                except Exception:
+                    pass
+
+
 def run_bot():
+    _clean_stale_sessions()
     while True:
         try:
             app.run(start_with_hydration())
@@ -98,6 +110,10 @@ def run_bot():
                 f"ℹ️ Web server di port {os.getenv('PORT', '10000')} TETAP AKTIF menjaga agar Render TIDAK crash-loop!"
             )
             time.sleep(wait_time + 5)
+        except SessionRevoked as e:
+            logging.error(f"⚠️ Telegram SessionRevoked terdeteksi ({e}). Membersihkan file sesi usang...")
+            _clean_stale_sessions()
+            time.sleep(3)
         except (KeyboardInterrupt, SystemExit):
             break
         except Exception as e:
