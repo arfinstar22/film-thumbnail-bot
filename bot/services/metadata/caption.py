@@ -179,12 +179,12 @@ class CaptionGenerator:
 
         lines.append("")
 
-        # 1. Expandable Block: Poster Resmi Film
+        # 1. Expandable Block: Poster Resmi Film & Banner HD
         poster_url = f.get("poster_url") or ""
         lines.append("<blockquote expandable>")
-        lines.append("🖼️ <b>POSTER RESMI FILM</b>")
+        lines.append("🖼️ <b>POSTER RESMI & BANNER HD</b>")
         if poster_url and (poster_url.startswith("http://") or poster_url.startswith("https://")):
-            lines.append(f"👉 <a href=\"{html.escape(poster_url, quote=True)}\">Ketuk untuk Buka Poster Resolusi Penuh HD ↗</a>")
+            lines.append(f"👉 <a href=\"{html.escape(poster_url, quote=True)}\">Ketuk untuk Buka Gambar Resolusi Penuh HD ↗</a>")
         else:
             lines.append(f"👉 <a href=\"{html.escape(f['channel_url'], quote=True)}\">Buka Galeri Poster Resmi di Channel ↗</a>")
         lines.append("</blockquote>")

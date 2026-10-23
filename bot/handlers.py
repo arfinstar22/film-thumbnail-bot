@@ -5325,11 +5325,12 @@ async def publish_video_to_channel(
         else:
             video_caption = caption_text
 
-    # Ensure thumbnail exists (branded poster or custom thumb)
+    # Ensure thumbnail exists (prioritize Banner HD, then branded poster)
     final_thumb = thumb_path
     cleanup_thumb = False
     if not final_thumb or not os.path.exists(final_thumb):
-        poster_src = meta.get("poster_url") or meta.get("poster_path") or meta.get("thumb_path")
+        banner_src = pregenerated_banner_path if (pregenerated_banner_path and os.path.exists(pregenerated_banner_path)) else None
+        poster_src = banner_src or meta.get("poster_url") or meta.get("poster_path") or meta.get("thumb_path")
         if poster_src:
             try:
                 with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:

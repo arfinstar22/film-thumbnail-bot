@@ -113,7 +113,7 @@ class TestAestheticFeatures(unittest.TestCase):
         # 8. Article (Interactive Collapsible Cards)
         cap_article = self.caption_gen.generate(meta, custom_watermark="@film_indonesia1", style="article")
         self.assertLessEqual(len(cap_article), 1024)
-        self.assertIn("POSTER RESMI FILM", cap_article)
+        self.assertIn("POSTER RESMI & BANNER HD", cap_article)
         self.assertIn("SINOPSIS LENGKAP:", cap_article)
         self.assertIn("DETAIL SPESIFIKASI & PEMAIN:", cap_article)
         self.assertIn("<blockquote expandable>", cap_article)
