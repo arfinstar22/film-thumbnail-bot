@@ -338,7 +338,7 @@ class MetadataCache:
         quality: Optional[str],
         channel_username: str,
         message_id: int,
-        caption: str,
+        caption: str = "",
         file_id: Optional[str] = None,
         season: Optional[int] = None,
         episode: Optional[int] = None
@@ -595,6 +595,54 @@ class MetadataCache:
             return results, cand
 
         return results, None
+
+    def get_movies_by_mood(
+        self,
+        mood: str,
+        channel_username: Optional[str] = None,
+        limit: int = 5
+    ) -> List[Dict[str, Any]]:
+        """Filter channel catalog by mood/genre with rating and year ranking."""
+        movies = self.get_deduplicated_catalog(channel_username)
+        if not movies:
+            return []
+
+        mood_lower = (mood or "").lower().strip()
+        mood_keywords_map = {
+            "horror": ["horror", "horor", "thriller", "misteri", "mystery", "seram"],
+            "comedy": ["comedy", "komedi", "lucu", "humor"],
+            "action": ["action", "aksi", "petualangan", "adventure", "crime", "laga"],
+            "romance": ["romance", "romantis", "drama", "cinta", "melodrama"],
+            "family": ["animation", "animasi", "family", "keluarga", "anak"],
+        }
+
+        if mood_lower in ("random", "acak", "surprise"):
+            import random
+            sample_size = min(len(movies), limit)
+            return random.sample(movies, sample_size)
+
+        keywords = mood_keywords_map.get(mood_lower, [mood_lower])
+        matched = []
+        for m in movies:
+            genre_str = (m.get("genre") or "").lower()
+            caption_str = (m.get("caption") or "").lower()
+            if any(k in genre_str or k in caption_str for k in keywords):
+                matched.append(m)
+
+        def _score_key(item):
+            r_val = 0.0
+            r_str = str(item.get("rating") or "")
+            rm = re.search(r"(\d+(?:\.\d+)?)", r_str)
+            if rm:
+                try:
+                    r_val = float(rm.group(1))
+                except ValueError:
+                    pass
+            y_val = item.get("year") or 0
+            return (r_val, y_val)
+
+        matched.sort(key=_score_key, reverse=True)
+        return matched[:limit]
 
     def export_catalog_json(self, channel_username: str) -> str:
         """Export all movies in catalog for a channel as a formatted JSON string."""
@@ -859,9 +907,8 @@ class MetadataCache:
 
         if self.cloud.is_enabled:
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(self.cloud.async_save_request(user_id, username or "", movie_title.strip(), clean_t, clean_chan))
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.cloud.async_save_request(user_id, username or "", movie_title.strip(), clean_t, clean_chan))
             except Exception:
                 pass
 
@@ -969,9 +1016,8 @@ class MetadataCache:
 
         if self.cloud.is_enabled and clean_t:
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(self.cloud.async_delete_requests(clean_t))
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.cloud.async_delete_requests(clean_t))
             except Exception:
                 pass
         return count
@@ -984,9 +1030,8 @@ class MetadataCache:
         conn.commit()
         if self.cloud.is_enabled:
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(self.cloud.async_delete_requests(clean_title))
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.cloud.async_delete_requests(clean_title))
             except Exception:
                 pass
         return count
@@ -1043,21 +1088,57 @@ class MetadataCache:
 
             if self.cloud.is_enabled:
                 try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        loop.create_task(self.cloud.async_fulfill_requests(clean_t))
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.cloud.async_fulfill_requests(clean_t))
                 except Exception:
                     pass
 
         return requesters
 
-    def find_matching_requests(self, movie_title: str) -> List[dict]:
+    def _is_matching_request(
+        self,
+        req_title: str,
+        target_title: str,
+        target_year: Optional[int] = None
+    ) -> bool:
+        """Strict matching: Year distance <= 1, sequel check, exact or high-confidence fuzzy."""
+        target_t, target_y, target_k = normalize_movie_title_and_year(target_title, target_year)
+        req_t, req_y, req_k = normalize_movie_title_and_year(req_title)
+        if not target_k or not req_k:
+            return False
+
+        # 1. Year check: If both have explicit years, distance must be <= 1
+        if target_y and req_y and abs(target_y - req_y) > 1:
+            return False
+
+        # 2. Sequel check: distinct sequels do not match
+        target_seq = extract_movie_sequel_tag(target_t)
+        req_seq = extract_movie_sequel_tag(req_t)
+        if target_seq != req_seq:
+            return False
+
+        # 3. Exact normalized key match (e.g. rasuk vs rasuk)
+        if target_k == req_k or target_t.lower() == req_t.lower():
+            return True
+
+        # 4. Fuzzy / word match:
+        ratio = difflib.SequenceMatcher(None, target_t.lower(), req_t.lower()).ratio()
+        if ratio >= 0.88:
+            target_words = set(w for w in target_t.lower().split() if len(w) > 2)
+            req_words = set(w for w in req_t.lower().split() if len(w) > 2)
+            if target_words and req_words:
+                unshared = req_words - target_words
+                for uw in unshared:
+                    if not any(difflib.SequenceMatcher(None, uw, tw).ratio() >= 0.80 for tw in target_words):
+                        return False
+            return True
+
+        return False
+
+    def find_matching_requests(self, movie_title: str, year: Optional[int] = None) -> List[dict]:
         """Find pending requests that match the given movie title without altering database status."""
         conn = self._conn()
         self._ensure_requests_table(conn)
-        clean_t = re.sub(r'[^a-zA-Z0-9]', '', movie_title).lower()
-        if len(clean_t) < 3:
-            return []
 
         query = "SELECT id, user_id, username, movie_title FROM movie_requests WHERE status = 'pending'"
         cur = conn.execute(query)
@@ -1065,8 +1146,7 @@ class MetadataCache:
 
         for row in cur.fetchall():
             r_id, u_id, u_name, req_t = row
-            req_clean = re.sub(r'[^a-zA-Z0-9]', '', req_t).lower()
-            if req_clean and (req_clean == clean_t or req_clean in clean_t or clean_t in req_clean):
+            if self._is_matching_request(req_t, movie_title, year):
                 requesters.append({
                     "id": r_id,
                     "user_id": u_id,
@@ -1076,12 +1156,14 @@ class MetadataCache:
 
         return requesters
 
-    def fulfill_movie_requests(self, movie_title: str, channel_username: Optional[str] = None) -> List[dict]:
+    def fulfill_movie_requests(
+        self,
+        movie_title: str,
+        channel_username: Optional[str] = None,
+        year: Optional[int] = None
+    ) -> List[dict]:
         conn = self._conn()
         self._ensure_requests_table(conn)
-        clean_t = re.sub(r'[^a-zA-Z0-9]', '', movie_title).lower()
-        if len(clean_t) < 3:
-            return []
 
         query = "SELECT id, user_id, username, movie_title FROM movie_requests WHERE status = 'pending'"
         cur = conn.execute(query)
@@ -1090,8 +1172,7 @@ class MetadataCache:
 
         for row in cur.fetchall():
             r_id, u_id, u_name, req_t = row
-            req_clean = re.sub(r'[^a-zA-Z0-9]', '', req_t).lower()
-            if req_clean and (req_clean == clean_t or req_clean in clean_t or clean_t in req_clean):
+            if self._is_matching_request(req_t, movie_title, year):
                 matched_ids.append(r_id)
                 requesters.append({
                     "id": r_id,
@@ -1108,11 +1189,11 @@ class MetadataCache:
             )
             conn.commit()
 
-            if self.cloud.is_enabled:
+            clean_t = re.sub(r'[^a-zA-Z0-9]', '', movie_title).lower()
+            if self.cloud.is_enabled and clean_t:
                 try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        loop.create_task(self.cloud.async_fulfill_requests(clean_t))
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.cloud.async_fulfill_requests(clean_t))
                 except Exception:
                     pass
 

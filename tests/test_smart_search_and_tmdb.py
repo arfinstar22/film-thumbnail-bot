@@ -182,9 +182,12 @@ class TestTMDbService(unittest.TestCase):
         self.assertEqual(self.tmdb.get_api_key(), "dummy_test_key")
         self.assertTrue(self.tmdb.is_enabled())
 
+        with unittest.mock.patch.dict(os.environ, {"TMDB_API_KEY": ""}):
+            no_key_tmdb = TMDbService(cache=self.cache, api_key=None)
+            # Should be disabled when neither arg, env, nor setting is set
+            self.assertFalse(no_key_tmdb.is_enabled())
+
         no_key_tmdb = TMDbService(cache=self.cache, api_key=None)
-        # Should be disabled when neither arg, env, nor setting is set
-        self.assertFalse(no_key_tmdb.is_enabled())
 
         # Test setting via cache
         self.cache.set_setting("tmdb_api_key", "key_from_db_setting")

@@ -20,6 +20,8 @@ class FilenameParser:
             "videoCodec": None,
             "audioCodec": None,
             "audioChannels": None,
+            "audio": None,
+            "subtitle": None,
             "season": None,
             "episode": None,
             "releaseGroup": None,
@@ -74,13 +76,40 @@ class FilenameParser:
                     meta_token_indices.add(idx + 1)
                     break
 
-        # 3. Audio Channels (1.0, 2.0, 5.1, 7.1)
+        # 3. Audio Channels (1.0, 2.0, 5.1, 7.1) & Audio/Subtitle Presets
         for idx, t in enumerate(tokens):
             if re.match(r"^[1257]\.[01]$", t):
                 metadata["audioChannels"] = t
                 metadata["confidence"]["audioChannels"] = 0.95
                 meta_token_indices.add(idx)
                 break
+
+        norm_lower = norm.lower()
+        if re.search(r"\b(hardsub|hardsubbed)\b", norm_lower):
+            metadata["subtitle"] = "Hardsub Indo"
+            metadata["confidence"]["subtitle"] = 0.95
+        elif re.search(r"\b(softsub|sub[\.\-_ ]?indo)\b", norm_lower):
+            metadata["subtitle"] = "Softsub Indo"
+            metadata["confidence"]["subtitle"] = 0.95
+        elif re.search(r"\b(engsub|sub[\.\-_ ]?eng)\b", norm_lower):
+            metadata["subtitle"] = "English Sub"
+            metadata["confidence"]["subtitle"] = 0.90
+
+        if re.search(r"\b(dub[\.\-_ ]?indo|dubbing[\.\-_ ]?indo)\b", norm_lower):
+            metadata["audio"] = "Dub Indo"
+            metadata["confidence"]["audio"] = 0.95
+        elif re.search(r"\b(dual[\.\-_ ]?audio)\b", norm_lower):
+            metadata["audio"] = "Dual Audio (ID+EN)"
+            metadata["confidence"]["audio"] = 0.95
+        elif re.search(r"\b(korean|kor)\b", norm_lower) and not metadata.get("audio"):
+            metadata["audio"] = "Korean"
+        elif re.search(r"\b(japanese|jpn)\b", norm_lower) and not metadata.get("audio"):
+            metadata["audio"] = "Japanese"
+
+        for idx, t in enumerate(tokens):
+            t_low = t.lower()
+            if t_low in ("hardsub", "softsub", "subindo", "engsub", "dubindo"):
+                meta_token_indices.add(idx)
 
         # 4. Release Year Detection (1900 - 2099)
         year_candidates = []
@@ -143,7 +172,7 @@ class FilenameParser:
         if trailing_indices:
             trailing_tokens = [
                 tokens[i] for i in trailing_indices
-                if not re.match(r"^(mp4|mkv|avi|sub|indo|eng|indonesia)$", tokens[i], re.IGNORECASE)
+                if not re.match(r"^(mp4|mkv|avi|sub|indo|eng|indonesia|dub|dubbing|softsub|hardsub)$", tokens[i], re.IGNORECASE)
             ]
             if trailing_tokens:
                 # If short chunks like ['0n', '3'], join without space

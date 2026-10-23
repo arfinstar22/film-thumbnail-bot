@@ -26,7 +26,12 @@ from .config import (
     DEFAULT_REQUEST_LINK, ADMIN_USER_IDS, ABSOLUTE_ADMIN_USER_IDS,
     ABSOLUTE_ADMIN_USERNAMES, VAULT_CHANNEL
 )
-from .services.video import photo_thumbnail
+from .services.video import (
+    photo_thumbnail,
+    inspect_media_streams,
+    generate_scene_collage,
+    generate_collage_from_images
+)
 from .services.metadata.engine import MetadataEngine
 from .services.metadata.catalog import format_pinned_catalog, publish_or_update_telegraph_catalog
 from .services.metadata.cache import WIB, get_next_prime_time_slots, normalize_movie_title_and_year
@@ -58,6 +63,8 @@ async def _safe_callback_answer(self, *args, **kwargs):
 CallbackQuery.answer = _safe_callback_answer
 
 _jobs = {}
+_jobs_by_msg: Dict[int, Dict[str, Any]] = {}
+_batch_collector: Dict[int, List[Dict[str, Any]]] = {}
 _banner_sessions: Dict[int, Dict[str, Any]] = {}
 _user_states: Dict[int, str] = {}
 _pending_smart_requests: Dict[str, Dict[str, Any]] = {}
@@ -751,8 +758,8 @@ def get_caption_kb(message_id: int, watermark: str):
             InlineKeyboardButton("🎨 Lihat Banner HD", callback_data=f"banner:{message_id}")
         ],
         [
-            InlineKeyboardButton("🔊 Audio & Sub", callback_data=f"audiosub:{message_id}"),
-            InlineKeyboardButton("📢 Buka Channel", url=channel_url)
+            InlineKeyboardButton("📸 Kolase 4-Grid", callback_data=f"collage:{message_id}"),
+            InlineKeyboardButton("🔊 Audio & Sub", callback_data=f"audiosub:{message_id}")
         ],
         [
             InlineKeyboardButton("✏️ Edit Caption", callback_data=f"edit:{message_id}"),
@@ -761,6 +768,9 @@ def get_caption_kb(message_id: int, watermark: str):
         [
             InlineKeyboardButton("🔄 Format Ulang", callback_data=f"info:{message_id}"),
             InlineKeyboardButton("🖼️ Perbaiki Poster", callback_data=f"fixbanner:{message_id}")
+        ],
+        [
+            InlineKeyboardButton("📢 Buka Channel", url=channel_url)
         ]
     ])
 
@@ -792,6 +802,7 @@ def get_banner_fix_menu_kb(chat_id_or_msg_id: int):
 BOT_COMMANDS_LIST = [
     BotCommand("start", "Panduan lengkap & status bot"),
     BotCommand("request", "Kirim permintaan judul film"),
+    BotCommand("mood", "Rekomendasi film sesuai mood / genre"),
     BotCommand("cari", "Cari film di database channel"),
     BotCommand("queue", "Antrean & jadwal tayang prime-time"),
     BotCommand("postjadwal", "Posting jadwal film hari ini ke channel"),
@@ -1274,7 +1285,10 @@ async def start_cmd(client: Client, msg: Message):
         f"<i>Tekan tombol di bawah untuk mencari atau request film:</i>"
     )
     member_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💬 Request Film", callback_data="btn_start_request")],
+        [
+            InlineKeyboardButton("💬 Request Film", callback_data="btn_start_request"),
+            InlineKeyboardButton("🎲 Rekomendasi Mood", callback_data="btn_mood_menu")
+        ],
         [InlineKeyboardButton("🔍 Cari Film Instan", switch_inline_query_current_chat="")],
         [InlineKeyboardButton("📌 Buka Katalog Film A-Z", url=channel_url)]
     ])
@@ -5163,7 +5177,7 @@ async def publish_video_to_channel(
 
     # 2. SMART REQUEST: Notify members who requested this film
     try:
-        fulfilled_reqs = _engine.cache.fulfill_movie_requests(title_meta, clean_wm)
+        fulfilled_reqs = _engine.cache.fulfill_movie_requests(title_meta, clean_wm, year=year_meta)
         for req in fulfilled_reqs:
             req_uid = req.get("user_id")
             if req_uid and req_uid != chat_id:
@@ -5184,6 +5198,24 @@ async def publish_video_to_channel(
                     logger.info(f"Sent fulfilled notification for {title_display} to user {req_uid}")
                 except Exception as ne:
                     logger.debug(f"Could not send request fulfilled DM to {req_uid}: {ne}")
+
+        if fulfilled_reqs and chat_id:
+            try:
+                names = [f"@{r['username']}" if r.get('username') else f"User {r.get('user_id')}" for r in fulfilled_reqs[:5]]
+                names_str = ", ".join(names)
+                if len(fulfilled_reqs) > 5:
+                    names_str += f" dan {len(fulfilled_reqs) - 5} lainnya"
+                await client.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"🎉 <b>AUTO-FULFILL REQUEST BERHASIL:</b>\n\n"
+                        f"Film 🎬 <b>{title_display}</b> memenuhi permintaan dari <b>{len(fulfilled_reqs)} member</b> ({names_str})!\n"
+                        f"✅ Bot telah otomatis mengirim notifikasi chat & link tonton ke pemohon."
+                    ),
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as ade:
+                logger.debug(f"Could not send fulfill summary to admin: {ade}")
     except Exception as re_err:
         logger.warning(f"Error checking request fulfillment: {re_err}")
 
@@ -5586,7 +5618,8 @@ async def _process_video_task(client: Client, msg: Message):
         if sent:
             await _apply_expandable_caption(chat_id, sent.id, caption, get_caption_kb(msg.id, wm))
 
-        _jobs[chat_id] = {
+        current_job = {
+            "chat_id": chat_id,
             "filename": filename,
             "sent_msg": sent,
             "caption_text": caption,
@@ -5599,6 +5632,11 @@ async def _process_video_task(client: Client, msg: Message):
             "temp_dir": tmp,
             "video_msg": msg
         }
+        _jobs[chat_id] = current_job
+        if sent:
+            _jobs_by_msg[sent.id] = current_job
+        _jobs_by_msg[msg.id] = current_job
+        _batch_collector.setdefault(chat_id, []).append(current_job)
 
         # DUPE ALERT: Check if movie already exists in channel catalog
         meta = result.get("metadata", {})
@@ -5634,7 +5672,7 @@ async def _process_video_task(client: Client, msg: Message):
             )
 
         # MEMBER REQUEST MATCH ALERT: Check if any members requested this film
-        matching_reqs = _engine.cache.find_matching_requests(meta_title)
+        matching_reqs = _engine.cache.find_matching_requests(meta_title, year=meta_year)
         if matching_reqs:
             req_count = len(matching_reqs)
             names = [f"@{r['username']}" if r.get("username") else f"User {r.get('user_id')}" for r in matching_reqs[:5]]
@@ -5740,6 +5778,507 @@ async def _process_video_task(client: Client, msg: Message):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ================= SMART BATCH REVIEW & COLLAGE & MOOD =================
+
+async def send_batch_review_dashboard(client: Client, chat_id: int):
+    jobs = _batch_collector.get(chat_id, [])
+    if len(jobs) < 2:
+        return
+
+    wm = _get_user_watermark(chat_id)
+    clean_wm = (wm or "").lstrip("@").strip()
+    count = len(jobs)
+
+    lines = [
+        f"📦 <b>SMART BATCH REVIEW: {count} FILM TERDETEKSI</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "Semua metadata & poster resmi TMDb telah disiapkan otomatis:\n"
+    ]
+
+    for i, j in enumerate(jobs, 1):
+        meta = j.get("metadata", {})
+        t = meta.get("title") or j.get("filename") or "Film"
+        y = meta.get("year")
+        disp = f"{t} ({y})" if y else t
+        rating = f"⭐ {meta['rating']}" if meta.get("rating") else "⭐ 7.0+"
+        genre = f"🎭 {meta['genre']}" if meta.get("genre") else "Indonesian Movie"
+        has_poster = "✅ TMDb Poster" if j.get("poster_url") else "📷 Snapshot Video"
+        lines.append(f"<b>#{i}.</b> 🎬 <b>{html.escape(disp)}</b>")
+        lines.append(f"   {html.escape(rating)} | {html.escape(genre)} [{has_poster}]\n")
+
+    lines.append("👇 <i>Pilih aksi massal di bawah untuk memproses semua film sekaligus:</i>")
+
+    batch_kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🚀 Jadwalkan Semua Sekaligus", callback_data="batch_sched_all"),
+            InlineKeyboardButton("⚡ Terbitkan Semua Sekarang", callback_data="batch_pub_all")
+        ],
+        [
+            InlineKeyboardButton("❌ Batalkan Batch", callback_data="batch_cancel")
+        ]
+    ])
+
+    await client.send_message(
+        chat_id=chat_id,
+        text="\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=batch_kb
+    )
+
+
+@app.on_callback_query(filters.regex(r"^batch_sched_all$"))
+async def handle_batch_sched_all(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+
+    chat_id = call.message.chat.id
+    jobs = _batch_collector.pop(chat_id, [])
+    if not jobs:
+        await call.answer("Tidak ada antrean batch film.", show_alert=True)
+        return
+
+    await call.answer("⏳ Menjadwalkan semua film batch...")
+    wm = _get_user_watermark(chat_id)
+    scheduled_titles = []
+
+    for j in jobs:
+        meta = j.get("metadata", {})
+        t = meta.get("title") or j.get("filename") or "Film"
+        y = meta.get("year")
+        disp = f"{t} ({y})" if y else t
+        v_fid = j["sent_msg"].video.file_id if (j.get("sent_msg") and j["sent_msg"].video) else None
+        if not v_fid and j.get("video_msg") and (j["video_msg"].video or j["video_msg"].document):
+            m = j["video_msg"].video or j["video_msg"].document
+            v_fid = m.file_id
+        if v_fid:
+            _engine.cache.add_scheduled_post(
+                chat_id=chat_id,
+                video_file_id=v_fid,
+                caption_text=j.get("caption_text", ""),
+                metadata=meta,
+                watermark=wm,
+                title=disp
+            )
+            scheduled_titles.append(disp)
+
+    await sync_queue_backup_to_owner(client)
+    ensure_scheduler_worker(client)
+
+    summary_lines = [
+        f"🎉 <b>BATCH JADWAL SUKSES: {len(scheduled_titles)} FILM!</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "Film berikut telah otomatis dijadwalkan ke jam Prime-Time (16-18 & 20-22 WIB):\n"
+    ]
+    for idx, st in enumerate(scheduled_titles, 1):
+        summary_lines.append(f"{idx}. 🎬 <b>{html.escape(st)}</b>")
+    summary_lines.append("\n<i>Ketik <code>/queue</code> untuk melihat timeline antrean live.</i>")
+
+    await call.message.edit_text("\n".join(summary_lines), parse_mode=ParseMode.HTML)
+
+
+@app.on_callback_query(filters.regex(r"^batch_pub_all$"))
+async def handle_batch_pub_all(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+
+    chat_id = call.message.chat.id
+    jobs = _batch_collector.pop(chat_id, [])
+    if not jobs:
+        await call.answer("Tidak ada antrean batch film.", show_alert=True)
+        return
+
+    await call.answer("🚀 Mempublikasikan semua film ke channel...")
+    status_msg = await call.message.reply_text(f"⏳ <i>Sedang mempublikasikan {len(jobs)} film ke channel...</i>", parse_mode=ParseMode.HTML)
+
+    published_count = 0
+    for j in jobs:
+        meta = j.get("metadata", {})
+        v_fid = j["sent_msg"].video.file_id if (j.get("sent_msg") and j["sent_msg"].video) else None
+        if not v_fid and j.get("video_msg") and (j["video_msg"].video or j["video_msg"].document):
+            m = j["video_msg"].video or j["video_msg"].document
+            v_fid = m.file_id
+        if v_fid:
+            try:
+                await publish_video_to_channel(
+                    client=client,
+                    chat_id=chat_id,
+                    video_file_id=v_fid,
+                    caption_text=j.get("caption_text", ""),
+                    metadata=meta,
+                    watermark=j.get("watermark") or _get_user_watermark(chat_id),
+                    with_banner=True
+                )
+                published_count += 1
+                await asyncio.sleep(1.5)
+            except Exception as pe:
+                logger.warning(f"Batch publish item failed: {pe}")
+
+    await status_msg.delete()
+    await call.message.edit_text(
+        f"🎉 <b>BATCH PUBLISH SELESAI:</b>\n\n"
+        f"✅ Berhasil memposting <b>{published_count} dari {len(jobs)} film</b> langsung ke channel!",
+        parse_mode=ParseMode.HTML
+    )
+
+
+@app.on_callback_query(filters.regex(r"^batch_cancel$"))
+async def handle_batch_cancel(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Khusus Administrator!", show_alert=True)
+        return
+    chat_id = call.message.chat.id
+    _batch_collector.pop(chat_id, None)
+    await call.answer("Batch dibatalkan.")
+    await call.message.edit_text(
+        "❌ <b>Batch Dibatalkan:</b>\n"
+        "Anda tetap dapat mengunggah atau menjadwalkan film satu per satu melalui kartu pratinjau masing-masing di atas.",
+        parse_mode=ParseMode.HTML
+    )
+
+
+@app.on_callback_query(filters.regex(r"^collage:(\d+)$"))
+async def handle_collage_callback(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Hanya Administrator!", show_alert=True)
+        return
+
+    chat_id = call.message.chat.id
+    msg_id = call.matches[0].group(1)
+    job = _jobs_by_msg.get(int(msg_id)) or _jobs.get(chat_id)
+    if not job:
+        await call.answer("Job tidak ditemukan atau kadaluarsa.", show_alert=True)
+        return
+
+    await call.answer("⏳ Menyiapkan kolase 4-grid adegan...")
+    status_msg = await call.message.reply_text("⏳ <i>Sedang membuat kolase pratinjau 4 adegan...</i>", parse_mode=ParseMode.HTML)
+
+    wm = job.get("watermark") or _get_user_watermark(chat_id)
+    title = job.get("metadata", {}).get("title") or job.get("filename") or "Film"
+    year = job.get("metadata", {}).get("year")
+    title_disp = f"{title} ({year})" if year else title
+
+    tmp = job.get("temp_dir")
+    if not tmp or not os.path.isdir(tmp):
+        tmp = tempfile.mkdtemp()
+        job["temp_dir"] = tmp
+
+    collage_out = os.path.join(tmp, f"collage_{msg_id}.jpg")
+
+    try:
+        video_path = job.get("video_path")
+        generated = False
+        if video_path and os.path.exists(video_path):
+            await generate_scene_collage(video_path, collage_out, watermark=wm)
+            generated = os.path.exists(collage_out)
+
+        if not generated:
+            raw_thumb = job.get("raw_thumb_path")
+            thumb_p = job.get("thumb_path")
+            poster_url = job.get("poster_url")
+
+            sources = []
+            if raw_thumb and os.path.exists(raw_thumb):
+                sources.append(raw_thumb)
+            if thumb_p and os.path.exists(thumb_p):
+                sources.append(thumb_p)
+
+            if poster_url and str(poster_url).startswith("http"):
+                try:
+                    import urllib.request
+                    p_file = os.path.join(tmp, "poster_downloaded.jpg")
+                    if not os.path.exists(p_file):
+                        urllib.request.urlretrieve(poster_url, p_file)
+                    if os.path.exists(p_file):
+                        sources.append(p_file)
+                except Exception:
+                    pass
+
+            if not sources and thumb_p and os.path.exists(thumb_p):
+                sources.append(thumb_p)
+
+            if sources:
+                while len(sources) < 4:
+                    sources.append(sources[0])
+                generate_collage_from_images(sources[:4], collage_out, watermark=wm)
+                generated = os.path.exists(collage_out)
+
+        if generated and os.path.exists(collage_out):
+            job["collage_path"] = collage_out
+            await status_msg.delete()
+            kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🚀 Posting Kolase ke Channel", callback_data=f"post_collage:{msg_id}"),
+                    InlineKeyboardButton("🗑️ Tutup", callback_data="close_collage")
+                ]
+            ])
+            await client.send_photo(
+                chat_id=chat_id,
+                photo=collage_out,
+                caption=(
+                    f"📸 <b>KOLASE PRATINJAU ADEGAN (4-GRID HD)</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎬 <b>Film:</b> {title_disp}\n"
+                    f"📢 <b>Watermark:</b> {wm}\n\n"
+                    f"✨ <i>Kolase ini siap dijadikan foto pratinjau promosi di channel Telegram Anda.</i>"
+                ),
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb
+            )
+        else:
+            await status_msg.edit_text("❌ Gagal membuat kolase adegan: visual tidak tersedia.")
+    except Exception as e:
+        logger.exception("Collage generation failed")
+        await status_msg.edit_text(f"❌ Error membuat kolase: <code>{e}</code>", parse_mode=ParseMode.HTML)
+
+
+@app.on_callback_query(filters.regex(r"^post_collage:(\d+)$"))
+async def handle_post_collage_callback(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Hanya Administrator!", show_alert=True)
+        return
+
+    chat_id = call.message.chat.id
+    msg_id = call.matches[0].group(1)
+    job = _jobs_by_msg.get(int(msg_id)) or _jobs.get(chat_id)
+    if not job or not job.get("collage_path") or not os.path.exists(job["collage_path"]):
+        await call.answer("File kolase tidak ditemukan.", show_alert=True)
+        return
+
+    wm = job.get("watermark") or _get_user_watermark(chat_id)
+    clean_wm = (wm or "").lstrip("@").strip()
+    if not clean_wm:
+        await call.answer("Channel belum diatur.", show_alert=True)
+        return
+
+    meta = job.get("metadata", {})
+    t = meta.get("title") or job.get("filename") or "Film"
+    y = meta.get("year")
+    title_disp = f"{t} ({y})" if y else t
+
+    await call.answer("🚀 Mengirim kolase ke channel...")
+    try:
+        sent_c = await client.send_photo(
+            chat_id=f"@{clean_wm}",
+            photo=job["collage_path"],
+            caption=(
+                f"📸 <b>KOLASE ADEGAN RESMI</b>\n\n"
+                f"🎬 <b>{title_disp}</b>\n"
+                f"🍿 Tayang di channel @{clean_wm}!\n\n"
+                f"👉 <i>Tonton film lengkapnya di postingan video di atas!</i>"
+            ),
+            parse_mode=ParseMode.HTML
+        )
+        post_link = f"https://t.me/{clean_wm}/{sent_c.id}"
+        await call.message.reply_text(
+            f"✅ <b>Kolase Adegan Berhasil Terbit ke Channel!</b>\n\n"
+            f"👉 <a href=\"{post_link}\">Lihat di @{clean_wm}</a>",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        logger.exception("Failed to post collage")
+        await call.message.reply_text(f"❌ Gagal memposting kolase ke channel: <code>{e}</code>")
+
+
+@app.on_callback_query(filters.regex(r"^close_collage$"))
+async def handle_close_collage(client: Client, call: CallbackQuery):
+    await call.answer("Ditutup")
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
+
+@app.on_callback_query(filters.regex(r"^probe_streams:(\d+)$"))
+async def handle_probe_streams_callback(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Hanya Administrator!", show_alert=True)
+        return
+
+    chat_id = call.message.chat.id
+    msg_id = call.matches[0].group(1)
+    job = _jobs_by_msg.get(int(msg_id)) or _jobs.get(chat_id)
+    if not job:
+        await call.answer("Job film kadaluarsa.", show_alert=True)
+        return
+
+    await call.answer("🔍 Memeriksa stream video & audio...")
+    meta = job.setdefault("metadata", {})
+    wm = job.get("watermark") or _get_user_watermark(chat_id)
+
+    video_path = job.get("video_path")
+    info = None
+    if video_path and os.path.exists(video_path):
+        info = await inspect_media_streams(video_path)
+
+    if not info or info.get("error"):
+        cur_aud = meta.get("audio") or "Indonesian (Stereo)"
+        cur_sub = meta.get("subtitle") or "Softsub Indo"
+        meta["audio"] = cur_aud
+        meta["subtitle"] = cur_sub
+    else:
+        if info.get("audio"):
+            meta["audio"] = info["audio"]
+        if info.get("subtitle"):
+            meta["subtitle"] = info["subtitle"]
+        if info.get("resolution") and not meta.get("resolution"):
+            meta["resolution"] = info["resolution"]
+
+    new_caption = _engine.caption_gen.generate(meta, custom_watermark=wm)
+    job["caption_text"] = new_caption
+
+    sent_msg = job.get("sent_msg")
+    kb = get_caption_kb(int(msg_id), wm)
+    if sent_msg:
+        try:
+            await sent_msg.edit_caption(caption=new_caption, parse_mode=ParseMode.HTML, reply_markup=kb)
+            await _apply_expandable_caption(chat_id, sent_msg.id, new_caption, kb)
+        except Exception as ee:
+            logger.debug(f"Edit sent_msg caption failed: {ee}")
+
+    aud_res = meta.get("audio") or "Stereo"
+    sub_res = meta.get("subtitle") or "None"
+    alert = f"✅ Terdeteksi:\n• Audio: {aud_res}\n• Subtitle: {sub_res}"
+    await call.answer(alert, show_alert=True)
+
+
+# ================= MOOD RECOMMENDER =================
+
+def get_mood_selection_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("👻 Horor & Mencekam", callback_data="mood:horror"),
+            InlineKeyboardButton("😂 Komedi & Ngakak", callback_data="mood:comedy")
+        ],
+        [
+            InlineKeyboardButton("💥 Aksi & Menegangkan", callback_data="mood:action"),
+            InlineKeyboardButton("❤️ Romantis & Baper", callback_data="mood:romance")
+        ],
+        [
+            InlineKeyboardButton("👨‍👩‍👧 Keluarga & Animasi", callback_data="mood:family"),
+            InlineKeyboardButton("🎲 Surprise Me (Acak)", callback_data="mood:random")
+        ],
+        [
+            InlineKeyboardButton("🔙 Tutup", callback_data="mood_close")
+        ]
+    ])
+
+
+@app.on_message(filters.command(["mood", "genre", "rekomendasimood"]))
+async def mood_recommender_cmd(client: Client, msg: Message):
+    chat_id = msg.chat.id
+    wm = _get_user_watermark(chat_id)
+    clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
+
+    text = (
+        f"🎭 <b>REKOMENDASI FILM SESUAI MOOD KAMU</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Lagi pengen nonton suasana seperti apa hari ini?\n"
+        f"Pilih kategori di bawah, dan bot akan menyajikan film-film terbaik dengan rating tertinggi dari channel @{clean_wm}!"
+    )
+    await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=get_mood_selection_kb())
+
+
+@app.on_callback_query(filters.regex(r"^btn_mood_menu$"))
+async def cb_mood_menu(client: Client, call: CallbackQuery):
+    chat_id = call.message.chat.id
+    wm = _get_user_watermark(chat_id)
+    clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
+
+    text = (
+        f"🎭 <b>REKOMENDASI FILM SESUAI MOOD KAMU</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Lagi pengen nonton suasana seperti apa hari ini?\n"
+        f"Pilih kategori di bawah, dan bot akan menyajikan film-film terbaik dengan rating tertinggi dari channel @{clean_wm}!"
+    )
+    try:
+        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_mood_selection_kb())
+    except Exception:
+        await call.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=get_mood_selection_kb())
+    await call.answer()
+
+
+@app.on_callback_query(filters.regex(r"^mood:(\w+)$"))
+async def cb_mood_select(client: Client, call: CallbackQuery):
+    mood_key = call.matches[0].group(1)
+    chat_id = call.message.chat.id
+    wm = _get_user_watermark(chat_id)
+    clean_wm = (wm or "@film_indonesia1").lstrip("@").strip()
+
+    mood_labels = {
+        "horror": ("👻", "Horor & Mencekam"),
+        "comedy": ("😂", "Komedi & Ngakak"),
+        "action": ("💥", "Aksi & Menegangkan"),
+        "romance": ("❤️", "Romantis & Baper"),
+        "family": ("👨‍👩‍👧", "Keluarga & Animasi"),
+        "random": ("🎲", "Pilihan Acak (Surprise Me)")
+    }
+    emoji, label = mood_labels.get(mood_key, ("🍿", mood_key.title()))
+
+    results = _engine.cache.get_movies_by_mood(mood_key, channel_username=clean_wm, limit=5)
+
+    if not results:
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎲 Coba Mood Lain", callback_data="btn_mood_menu")],
+            [InlineKeyboardButton("💬 Request Film Favorit", callback_data="btn_start_request")]
+        ])
+        await call.message.edit_text(
+            f"ℹ️ Belum ada film dengan genre <b>{label}</b> di katalog @{clean_wm}.\n\n"
+            f"Yuk ajukan request film agar admin bisa menambahkannya segera!",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb
+        )
+        await call.answer()
+        return
+
+    lines = [
+        f"{emoji} <b>REKOMENDASI FILM: {label.upper()}</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"Berikut film terbaik dengan rating tertinggi di @{clean_wm}:\n"
+    ]
+
+    buttons = []
+    for idx, item in enumerate(results, 1):
+        t = item.get("title", "Film")
+        y = f" ({item['year']})" if item.get("year") else ""
+        r = f"⭐ {item['rating']} | " if item.get("rating") else ""
+        g = f"🎭 {item['genre']}" if item.get("genre") else ""
+        info = f"{r}{g}".strip(" | ")
+        mid = item.get("message_id")
+        p_url = f"https://t.me/{clean_wm}/{mid}" if mid else f"https://t.me/{clean_wm}"
+
+        lines.append(f"<b>#{idx}.</b> 🎬 <b>{html.escape(t)}{y}</b>")
+        if info:
+            lines.append(f"   {html.escape(info)}")
+        lines.append(f"   👉 <a href=\"{p_url}\">Tonton di Channel</a>\n")
+
+        buttons.append([InlineKeyboardButton(f"🎬 {idx}. {t}{y}", url=p_url)])
+
+    buttons.append([
+        InlineKeyboardButton("🎲 Mood Lain", callback_data="btn_mood_menu"),
+        InlineKeyboardButton("💬 Request Film", callback_data="btn_start_request")
+    ])
+
+    await call.message.edit_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+    await call.answer()
+
+
+@app.on_callback_query(filters.regex(r"^mood_close$"))
+async def cb_mood_close(client: Client, call: CallbackQuery):
+    await call.answer("Ditutup")
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
+
 async def video_queue_worker(client: Client):
     global _is_processing
     logger.info("Video queue worker started")
@@ -5756,6 +6295,11 @@ async def video_queue_worker(client: Client):
         finally:
             _is_processing = False
             _video_queue.task_done()
+            if _video_queue.empty():
+                try:
+                    await send_batch_review_dashboard(cl, m.chat.id)
+                except Exception as bde:
+                    logger.debug(f"Batch review trigger error: {bde}")
 
 
 @app.on_message(filters.video | filters.document)
@@ -6102,8 +6646,8 @@ async def handle_audiosub_callback(client: Client, call: CallbackQuery):
         return
 
     chat_id = call.message.chat.id
-    job = _jobs.get(chat_id)
     msg_id = call.matches[0].group(1)
+    job = _jobs_by_msg.get(int(msg_id)) or _jobs.get(chat_id)
 
     meta = job.get("metadata", {}) if job else {}
     curr_aud = meta.get("audio") or meta.get("audioCodec") or "Belum diatur"
@@ -6126,6 +6670,9 @@ async def handle_audiosub_callback(client: Client, call: CallbackQuery):
         [
             InlineKeyboardButton("💬 English Sub", callback_data=f"setsub:English Sub:{msg_id}"),
             InlineKeyboardButton("❌ Tanpa Subtitle", callback_data=f"setsub:none:{msg_id}")
+        ],
+        [
+            InlineKeyboardButton("🔍 Auto-Detect Audio & Sub", callback_data=f"probe_streams:{msg_id}")
         ],
         [
             InlineKeyboardButton("🔙 Tutup Menu", callback_data=f"audiosubback:{msg_id}")
@@ -6163,7 +6710,7 @@ async def handle_setaudiosub_choice(client: Client, call: CallbackQuery):
     val = call.matches[0].group(2)
     msg_id = call.matches[0].group(3)
     chat_id = call.message.chat.id
-    job = _jobs.get(chat_id)
+    job = _jobs_by_msg.get(int(msg_id)) or _jobs.get(chat_id)
     if not job:
         await call.answer("Job film kadaluarsa. Kirim ulang videonya.", show_alert=True)
         return
