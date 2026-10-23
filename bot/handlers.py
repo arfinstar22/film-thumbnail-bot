@@ -5221,63 +5221,19 @@ async def publish_video_to_channel(
 
     if BOT_TOKEN:
         try:
-            # Upload to a hidden channel to get file_ids (avoids visible messages in bot chat)
-            upload_target = VAULT_CHANNEL or chat_id
-
-            # Upload banner to Telegram to get file_id for slideshow
-            if banner_path and os.path.exists(banner_path):
-                try:
-                    tmp_banner = await client.send_photo(
-                        chat_id=upload_target,
-                        photo=banner_path,
-                        disable_notification=True
-                    )
-                    if tmp_banner and tmp_banner.photo:
-                        banner_file_id = tmp_banner.photo[-1].file_id
-                    await asyncio.sleep(0.3)
-                    try:
-                        await tmp_banner.delete()
-                    except Exception:
-                        try:
-                            await client.delete_messages(upload_target, tmp_banner.id)
-                        except Exception:
-                            pass
-                except Exception as ue:
-                    logger.debug(f"Banner upload for file_id failed: {ue}")
-
-            # Upload poster to Telegram to get file_id for slideshow
-            if poster_path and os.path.exists(poster_path):
-                try:
-                    tmp_poster = await client.send_photo(
-                        chat_id=upload_target,
-                        photo=poster_path,
-                        disable_notification=True
-                    )
-                    if tmp_poster and tmp_poster.photo:
-                        poster_file_id = tmp_poster.photo[-1].file_id
-                    await asyncio.sleep(0.3)
-                    try:
-                        await tmp_poster.delete()
-                    except Exception:
-                        try:
-                            await client.delete_messages(upload_target, tmp_poster.id)
-                        except Exception:
-                            pass
-                except Exception as pe:
-                    logger.debug(f"Poster upload for file_id failed: {pe}")
-
             # Build reply markup for Bot API format
             rich_kb = _build_bot_api_reply_markup(channel_kb)
 
-            # Send native rich article post via Bot API 10.1+ sendRichMessage
+            # Send native rich article post via Bot API sendRichMessage with multipart file attachment
+            # Direct attachment via attach:// completely avoids sending temporary photos to the bot chat
             result = await async_send_rich_article_post(
                 bot_token=BOT_TOKEN,
                 chat_id=watermark,
                 metadata=meta,
                 watermark=watermark,
                 video_file_id=video_file_id,
-                banner_file_id_or_url=banner_file_id,
-                poster_file_id_or_url=poster_file_id,
+                banner_path=banner_path,
+                poster_path=poster_path,
                 reply_markup=rich_kb,
                 protect_content=protect_flag,
             )
@@ -6848,7 +6804,7 @@ async def handle_banner_callback(client: Client, call: CallbackQuery):
             f"⭐ Rating: {html.escape(str(meta.get('rating') or 'Belum ada'))}\n"
             f"🎭 Genre: {html.escape(str(meta.get('genre') or 'Film'))}\n"
             f"📢 Channel: {html.escape(wm)}\n\n"
-            f"<i>Banner ini otomatis dikirim di atas video saat memposting ke channel.</i>"
+            f"<i>Banner HD &amp; Poster ini otomatis dimasukkan ke dalam lipatan card postingan channel (1 card bersama video).</i>"
         )
 
         _banner_sessions[chat_id] = {

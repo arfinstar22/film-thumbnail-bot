@@ -14,8 +14,10 @@ import asyncio
 import html as html_mod
 import json
 import logging
+import os
 import urllib.parse
 import urllib.request
+import uuid
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
@@ -85,7 +87,7 @@ def build_rich_article_payload(
 
     # 3. SLIDESHOW (Banner & Poster swipeable gallery — collapsible)
     slideshow_imgs: List[str] = []
-    if banner_file_id_or_url and not str(banner_file_id_or_url).startswith("http"):
+    if banner_file_id_or_url:
         slideshow_imgs.append('<img src="tg://photo?id=banner_img"/>')
         media_items.append({
             "id": "banner_img",
@@ -96,7 +98,6 @@ def build_rich_article_payload(
         })
     if (
         poster_file_id_or_url
-        and not str(poster_file_id_or_url).startswith("http")
         and poster_file_id_or_url != banner_file_id_or_url
     ):
         slideshow_imgs.append('<img src="tg://photo?id=poster_img"/>')
@@ -109,11 +110,14 @@ def build_rich_article_payload(
         })
 
     if slideshow_imgs:
-        imgs_html = "\n".join(slideshow_imgs)
+        if len(slideshow_imgs) > 1:
+            imgs_content = f"<tg-slideshow>\n{''.join(slideshow_imgs)}\n</tg-slideshow>"
+        else:
+            imgs_content = slideshow_imgs[0]
         html_parts.append(
             f"<details>\n"
             f"<summary>🖼️ Poster &amp; Banner HD</summary>\n"
-            f"{imgs_html}\n"
+            f"{imgs_content}\n"
             f"</details>"
         )
 
@@ -232,15 +236,27 @@ async def async_send_rich_article_post(
     video_file_id: Optional[str] = None,
     banner_file_id_or_url: Optional[str] = None,
     poster_file_id_or_url: Optional[str] = None,
+    banner_path: Optional[str] = None,
+    poster_path: Optional[str] = None,
     reply_markup: Optional[Dict[str, Any]] = None,
     protect_content: bool = False,
     disable_notification: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    """Send rich article post using Telegram Bot API 10.1+ sendRichMessage.
+    """Send rich article post using Telegram Bot API sendRichMessage.
 
+    Supports local file attachments via multipart/form-data with attach://.
     Returns the message result dict from Telegram on success, or None on error.
     """
     url = f"https://api.telegram.org/bot{bot_token}/sendRichMessage"
+
+    files_to_upload: Dict[str, str] = {}
+    if banner_path and os.path.exists(banner_path):
+        banner_file_id_or_url = "attach://banner_file"
+        files_to_upload["banner_file"] = banner_path
+
+    if poster_path and os.path.exists(poster_path):
+        poster_file_id_or_url = "attach://poster_file"
+        files_to_upload["poster_file"] = poster_path
 
     payload = build_rich_article_payload(
         chat_id=chat_id,
@@ -255,12 +271,36 @@ async def async_send_rich_article_post(
     )
 
     def _sync_request():
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=data,
-            headers={"Content-Type": "application/json"},
-        )
+        if not files_to_upload:
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                url,
+                data=data,
+                headers={"Content-Type": "application/json"},
+            )
+        else:
+            boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
+            body = bytearray()
+            for k, v in payload.items():
+                body.extend(f"--{boundary}\r\n".encode())
+                body.extend(f'Content-Disposition: form-data; name="{k}"\r\n\r\n'.encode())
+                body.extend(json.dumps(v).encode() if isinstance(v, (dict, list)) else str(v).encode())
+                body.extend(b"\r\n")
+            for fname, fpath in files_to_upload.items():
+                if fpath and os.path.exists(fpath):
+                    body.extend(f"--{boundary}\r\n".encode())
+                    body.extend(f'Content-Disposition: form-data; name="{fname}"; filename="{os.path.basename(fpath)}"\r\n'.encode())
+                    body.extend(b"Content-Type: image/jpeg\r\n\r\n")
+                    with open(fpath, "rb") as f:
+                        body.extend(f.read())
+                    body.extend(b"\r\n")
+            body.extend(f"--{boundary}--\r\n".encode())
+            req = urllib.request.Request(
+                url,
+                data=bytes(body),
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            )
+
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
