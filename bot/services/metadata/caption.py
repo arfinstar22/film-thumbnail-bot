@@ -199,7 +199,7 @@ class CaptionGenerator:
 
         lines.extend(spec_lines)
 
-        # 4. Expandable Block: Tonton Juga Film Serupa
+        # 4. Expandable Block: Tonton Juga Film Lain
         if f["clean_wm"] and f["genre"]:
             try:
                 from .cache import MetadataCache
@@ -210,7 +210,7 @@ class CaptionGenerator:
                         sim_lines = [
                             "",
                             "<blockquote expandable>",
-                            "🍿 <b>TONTON JUGA FILM SERUPA:</b>",
+                            "🍿 <b>TONTON JUGA FILM LAIN:</b>",
                         ]
                         for sm in sims:
                             sm_title = html.escape(sm.get("title") or "Film")

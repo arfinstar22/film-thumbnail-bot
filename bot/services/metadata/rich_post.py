@@ -229,7 +229,7 @@ def build_rich_article_payload(
             f"</details>"
         )
 
-    # 7. EXPANDABLE DETAILS — Tonton Juga Film Serupa (Rekomendasi Pintar Katalog Channel)
+    # 7. EXPANDABLE DETAILS — Tonton Juga Film Lain (Rekomendasi Pintar Katalog Channel)
     if clean_wm and genre:
         try:
             from .cache import MetadataCache
@@ -247,7 +247,7 @@ def build_rich_article_payload(
                 sim_body = "<br/>\n".join(sim_links)
                 html_parts.append(
                     f"<details>\n"
-                    f"<summary>🍿 Tonton Juga Film Serupa</summary>\n"
+                    f"<summary>🍿 Tonton Juga Film Lain</summary>\n"
                     f"{sim_body}\n"
                     f"</details>"
                 )
