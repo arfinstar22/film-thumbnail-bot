@@ -618,9 +618,9 @@ def _build_bot_api_reply_markup(reply_markup):
                 text_lower = (btn.text or "").lower()
                 if "brosur" in text_lower or "sinopsis" in text_lower:
                     style = "primary"
-                elif "gabung" in text_lower or "join" in text_lower:
+                elif "gabung" in text_lower or "join" in text_lower or "bagikan" in text_lower or "share" in text_lower:
                     style = "success"
-                elif "trailer" in text_lower:
+                elif "trailer" in text_lower or "request" in text_lower:
                     style = "danger"
 
             if style in ("primary", "success", "danger"):
@@ -814,7 +814,8 @@ def build_channel_post_keyboard(
     - 📖 Brosur Sinopsis: Primary Blue Background
     - 📢 Gabung Channel: Success Green Background
     - 🎬 Tonton Trailer: Danger Red Background
-    - 💬 Request Film & 🔄 Bagikan Film: Platform Default Transparent Background
+    - 💬 Request Film: Danger Red Background
+    - 🔄 Bagikan Film: Success Green Background
     """
     clean_wm = (watermark or "").lstrip("@").strip()
     channel_url = f"https://t.me/{clean_wm}" if clean_wm else "https://t.me"
@@ -846,10 +847,12 @@ def build_channel_post_keyboard(
     btn_trailer.style = "danger"
     kb_rows.append([btn_join, btn_trailer])
 
-    # 3. 💬 Request Film + 🔄 Bagikan Film (Default Background)
+    # 3. 💬 Request Film (Danger Red) + 🔄 Bagikan Film (Success Green)
     btn_share = InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
+    btn_share.style = "success"
     if request_link and request_link.lower() != "off":
         btn_req = InlineKeyboardButton("💬 Request Film", url=request_link)
+        btn_req.style = "danger"
         kb_rows.append([btn_req, btn_share])
     else:
         kb_rows.append([btn_share])

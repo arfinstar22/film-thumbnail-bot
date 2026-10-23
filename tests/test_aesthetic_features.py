@@ -171,8 +171,8 @@ class TestAestheticFeatures(unittest.TestCase):
         self.assertEqual(bot_api_kb[0][0]["style"], "primary")   # Blue
         self.assertEqual(bot_api_kb[1][0]["style"], "success")   # Green
         self.assertEqual(bot_api_kb[1][1]["style"], "danger")    # Red
-        self.assertNotIn("style", bot_api_kb[2][0])              # Default
-        self.assertNotIn("style", bot_api_kb[2][1])              # Default
+        self.assertEqual(bot_api_kb[2][0]["style"], "danger")    # Request: Red
+        self.assertEqual(bot_api_kb[2][1]["style"], "success")   # Bagikan: Green
 
 
 if __name__ == "__main__":
