@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 from .parser import FilenameParser
 from .caption import CaptionGenerator
 from .cache import MetadataCache
-from .synopsis import WikipediaSynopsisService
+from .synopsis import WikipediaSynopsisService, ensure_indonesian_text
 from .rating import MovieRatingService
 from .banner import BannerGenerator
 from .thumbnail import ThumbnailGenerator
@@ -111,6 +111,9 @@ class MetadataEngine:
                         title, year, metadata.get("genre") or (rate_res.get("genre") if rate_res else None)
                     )
 
+            if metadata.get("synopsis"):
+                metadata["synopsis"] = ensure_indonesian_text(metadata["synopsis"])
+
         caption = self.caption_gen.generate(metadata, custom_watermark=watermark)
         self.cache.save_caption(filename, caption)
         return {"caption": caption, "source": "local", "metadata": metadata}
@@ -163,7 +166,7 @@ class MetadataEngine:
             # Synopsis
             syn_match = re.search(r"(?:Sinopsis|Storyline|Deskripsi)\s*[:：]?\s*\n*(.*?)(?=\n\n|\Z)", clean, re.IGNORECASE | re.DOTALL)
             if syn_match and not meta.get("synopsis"):
-                meta["synopsis"] = syn_match.group(1).strip()
+                meta["synopsis"] = ensure_indonesian_text(syn_match.group(1).strip())
 
         return meta
 
@@ -216,5 +219,8 @@ class MetadataEngine:
                 meta["synopsis"] = self.synopsis_service.get_fallback_synopsis(
                     title, year, meta.get("genre") or (rate_res.get("genre") if rate_res else None)
                 )
+
+        if meta.get("synopsis"):
+            meta["synopsis"] = ensure_indonesian_text(meta["synopsis"])
 
         return meta

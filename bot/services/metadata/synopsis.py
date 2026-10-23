@@ -28,7 +28,7 @@ def translate_to_indonesian(text: str) -> str:
         req = urllib.request.Request(url, headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         })
-        with urllib.request.urlopen(req, timeout=3.5) as resp:
+        with urllib.request.urlopen(req, timeout=4.5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             if data and isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
                 translated_parts = [segment[0] for segment in data[0] if segment and len(segment) > 0 and segment[0]]
@@ -38,6 +38,52 @@ def translate_to_indonesian(text: str) -> str:
     except Exception as e:
         logger.debug(f"Translation error: {e}")
     return clean_text
+
+
+def is_english_text(text: str) -> bool:
+    """Detects if text is predominantly in English rather than Indonesian."""
+    if not text:
+        return False
+    words = set(re.findall(r"\b[a-zA-Z]{2,}\b", text.lower()))
+    if not words:
+        return False
+
+    english_markers = {
+        "the", "and", "is", "of", "in", "to", "with", "after", "their", "when",
+        "who", "from", "about", "story", "family", "young", "life", "between",
+        "during", "she", "he", "his", "her", "they", "them", "which", "where",
+        "into", "through", "while", "against", "finds", "must", "discovers",
+        "begins", "becomes", "forced", "secret", "mysterious", "village", "house",
+        "mother", "father", "husband", "wife", "friend", "man", "woman", "years",
+        "love", "death", "haunted", "ghost", "spirit", "night", "dark", "truth"
+    }
+    indonesian_markers = {
+        "yang", "dan", "di", "dari", "ke", "ini", "itu", "dengan", "untuk",
+        "pada", "adalah", "seorang", "mereka", "saat", "ketika", "karena",
+        "namun", "dalam", "akan", "bisa", "harus", "menjadi", "setelah",
+        "keluarga", "kisah", "cerita", "kehidupan", "misteri", "rumah",
+        "anak", "ibu", "ayah", "suami", "istri", "sahabat", "cinta", "kematian"
+    }
+
+    en_matches = len(words.intersection(english_markers))
+    id_matches = len(words.intersection(indonesian_markers))
+
+    if en_matches > 0 and id_matches == 0:
+        return True
+    if en_matches >= 2 and en_matches > id_matches:
+        return True
+    return False
+
+
+def ensure_indonesian_text(text: str) -> str:
+    """Ensures given synopsis or overview is in Indonesian, translating if English."""
+    if not text or not text.strip():
+        return ""
+    if is_english_text(text):
+        translated = translate_to_indonesian(text)
+        if translated:
+            return translated
+    return text.strip()
 
 
 def generate_smart_fallback(title: str, year: Optional[int] = None, genre: Optional[str] = None) -> str:

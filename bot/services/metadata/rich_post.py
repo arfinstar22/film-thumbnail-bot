@@ -20,6 +20,8 @@ import urllib.request
 import uuid
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from .synopsis import ensure_indonesian_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -52,6 +54,8 @@ def build_rich_article_payload(
     director = metadata.get("director")
     actors = metadata.get("actors")
     synopsis = (metadata.get("synopsis") or "").strip()
+    if synopsis:
+        synopsis = ensure_indonesian_text(synopsis)
     source = metadata.get("source")
     video_codec = metadata.get("videoCodec")
     audio_codec = metadata.get("audioCodec")

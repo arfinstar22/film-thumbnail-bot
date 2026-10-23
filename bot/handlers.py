@@ -858,31 +858,15 @@ def build_channel_post_keyboard(
 
 
 def get_caption_kb(message_id: int, watermark: str):
-    clean_wm = watermark.lstrip("@").strip()
-    channel_url = f"https://t.me/{clean_wm}" if clean_wm else "https://t.me"
+    btn_post = InlineKeyboardButton("🚀 Posting ke Channel", callback_data=f"post_banner:{message_id}")
+    btn_post.style = "primary"
+
+    btn_prev = InlineKeyboardButton("👁️ Preview", callback_data=f"banner:{message_id}")
+    btn_fix = InlineKeyboardButton("🖼️ Perbaiki Poster", callback_data=f"fixbanner:{message_id}")
 
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🚀 Posting ke Channel", callback_data=f"post_banner:{message_id}")
-        ],
-        [
-            InlineKeyboardButton("⏰ Jadwal Prime-Time", callback_data=f"sched:{message_id}"),
-            InlineKeyboardButton("👁️ Preview", callback_data=f"banner:{message_id}")
-        ],
-        [
-            InlineKeyboardButton("🖼️ Perbaiki Poster", callback_data=f"fixbanner:{message_id}"),
-            InlineKeyboardButton("🔊 Audio & Sub", callback_data=f"audiosub:{message_id}")
-        ],
-        [
-            InlineKeyboardButton("✏️ Edit Caption", callback_data=f"edit:{message_id}"),
-            InlineKeyboardButton("📋 Salin Teks", callback_data=f"copy:{message_id}")
-        ],
-        [
-            InlineKeyboardButton("🔄 Format Ulang", callback_data=f"info:{message_id}")
-        ],
-        [
-            InlineKeyboardButton("📢 Buka Channel", url=channel_url)
-        ]
+        [btn_post],
+        [btn_prev, btn_fix]
     ])
 
 

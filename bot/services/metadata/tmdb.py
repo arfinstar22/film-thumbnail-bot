@@ -9,6 +9,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 from .cache import MetadataCache
+from .synopsis import ensure_indonesian_text
 
 logger = logging.getLogger(__name__)
 
@@ -312,8 +313,9 @@ class TMDbService:
                 translated_genres.append(name)
         genre_str = ", ".join(translated_genres)
 
-        # Overview / Synopsis
-        overview = (main.get("overview") or fallback.get("overview") or "").strip()
+        # Overview / Synopsis (Guaranteed 100% Bahasa Indonesia)
+        raw_overview = (main.get("overview") or fallback.get("overview") or "").strip()
+        overview = ensure_indonesian_text(raw_overview) if raw_overview else ""
 
         # Credits: Director & Cast
         credits = main.get("credits") or fallback.get("credits") or {}

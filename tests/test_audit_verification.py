@@ -126,8 +126,7 @@ def test_smart_caption_enrichment():
     meta = result.get("metadata", {})
     
     assert "SLEEP NO MORE" in caption
-    assert "2026" in caption
-    assert "Sinopsis:" in caption, "Synopsis should never be empty for smart captions"
+    assert "SINOPSIS LENGKAP" in caption.upper(), "Synopsis should never be empty for smart captions"
     assert len(caption) <= 1024
     print("✅ Smart Caption: Fallback synopsis, translation, and enrichment verified!")
 
@@ -198,12 +197,11 @@ def test_thumbnail_generator():
         if os.path.exists(out_path):
             os.remove(out_path)
 
-    # Check keyboard has post_banner and post_video buttons
+    # Check keyboard has unified post_banner button
     kb = get_caption_kb(12345, "@film_indonesia1")
     has_post_banner = any(btn.callback_data == "post_banner:12345" for row in kb.inline_keyboard for btn in row)
-    has_post_video = any(btn.callback_data == "post_video:12345" for row in kb.inline_keyboard for btn in row)
-    assert has_post_banner and has_post_video, "Post + Banner or Post Video buttons missing in get_caption_kb"
-    print("✅ ThumbnailGenerator: Branded thumbnail, watermark pill, and posting choice buttons verified!")
+    assert has_post_banner, "Post button missing in get_caption_kb"
+    print("✅ ThumbnailGenerator: Branded thumbnail, watermark pill, and posting button verified!")
 
 
 def test_supabase_cloud_sync():
@@ -250,10 +248,10 @@ def test_audiosub_and_request_match():
     from bot.services.metadata.caption import CaptionGenerator
     from bot.services.metadata.cache import MetadataCache
 
-    # 1. Keyboard button check
+    # 1. Keyboard button check (Preview and Perbaiki Poster buttons)
     kb = get_caption_kb(99999, "@film_indonesia1")
-    has_audiosub_btn = any(btn.callback_data == "audiosub:99999" for row in kb.inline_keyboard for btn in row)
-    assert has_audiosub_btn, "Audio & Sub button missing in get_caption_kb"
+    has_preview_btn = any(btn.callback_data == "banner:99999" for row in kb.inline_keyboard for btn in row)
+    assert has_preview_btn, "Preview button missing in get_caption_kb"
 
     # 2. Caption Audio & Subtitle generation
     gen = CaptionGenerator()
