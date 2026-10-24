@@ -41,15 +41,26 @@ from .services.metadata.cache import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-if BOT_TOKEN:
+_engine = MetadataEngine()
+
+# Check for cached session string to bypass Telegram ImportBotAuthorization rate limits
+saved_session = SESSION_STRING.strip() if SESSION_STRING else ""
+if not saved_session:
+    try:
+        saved_session = _engine.cache.get_setting("pyrogram_bot_session", "").strip()
+    except Exception:
+        saved_session = ""
+
+if saved_session:
+    logger.info("🔑 Inisialisasi Client dengan SESSION_STRING tersimpan (panjang %s)", len(saved_session))
+    app = Client("thumb_bot", api_id=API_ID, api_hash=API_HASH, session_string=saved_session, in_memory=True)
+elif BOT_TOKEN:
     masked_tok = BOT_TOKEN[:10] + "..." + BOT_TOKEN[-4:] if len(BOT_TOKEN) > 14 else "NONE"
     logger.info("🔑 Inisialisasi Client dengan BOT_TOKEN: %s", masked_tok)
     app = Client("thumb_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
-elif SESSION_STRING:
-    logger.info("🔑 Inisialisasi Client dengan SESSION_STRING (panjang %s)", len(SESSION_STRING))
-    app = Client("thumb_bot", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING, in_memory=True)
 else:
     raise RuntimeError("BOT_TOKEN atau SESSION_STRING harus diisi.")
+
 
 # Defense-in-depth: Safely handle expired callback query answers across all handlers
 _orig_cb_answer = CallbackQuery.answer
@@ -74,7 +85,6 @@ _jobs_by_msg: Dict[int, Dict[str, Any]] = {}
 _banner_sessions: Dict[int, Dict[str, Any]] = {}
 _user_states: Dict[int, str] = {}
 _pending_smart_requests: Dict[str, Dict[str, Any]] = {}
-_engine = MetadataEngine()
 _video_queue: asyncio.Queue = asyncio.Queue()
 _is_processing: bool = False
 _queue_worker_task: Optional[asyncio.Task] = None

@@ -35,6 +35,14 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(res).encode("utf-8"))
+        if self.path == "/restart":
+            import json
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "restarting", "message": "Bot process restarting now"}).encode("utf-8"))
+            threading.Thread(target=lambda: (time.sleep(1), os._exit(1))).start()
+            return
         if self.path == "/status":
             import json
             from .handlers import _engine
@@ -50,7 +58,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                     pass
             info = {
                 "status": "online",
-                "version": "v1.3-inline",
+                "version": "v1.4-series",
                 "catalog_count": cat_count,
                 "supabase_enabled": supabase_on,
                 "has_engine": has_cache
@@ -105,6 +113,14 @@ def run_self_ping():
 async def start_with_hydration():
     await app.start()
     logging.info("Bot thumbnail film berjalan & siap melayani!")
+    try:
+        s_str = await app.export_session_string()
+        if s_str:
+            from .handlers import _engine
+            _engine.cache.set_setting("pyrogram_bot_session", s_str)
+            logging.info("✅ Sesi Pyrogram berhasil disimpan ke settings database.")
+    except Exception as e:
+        logging.warning("Gagal mengekspor session string: %s", e)
     asyncio.create_task(on_bot_startup(app))
     await idle()
     await app.stop()
@@ -136,6 +152,11 @@ def run_bot():
             )
             time.sleep(wait_time + 5)
         except SessionRevoked as e:
+            try:
+                from .handlers import _engine
+                _engine.cache.set_setting("pyrogram_bot_session", "")
+            except Exception:
+                pass
             token_preview = (BOT_TOKEN[:10] + "..." + BOT_TOKEN[-4:]) if BOT_TOKEN and len(BOT_TOKEN) > 14 else str(BOT_TOKEN)
             logging.error(
                 f"🚨 TELEGRAM [401 SESSION_REVOKED]: Sesi/token di server ini sudah DI-REVOKE oleh Telegram!\n"
