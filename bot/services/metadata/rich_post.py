@@ -483,13 +483,60 @@ async def async_delete_telegram_message(
     return await asyncio.to_thread(_sync)
 
 
+async def async_delete_telegram_messages(
+    bot_token: str,
+    chat_id: Union[int, str],
+    message_ids: List[int]
+) -> Tuple[bool, Optional[str]]:
+    """Delete multiple messages using Telegram Bot API deleteMessages with deleteMessage fallback."""
+    if not bot_token:
+        return False, "BOT_TOKEN tidak tersedia"
+    if not message_ids:
+        return True, None
+
+    clean_chat = str(chat_id).strip()
+    if not clean_chat.startswith("@") and not clean_chat.startswith("-"):
+        clean_chat = f"@{clean_chat}"
+
+    # Coba batch deleteMessages (Bot API 7.0+)
+    url_batch = f"https://api.telegram.org/bot{bot_token}/deleteMessages"
+    payload_batch = json.dumps({"chat_id": clean_chat, "message_ids": [int(m) for m in message_ids]}).encode("utf-8")
+    req_batch = urllib.request.Request(url_batch, data=payload_batch, headers={"Content-Type": "application/json"})
+
+    def _sync_batch():
+        try:
+            with urllib.request.urlopen(req_batch, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if data.get("ok"):
+                    return True, None
+                return False, data.get("description", "deleteMessages failed")
+        except Exception as e:
+            return False, str(e)
+
+    ok, err = await asyncio.to_thread(_sync_batch)
+    if ok:
+        return True, None
+
+    # Fallback ke deleteMessage per id
+    any_deleted = False
+    last_err = err
+    for mid in message_ids:
+        s_ok, s_err = await async_delete_telegram_message(bot_token, clean_chat, mid)
+        if s_ok:
+            any_deleted = True
+        else:
+            last_err = s_err
+
+    return any_deleted, last_err
+
+
 async def async_delete_channel_post(
     client: Any,
     bot_token: Optional[str],
     chat_id: Union[int, str],
-    message_id: int
+    message_ids: Union[int, List[int]]
 ) -> Tuple[bool, Optional[str]]:
-    """Delete a message from channel trying Bot API HTTP first, then Pyrogram MTProto fallback.
+    """Delete message(s) from channel trying Bot API HTTP first, then Pyrogram MTProto fallback.
 
     Returns:
         (True, None) on success.
@@ -499,29 +546,34 @@ async def async_delete_channel_post(
     if not clean_chat.startswith("@") and not clean_chat.startswith("-"):
         clean_chat = f"@{clean_chat}"
 
+    m_list = [message_ids] if isinstance(message_ids, int) else list(message_ids)
+    if not m_list:
+        return True, None
+
     last_err: Optional[str] = None
 
-    # 1. Coba via HTTP Bot API deleteMessage (paling andal untuk bot)
+    # 1. Coba via HTTP Bot API deleteMessages/deleteMessage (paling andal untuk bot)
     if bot_token:
-        ok, err = await async_delete_telegram_message(bot_token, clean_chat, message_id)
+        ok, err = await async_delete_telegram_messages(bot_token, clean_chat, m_list)
         if ok:
-            logger.info(f"Berhasil menghapus pesan #{message_id} dari {clean_chat} via Bot API")
+            logger.info(f"Berhasil menghapus pesan {m_list} dari {clean_chat} via Bot API")
             return True, None
         last_err = err
-        logger.warning(f"Bot API deleteMessage #{message_id} di {clean_chat} gagal: {err}")
+        logger.warning(f"Bot API deleteMessages {m_list} di {clean_chat} gagal: {err}")
 
     # 2. Coba via Pyrogram client MTProto sebagai fallback
     if client:
         try:
-            await client.delete_messages(chat_id=clean_chat, message_ids=[int(message_id)])
-            logger.info(f"Berhasil menghapus pesan #{message_id} dari {clean_chat} via Pyrogram")
+            await client.delete_messages(chat_id=clean_chat, message_ids=m_list)
+            logger.info(f"Berhasil menghapus pesan {m_list} dari {clean_chat} via Pyrogram")
             return True, None
         except Exception as pe:
             pe_str = str(pe)
             if "message to delete not found" in pe_str.lower() or "MESSAGE_ID_INVALID" in pe_str:
                 return True, None
             last_err = pe_str
-            logger.warning(f"Pyrogram delete_messages #{message_id} di {clean_chat} gagal: {pe}")
+            logger.warning(f"Pyrogram delete_messages {m_list} di {clean_chat} gagal: {pe}")
 
     return False, last_err
+
 

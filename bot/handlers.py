@@ -6203,8 +6203,7 @@ async def _process_video_task(client: Client, msg: Message):
                         old_mid_ap = existing_movie["message_id"]
                         old_disp_ap = f"{existing_movie.get('title', meta_title)} ({existing_movie.get('year', '')})"
                         logger.info(f"Auto-post duplikat replace: '{old_disp_ap}' (#{old_mid_ap}) akan dihapus.")
-                        del_ok_ap, del_err_ap = await async_delete_channel_post(client, BOT_TOKEN, wm, old_mid_ap)
-                        await async_delete_channel_post(client, BOT_TOKEN, wm, old_mid_ap + 1)
+                        del_ok_ap, del_err_ap = await async_delete_channel_post(client, BOT_TOKEN, wm, [old_mid_ap, old_mid_ap + 1])
                         if del_ok_ap:
                             _engine.cache.delete_movie_posts([old_mid_ap], clean_wm)
                         else:
@@ -6981,10 +6980,8 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
             old_mid = old_movie["message_id"]
             old_disp = f"{old_movie.get('title', title_meta)} ({old_movie.get('year', '')})"
             logger.info(f"Duplikat terdeteksi: '{old_disp}' (#{old_mid}) akan dihapus dan diganti versi baru.")
-            # Hapus post lama via Bot API & Pyrogram
-            del_ok, del_err = await async_delete_channel_post(client, BOT_TOKEN, f"@{clean_wm_dup}", old_mid)
-            # Hapus juga stiker pembatas jika ada
-            await async_delete_channel_post(client, BOT_TOKEN, f"@{clean_wm_dup}", old_mid + 1)
+            # Hapus post lama + stiker pembatas via Bot API & Pyrogram
+            del_ok, del_err = await async_delete_channel_post(client, BOT_TOKEN, f"@{clean_wm_dup}", [old_mid, old_mid + 1])
 
             if del_ok:
                 # Hapus dari katalog database HANYA jika terbukti berhasil dihapus dari Telegram
@@ -7001,8 +6998,6 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
                 await call.message.reply_text(
                     f"⚠️ <b>Gagal Menghapus Post Lama #{old_mid}:</b>\n"
                     f"Telegram menolak: <code>{html.escape(str(del_err or 'Izin ditolak'))}</code>\n\n"
-                    f"💡 <b>PENTING:</b> Pastikan Bot memiliki hak <b>Admin</b> di channel @{clean_wm_dup} "
-                    f"dengan izin <b>'Hapus Pesan' (Delete Messages)</b> diaktifkan!\n\n"
                     f"<i>Melanjutkan upload versi terbaru...</i>",
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True

@@ -167,14 +167,14 @@ class TestRichArticlePost(unittest.TestCase):
         self.assertFalse(ok)
 
         # Test successful Bot API delete
-        with patch("bot.services.metadata.rich_post.async_delete_telegram_message", new_callable=AsyncMock) as mock_del:
+        with patch("bot.services.metadata.rich_post.async_delete_telegram_messages", new_callable=AsyncMock) as mock_del:
             mock_del.return_value = (True, None)
             ok, err = asyncio.run(async_delete_channel_post(None, "dummy_token", "@testchan", 123))
             self.assertTrue(ok)
             self.assertIsNone(err)
 
         # Test Bot API fail then Pyrogram success
-        with patch("bot.services.metadata.rich_post.async_delete_telegram_message", new_callable=AsyncMock) as mock_del:
+        with patch("bot.services.metadata.rich_post.async_delete_telegram_messages", new_callable=AsyncMock) as mock_del:
             mock_del.return_value = (False, "Bot API error")
             mock_client = AsyncMock()
             mock_client.delete_messages = AsyncMock(return_value=1)
@@ -183,7 +183,7 @@ class TestRichArticlePost(unittest.TestCase):
             self.assertIsNone(err)
 
         # Test both fail
-        with patch("bot.services.metadata.rich_post.async_delete_telegram_message", new_callable=AsyncMock) as mock_del:
+        with patch("bot.services.metadata.rich_post.async_delete_telegram_messages", new_callable=AsyncMock) as mock_del:
             mock_del.return_value = (False, "Bad Request: message can't be deleted")
             mock_client = AsyncMock()
             mock_client.delete_messages = AsyncMock(side_effect=Exception("CHAT_ADMIN_REQUIRED"))
