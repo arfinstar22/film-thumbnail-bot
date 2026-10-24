@@ -83,6 +83,30 @@ class TestSmartRequestAndQuota(unittest.TestCase):
         suggestion = self.tmdb.suggest_movie_correction("Mencuri Raden Saleh 2022")
         self.assertIsNone(suggestion)
 
+    def test_catalog_search_exact_and_typo_agak_laen(self):
+        """Catalog search must match both 'agak laen' and typo 'agak lain'."""
+        self.cache.save_movie_post(
+            title="Agak Laen",
+            year=2024,
+            rating="7.5",
+            genre="Comedy, Horror",
+            quality="1080p",
+            channel_username="film_indonesia1",
+            message_id=75
+        )
+
+        # Exact match test
+        res_exact = self.cache.search_catalog("agak laen")
+        self.assertTrue(len(res_exact) >= 1)
+        self.assertEqual(res_exact[0]["title"], "Agak Laen")
+        self.assertEqual(res_exact[0]["message_id"], 75)
+
+        # Typo match test (agak lain -> Agak Laen)
+        res_typo = self.cache.search_catalog("agak lain")
+        self.assertTrue(len(res_typo) >= 1)
+        self.assertEqual(res_typo[0]["title"], "Agak Laen")
+        self.assertTrue(res_typo[0]["_is_fuzzy"])
+
 
 if __name__ == "__main__":
     unittest.main()

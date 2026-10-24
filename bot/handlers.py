@@ -4415,17 +4415,18 @@ async def _supabase_keepalive_worker():
 
 
 def parse_movie_from_channel_message(msg: Message) -> Optional[Dict[str, Any]]:
-    media = msg.video or msg.document
-    if not media:
+    media = msg.video or msg.document or msg.photo
+    caption = getattr(msg, "caption", "") or getattr(msg, "text", "") or ""
+    if not media and not caption:
         return None
 
     if msg.document:
         mime = getattr(msg.document, "mime_type", "") or ""
         fname = getattr(msg.document, "file_name", "") or ""
         if not (mime.startswith("video/") or re.search(r"\.(mp4|mkv|avi|webm|mov)$", fname, re.I)):
-            return None
+            if not caption:
+                return None
 
-    caption = msg.caption or ""
     plain = re.sub(r"<[^>]+>", "", caption) if caption else ""
 
     title, year, rating, genre, quality = None, None, None, None, None
@@ -4486,6 +4487,10 @@ def parse_movie_from_channel_message(msg: Message) -> Optional[Dict[str, Any]]:
     if not title:
         return None
 
+    f_id = getattr(media, "file_id", None)
+    if not f_id and getattr(msg, "photo", None):
+        f_id = msg.photo.file_id
+
     return {
         "title": title,
         "year": year,
@@ -4494,7 +4499,7 @@ def parse_movie_from_channel_message(msg: Message) -> Optional[Dict[str, Any]]:
         "quality": quality,
         "message_id": msg.id,
         "caption": caption,
-        "file_id": getattr(media, "file_id", None)
+        "file_id": f_id
     }
 
 
@@ -4512,15 +4517,15 @@ async def auto_hydrate_channel_catalog(
 
     max_id = 0
     try:
-        async for m in client.get_chat_history(channel_username, limit=1):
-            max_id = m.id
-            break
+        chat = await client.get_chat(channel_username)
+        if chat and getattr(chat, "pinned_message", None):
+            max_id = max(max_id, chat.pinned_message.id + 50)
     except Exception:
         pass
 
     if not max_id:
         stored_pin = _engine.cache.get_setting(f"pinned_catalog_{clean_channel}", "")
-        max_id = int(stored_pin) if stored_pin and stored_pin.isdigit() else 2000
+        max_id = int(stored_pin) + 50 if stored_pin and stored_pin.isdigit() else 2000
 
     start_id = max(1, max_id - scan_limit)
     batch_size = 50
@@ -7214,57 +7219,90 @@ async def handle_incoming_text(client: Client, msg: Message):
 @app.on_inline_query()
 async def inline_search_handler(client: Client, query: InlineQuery):
     q = query.query.strip()
-    results = _engine.cache.search_catalog(q, limit=15)
+    try:
+        results = _engine.cache.search_catalog(q, limit=15)
+    except Exception as se:
+        logger.error(f"Error searching catalog for inline query '{q}': {se}")
+        results = []
 
     articles = []
-    for item in results:
-        title = item["title"]
-        year = f" ({item['year']})" if item.get("year") else ""
-        full_title = f"{title}{year}"
-        rating = f"⭐ {item['rating']}" if item.get("rating") else ""
-        desc_parts = [p for p in [rating, genre] if p]
-        base_desc = " | ".join(desc_parts) or "Koleksi Film Channel"
-        description = f"💡 Maksud: {full_title} • {base_desc}" if item.get("_is_fuzzy") else base_desc
-        channel = item["channel_username"].lstrip("@")
-        msg_id = item["message_id"]
-        post_url = f"https://t.me/{channel}/{msg_id}"
+    for idx, item in enumerate(results):
+        try:
+            title = item.get("title", "")
+            year = f" ({item['year']})" if item.get("year") else ""
+            full_title = f"{title}{year}"
+            rating = f"⭐ {item['rating']}" if item.get("rating") else ""
+            genre = str(item.get("genre") or "").strip()
+            desc_parts = [p for p in [rating, genre] if p]
+            base_desc = " | ".join(desc_parts) or "Koleksi Film Channel"
+            description = f"💡 Maksud: {full_title} • {base_desc}" if item.get("_is_fuzzy") else base_desc
+            channel = (item.get("channel_username") or "film_indonesia1").lstrip("@")
+            msg_id = item.get("message_id")
+            post_url = f"https://t.me/{channel}/{msg_id}" if msg_id else f"https://t.me/{channel}"
 
-        safe_full_title = html.escape(full_title)
-        safe_rating = html.escape(str(item.get('rating') or '-'))
-        safe_genre = html.escape(str(item.get('genre') or '-'))
+            safe_full_title = html.escape(full_title)
+            safe_rating = html.escape(str(item.get('rating') or '-'))
+            safe_genre = html.escape(str(item.get('genre') or '-'))
 
-        msg_content = (
-            f"🎬 <b>{safe_full_title}</b>\n\n"
-            f"⭐ Rating: {safe_rating}\n"
-            f"🎭 Genre: {safe_genre}\n"
-            f"📢 Channel: @{channel}\n\n"
-            f"👉 <a href='{post_url}'>Klik di sini untuk menonton film</a>"
-        )
+            msg_content = (
+                f"🎬 <b>{safe_full_title}</b>\n\n"
+                f"⭐ Rating: {safe_rating}\n"
+                f"🎭 Genre: {safe_genre}\n"
+                f"📢 Channel: @{channel}\n\n"
+                f"👉 <a href='{post_url}'>Klik di sini untuk menonton film</a>"
+            )
 
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🍿 Tonton Film di Channel", url=post_url)]
-        ])
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🍿 Tonton Film di Channel", url=post_url)]
+            ])
 
+            articles.append(
+                InlineQueryResultArticle(
+                    id=f"movie_{msg_id}_{idx}",
+                    title=full_title,
+                    description=description,
+                    input_message_content=InputTextMessageContent(
+                        message_text=msg_content,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=False
+                    ),
+                    reply_markup=kb
+                )
+            )
+        except Exception as ie:
+            logger.debug(f"Error formatting inline article #{idx}: {ie}")
+
+    # Fallback article when no results found for non-empty query
+    bot_uname = (client.me.username if getattr(client, "me", None) else "") or "filmindbot"
+    if not articles and q:
+        safe_q = html.escape(q)
+        req_url = f"https://t.me/{bot_uname}?start=request"
         articles.append(
             InlineQueryResultArticle(
-                title=full_title,
-                description=description,
+                id=f"not_found_{int(time.time())}",
+                title=f"🔍 Film '{q}' belum ada di channel",
+                description="Ketuk di sini untuk request judul film ini ke admin!",
                 input_message_content=InputTextMessageContent(
-                    message_text=msg_content,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=False
+                    message_text=(
+                        f"🎬 <b>Permintaan Film:</b> <code>{safe_q}</code>\n\n"
+                        f"Film ini belum ditemukan di channel kami.\n"
+                        f"Klik tombol di bawah untuk langsung request ke admin!"
+                    ),
+                    parse_mode=ParseMode.HTML
                 ),
-                reply_markup=kb
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💬 Request Film Ini ke Admin", url=req_url)]
+                ])
             )
         )
 
     try:
         await query.answer(
             results=articles,
-            cache_time=5,
+            cache_time=1,
             is_personal=True,
-            switch_pm_text="🔍 Cari Film di Bot" if not articles else None,
-            switch_pm_parameter="search" if not articles else None
+            switch_pm_text="💬 Request Film ke Admin" if not articles else None,
+            switch_pm_parameter="request" if not articles else None
         )
     except Exception as e:
         logger.debug(f"Inline query answer error: {e}")
@@ -7365,6 +7403,44 @@ async def auto_sync_edited_movie_post(client: Client, msg: Message):
         logger.error(f"Error handling edited channel message #{msg.id}: {e}")
 
 
+@app.on_message(filters.channel & ~filters.service & ~filters.pinned_message)
+async def auto_sync_new_channel_post(client: Client, msg: Message):
+    """Automatically adds new movie to catalog in real-time whenever a movie post is published in the channel."""
+    if not msg or not msg.chat:
+        return
+
+    clean_channel = (msg.chat.username or "").lstrip("@").strip().lower()
+    if not clean_channel:
+        return
+
+    try:
+        msg_text = getattr(msg, "text", "") or getattr(msg, "caption", "") or ""
+        if any(h in msg_text for h in ("KATALOG KOLEKSI FILM", "KATALOG & DAFTAR ISI", "PUSAT FILM INDONESIA")):
+            return
+
+        info = parse_movie_from_channel_message(msg)
+        if info:
+            _engine.cache.save_movie_post(
+                title=info["title"],
+                year=info["year"],
+                rating=info["rating"],
+                genre=info["genre"],
+                quality=info["quality"],
+                channel_username=clean_channel,
+                message_id=info["message_id"],
+                caption=info["caption"],
+                file_id=info.get("file_id")
+            )
+            logger.info(f"✨ Auto-synced NEW movie post #{msg.id} in @{clean_channel}: {info['title']}")
+            try:
+                _engine.cache.fulfill_movie_requests(clean_channel, info["title"], info["year"], info["message_id"])
+            except Exception as fe:
+                logger.debug(f"Request fulfill error: {fe}")
+            asyncio.create_task(update_pinned_catalog(client, clean_channel))
+    except Exception as e:
+        logger.error(f"Error handling new channel message #{msg.id}: {e}")
+
+
 @app.on_message(filters.channel & (filters.service | filters.pinned_message))
 async def auto_delete_channel_service_messages(client: Client, msg: Message):
     """Automatically delete service notification messages (e.g. 'channel menyematkan...') in channel chat."""
@@ -7373,6 +7449,42 @@ async def auto_delete_channel_service_messages(client: Client, msg: Message):
         logger.info(f"Auto-deleted service notification message {msg.id} in channel {msg.chat.id}")
     except Exception as e:
         logger.debug(f"Could not auto-delete service message {msg.id}: {e}")
+
+
+@app.on_message(filters.command(["syncchannel", "sync_catalog", "refreshcatalog"]))
+async def sync_channel_catalog_cmd(client: Client, msg: Message):
+    """Admin command to trigger immediate full sync of channel posts into database."""
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Khusus Administrator.", parse_mode=ParseMode.HTML)
+        return
+
+    chat_id = msg.chat.id
+    wm = _get_user_watermark(chat_id)
+    clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
+
+    status_msg = await msg.reply_text(
+        f"🔄 <b>Memulai Sinkronisasi Channel @{clean_wm}...</b>\n"
+        f"<i>Sedang memindai postingan channel dan memperbarui database...</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+    try:
+        scanned = await auto_hydrate_channel_catalog(client, clean_wm)
+        await update_pinned_catalog(client, clean_wm)
+        total_now = len(_engine.cache.get_deduplicated_catalog(clean_wm))
+        await status_msg.edit_text(
+            f"✅ <b>Sinkronisasi Channel Berhasil!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📢 Channel: @{clean_wm}\n"
+            f"📥 Postingan Dipindai/Disinkronkan: <b>{scanned}</b>\n"
+            f"🎬 Total Koleksi di Database: <b>{total_now} Film</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Database katalog channel kini 100% mutakhir & langsung muncul di inline query! 🍿</i>",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.error(f"Error in manual syncchannel cmd: {e}")
+        await status_msg.edit_text(f"❌ <b>Gagal sinkronisasi:</b> <code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
 
 
 async def on_bot_startup(client: Client):
@@ -7409,13 +7521,11 @@ async def on_bot_startup(client: Client):
             try:
                 await asyncio.sleep(5)
                 if clean_wm:
-                    curr_movies = _engine.cache.get_deduplicated_catalog(clean_wm)
-                    has_synced = _engine.cache.get_setting(f"synced_{clean_wm}", "no")
-                    if has_synced != "yes" and not curr_movies:
-                        logger.info(f"Bot startup: Auto-hydrating channel catalog for @{clean_wm}...")
-                        await auto_hydrate_channel_catalog(client, clean_wm)
-                        await update_pinned_catalog(client, clean_wm)
-                        logger.info(f"Bot startup: Catalog for @{clean_wm} successfully restored and pinned!")
+                    logger.info(f"Bot startup: Checking & hydrating channel catalog for @{clean_wm}...")
+                    scanned = await auto_hydrate_channel_catalog(client, clean_wm)
+                    logger.info(f"Bot startup: Scanned {scanned} movies from channel @{clean_wm}.")
+                    await update_pinned_catalog(client, clean_wm)
+                    logger.info(f"Bot startup: Catalog for @{clean_wm} successfully restored and pinned!")
             except Exception as bge:
                 logger.warning(f"Background startup hydration error: {bge}")
 
