@@ -33,7 +33,7 @@ from .services.video import (
 )
 from .services.metadata.engine import MetadataEngine
 from .services.metadata.catalog import format_pinned_catalog, publish_or_update_telegraph_catalog, publish_movie_instant_view
-from .services.metadata.rich_post import async_send_rich_article_post
+from .services.metadata.rich_post import async_send_rich_article_post, build_rich_article_payload
 from .services.metadata.cache import (
     WIB, get_next_prime_time_slots, normalize_movie_title_and_year, is_invalid_movie_title
 )
@@ -5063,6 +5063,227 @@ async def _update_previous_episode_post(
         logger.warning(f"Failed to update previous episode post {prev_mid}: {e}")
 
 
+async def sync_collection_sibling_posts(
+    client: Client,
+    channel_username: str,
+    new_title: str,
+    new_year: Optional[int],
+    new_message_id: int,
+    collection: Optional[Dict[str, Any]] = None,
+    chat_id: Optional[int] = None
+):
+    """Automatically updates all existing sibling movie posts in the channel that belong to the same
+    franchise/collection, so their 'Urutan Nonton' section contains a clickable link to this newly uploaded movie."""
+    clean_channel = (channel_username or "").lstrip("@").strip().lower()
+    if not clean_channel or not new_title or not new_message_id:
+        return
+
+    try:
+        # 1. Retrieve collection if not supplied
+        if not collection:
+            clean_t = re.sub(r"[^\w\s]", "", new_title).strip()
+            c_key = f"rating_v2_{clean_t.lower()}_{new_year}" if new_year else f"rating_v2_{clean_t.lower()}"
+            cached_raw = _engine.cache.get_setting(c_key, "")
+            if cached_raw:
+                try:
+                    c_data = json.loads(cached_raw)
+                    collection = c_data.get("collection")
+                except Exception:
+                    pass
+            if not collection:
+                try:
+                    rate_res = await _engine.rating_service.get_rating_and_genre(new_title, new_year)
+                    if rate_res and rate_res.get("collection"):
+                        collection = rate_res["collection"]
+                except Exception as ce:
+                    logger.debug(f"Could not fetch collection for {new_title}: {ce}")
+
+        if not collection or not isinstance(collection, dict):
+            return
+        parts = collection.get("parts", [])
+        if not parts or len(parts) < 2:
+            return
+
+        col_name = collection.get("name") or "Universe"
+        logger.info(f"Checking sibling movie posts in '{col_name}' ({len(parts)} parts) for newly posted '{new_title}' (#{new_message_id})...")
+
+        for part in parts:
+            p_title = (part.get("title") or "").strip()
+            p_year = part.get("year")
+            if not p_title:
+                continue
+
+            # Skip the newly uploaded movie itself
+            is_self = (p_title.lower() == new_title.lower().strip())
+            if not is_self and new_year and p_year and p_year == new_year:
+                is_self = (difflib.SequenceMatcher(None, p_title.lower(), new_title.lower().strip()).ratio() >= 0.85)
+            if is_self:
+                continue
+
+            # Find sibling in channel catalog
+            sibling_item = _engine.cache.find_existing_movie(p_title, p_year, clean_channel)
+            if not sibling_item or not sibling_item.get("message_id"):
+                continue
+
+            sibling_mid = sibling_item["message_id"]
+            if sibling_mid == new_message_id:
+                continue
+
+            logger.info(f"Found sibling movie '{p_title}' (#{sibling_mid}) in @{clean_channel}. Updating franchise links...")
+
+            # 2. Try fetching the sibling message to inspect its current content
+            target_msg = None
+            try:
+                target_msg = await client.get_messages(clean_channel, sibling_mid)
+            except Exception as fe:
+                logger.debug(f"Could not fetch sibling message #{sibling_mid} via client: {fe}")
+
+            orig_caption = (target_msg.caption if target_msg and target_msg.caption else None) or sibling_item.get("caption") or ""
+            sibling_file_id = (target_msg.video.file_id if target_msg and getattr(target_msg, "video", None) else None) or sibling_item.get("file_id")
+
+            # Prepare replacement link
+            new_url = f"https://t.me/{clean_channel}/{new_message_id}"
+            year_str = f" ({new_year})" if new_year else ""
+            link_html = f'<a href="{new_url}">{html.escape(new_title)}{year_str}</a>'
+
+            # Regex pattern to match unlinked line for new_title
+            pat = rf'(?P<num>[1-9\u0030-\u0039\ufe0f\u20e3\.]+\s*)(?:<b>)?{re.escape(new_title)}(?:\s*\({new_year}\))?(?:</b>)?(?!\s*</a>)'
+
+            updated_caption = None
+            if orig_caption and re.search(pat, orig_caption, re.I):
+                updated_caption = re.sub(pat, rf'\g<num>{link_html}', orig_caption, count=1, flags=re.I)
+
+            # 3. Method 1: If message is a media post with caption, update caption via editMessageCaption
+            success = False
+            if updated_caption and BOT_TOKEN:
+                cap_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageCaption"
+                cap_payload = {
+                    "chat_id": f"@{clean_channel}",
+                    "message_id": sibling_mid,
+                    "caption": updated_caption,
+                    "parse_mode": "HTML"
+                }
+                if target_msg and getattr(target_msg, "reply_markup", None):
+                    cap_payload["reply_markup"] = _build_bot_api_reply_markup(target_msg.reply_markup)
+
+                def _edit_cap():
+                    req = urllib.request.Request(
+                        cap_url,
+                        data=json.dumps(cap_payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"}
+                    )
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        return json.loads(resp.read().decode("utf-8"))
+
+                try:
+                    res = await asyncio.to_thread(_edit_cap)
+                    if res and res.get("ok"):
+                        success = True
+                        logger.info(f"✨ Successfully updated caption with franchise link in post #{sibling_mid} for {p_title}!")
+                except urllib.error.HTTPError as he:
+                    err_msg = he.read().decode("utf-8", errors="ignore")
+                    logger.debug(f"editMessageCaption #{sibling_mid} HTTP {he.code}: {err_msg}")
+                except Exception as ee:
+                    logger.debug(f"editMessageCaption error: {ee}")
+
+            if not success and updated_caption and target_msg and target_msg.caption:
+                try:
+                    await client.edit_message_caption(
+                        chat_id=clean_channel,
+                        message_id=sibling_mid,
+                        caption=updated_caption,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=target_msg.reply_markup
+                    )
+                    success = True
+                    logger.info(f"✨ Successfully updated caption via client in post #{sibling_mid} for {p_title}!")
+                except Exception as c_err:
+                    logger.debug(f"client.edit_message_caption error: {c_err}")
+
+            # 4. Method 2: If message was sent via sendRichMessage (or editMessageCaption indicated no caption)
+            if not success and BOT_TOKEN:
+                s_clean_t = re.sub(r"[^\w\s]", "", p_title).strip()
+                s_key = f"rating_v2_{s_clean_t.lower()}_{p_year}" if p_year else f"rating_v2_{s_clean_t.lower()}"
+                sibling_meta = None
+                s_cached = _engine.cache.get_setting(s_key, "")
+                if s_cached:
+                    try:
+                        sibling_meta = json.loads(s_cached)
+                    except Exception:
+                        pass
+                if not sibling_meta:
+                    try:
+                        sibling_meta = await _engine.rating_service.get_rating_and_genre(p_title, p_year)
+                    except Exception:
+                        sibling_meta = {}
+
+                if not sibling_meta:
+                    sibling_meta = {}
+                sibling_meta.setdefault("title", p_title)
+                sibling_meta.setdefault("year", p_year)
+                sibling_meta["collection"] = collection
+
+                bot_uname = (client.me.username if getattr(client, "me", None) else "") or _engine.cache.get_setting("bot_username", "")
+                req_link = _get_user_request_link(chat_id or 0, bot_username=bot_uname)
+                sibling_kb = build_channel_post_keyboard(
+                    watermark=f"@{clean_channel}",
+                    title=p_title,
+                    trailer_url=sibling_meta.get("trailer_url"),
+                    request_link=req_link
+                )
+                rich_kb = _build_bot_api_reply_markup(sibling_kb)
+
+                poster_url = sibling_meta.get("poster_url") or sibling_meta.get("poster_path")
+                rich_payload = build_rich_article_payload(
+                    chat_id=f"@{clean_channel}",
+                    metadata=sibling_meta,
+                    watermark=f"@{clean_channel}",
+                    video_file_id=sibling_file_id,
+                    poster_file_id_or_url=poster_url,
+                    reply_markup=rich_kb
+                )
+
+                edit_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+                edit_body = {
+                    "chat_id": f"@{clean_channel}",
+                    "message_id": sibling_mid,
+                    "rich_message": rich_payload["rich_message"],
+                    "reply_markup": rich_kb
+                }
+
+                def _edit_rich():
+                    req = urllib.request.Request(
+                        edit_url,
+                        data=json.dumps(edit_body).encode("utf-8"),
+                        headers={"Content-Type": "application/json"}
+                    )
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        return json.loads(resp.read().decode("utf-8"))
+
+                try:
+                    res = await asyncio.to_thread(_edit_rich)
+                    if res and res.get("ok"):
+                        success = True
+                        logger.info(f"✨ Successfully updated rich post #{sibling_mid} for {p_title} with franchise link!")
+                except Exception as r_err:
+                    logger.debug(f"editMessageText (rich_message) error for #{sibling_mid}: {r_err}")
+
+            # 5. Persist updated caption to local database cache if updated
+            if success and updated_caption:
+                try:
+                    conn = _engine.cache._conn()
+                    conn.execute(
+                        "UPDATE movie_catalog SET caption = ? WHERE LOWER(channel_username) = ? AND message_id = ?",
+                        (updated_caption, clean_channel, sibling_mid)
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
+
+    except Exception as e:
+        logger.error(f"Error in sync_collection_sibling_posts: {e}")
+
+
 async def publish_video_to_channel(
     client: Client,
     chat_id: int,
@@ -5450,6 +5671,23 @@ async def publish_video_to_channel(
         )
     except Exception as ce:
         logger.warning(f"Gagal mencatat ke katalog film: {ce}")
+
+    # 4. FRANCHISE / COLLECTION SYNC: Automatically update existing sibling movies in the collection
+    # so their 'Urutan Nonton' section contains a clickable link to this newly uploaded movie!
+    try:
+        asyncio.create_task(
+            sync_collection_sibling_posts(
+                client=client,
+                channel_username=clean_wm,
+                new_title=title_meta,
+                new_year=year_meta,
+                new_message_id=sent_channel.id,
+                collection=meta.get("collection"),
+                chat_id=chat_id
+            )
+        )
+    except Exception as sc_err:
+        logger.debug(f"Franchise sync task error: {sc_err}")
 
     # Update pinned catalog channel otomatis
     if update_pin:
@@ -7555,6 +7793,15 @@ async def auto_sync_new_channel_post(client: Client, msg: Message):
             except Exception as fe:
                 logger.debug(f"Request fulfill error: {fe}")
             asyncio.create_task(update_pinned_catalog(client, clean_channel))
+            asyncio.create_task(
+                sync_collection_sibling_posts(
+                    client=client,
+                    channel_username=clean_channel,
+                    new_title=info["title"],
+                    new_year=info["year"],
+                    new_message_id=info["message_id"]
+                )
+            )
     except Exception as e:
         logger.error(f"Error handling new channel message #{msg.id}: {e}")
 

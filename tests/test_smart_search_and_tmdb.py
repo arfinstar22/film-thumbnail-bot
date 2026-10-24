@@ -234,6 +234,72 @@ class TestSmartSearchAndFuzzyMatching(unittest.TestCase):
         cur = conn.execute("SELECT id FROM movie_catalog WHERE message_id = 9999")
         self.assertIsNone(cur.fetchone())
 
+    def test_sync_collection_sibling_posts_updates_sibling_links(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from bot.handlers import sync_collection_sibling_posts
+
+        conn = self.cache._conn()
+        self.cache._ensure_catalog_table(conn)
+        orig_cap = (
+            "<details>\n"
+            "<summary>🗺️ Urutan Nonton: Seri Ayo</summary>\n"
+            "1️⃣ Ayo Putus (2022)<br/>\n"
+            "2️⃣ <b>Ayo Balikan (2024)</b> 📍 <i>(Film Ini)</i>\n"
+            "</details>"
+        )
+        self.cache.save_movie_post(
+            title="Ayo Balikan",
+            year=2024,
+            channel_username="film_indonesia1",
+            message_id=1376,
+            caption=orig_cap,
+            file_id="dummy_video_file_id"
+        )
+        self.cache.save_movie_post(
+            title="Ayo Putus",
+            year=2022,
+            channel_username="film_indonesia1",
+            message_id=1379
+        )
+
+        mock_msg = MagicMock()
+        mock_msg.caption = orig_cap
+        mock_msg.reply_markup = None
+        mock_msg.video = MagicMock(file_id="dummy_video_file_id")
+
+        mock_client = MagicMock()
+        mock_client.get_messages = AsyncMock(return_value=mock_msg)
+        mock_client.edit_message_caption = AsyncMock()
+
+        collection = {
+            "name": "Seri Ayo",
+            "parts": [
+                {"title": "Ayo Putus", "year": 2022},
+                {"title": "Ayo Balikan", "year": 2024}
+            ]
+        }
+
+        with patch("bot.handlers._engine.cache", self.cache), \
+             patch("bot.handlers.BOT_TOKEN", ""):
+            asyncio.run(
+                sync_collection_sibling_posts(
+                    client=mock_client,
+                    channel_username="film_indonesia1",
+                    new_title="Ayo Putus",
+                    new_year=2022,
+                    new_message_id=1379,
+                    collection=collection
+                )
+            )
+
+        mock_client.edit_message_caption.assert_awaited_once()
+        call_args = mock_client.edit_message_caption.call_args[1]
+        self.assertEqual(call_args["chat_id"], "film_indonesia1")
+        self.assertEqual(call_args["message_id"], 1376)
+        self.assertIn('<a href="https://t.me/film_indonesia1/1379">Ayo Putus (2022)</a>', call_args["caption"])
+        self.assertIn('2️⃣ <b>Ayo Balikan (2024)</b> 📍 <i>(Film Ini)</i>', call_args["caption"])
+
 
 class TestTMDbService(unittest.TestCase):
     def setUp(self):
