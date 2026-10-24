@@ -34,7 +34,9 @@ from .services.video import (
 from .services.metadata.engine import MetadataEngine
 from .services.metadata.catalog import format_pinned_catalog, publish_or_update_telegraph_catalog, publish_movie_instant_view
 from .services.metadata.rich_post import async_send_rich_article_post
-from .services.metadata.cache import WIB, get_next_prime_time_slots, normalize_movie_title_and_year
+from .services.metadata.cache import (
+    WIB, get_next_prime_time_slots, normalize_movie_title_and_year, is_invalid_movie_title
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -4416,31 +4418,43 @@ async def _supabase_keepalive_worker():
 
 
 def parse_movie_from_channel_message(msg: Message) -> Optional[Dict[str, Any]]:
-    media = msg.video or msg.document or msg.photo
     caption = getattr(msg, "caption", "") or getattr(msg, "text", "") or ""
+    plain = re.sub(r"<[^>]+>", "", caption).strip() if caption else ""
+
+    # Instant rejection for non-movie posts, announcements, and pinned catalog messages
+    if is_invalid_movie_title(plain[:60], caption):
+        return None
+
+    media = msg.video or msg.document or msg.photo
     if not media and not caption:
         return None
 
+    # Check if media is a real video or video document
+    has_video = bool(msg.video)
     if msg.document:
         mime = getattr(msg.document, "mime_type", "") or ""
         fname = getattr(msg.document, "file_name", "") or ""
-        if not (mime.startswith("video/") or re.search(r"\.(mp4|mkv|avi|webm|mov)$", fname, re.I)):
-            if not caption:
-                return None
+        if mime.startswith("video/") or re.search(r"\.(mp4|mkv|avi|webm|mov)$", fname, re.I):
+            has_video = True
 
-    plain = re.sub(r"<[^>]+>", "", caption) if caption else ""
+    # If it has NO video file, it MUST have an explicit movie header 🎬 and a 4-digit release year
+    if not has_video:
+        if not re.search(r"🎬\s*[^\n]+", plain) or not re.search(r"\b(19\d\d|20\d\d)\b", plain):
+            return None
 
     title, year, rating, genre, quality = None, None, None, None, None
 
     if plain:
         m_head = re.search(r"🎬\s*([^\n\(•]+)(?:\s*\((\d{4})\))?", plain)
         if m_head:
-            title = m_head.group(1).strip()
-            if m_head.group(2):
-                try:
-                    year = int(m_head.group(2))
-                except ValueError:
-                    pass
+            cand = m_head.group(1).strip()
+            if not is_invalid_movie_title(cand, plain):
+                title = cand
+                if m_head.group(2):
+                    try:
+                        year = int(m_head.group(2))
+                    except ValueError:
+                        pass
 
         if not year:
             m_year = re.search(r"(?:Tahun|🗓️)[^\d\n]*(\d{4})", plain, re.I)
@@ -4462,30 +4476,34 @@ def parse_movie_from_channel_message(msg: Message) -> Optional[Dict[str, Any]]:
         if m_qual:
             quality = m_qual.group(1).strip()
 
-        if not title:
+        # Only fall back to first line if the post actually has a real video file attached!
+        if not title and has_video:
             lines = [l.strip() for l in plain.split("\n") if l.strip() and not l.startswith("━")]
             if lines:
                 first_line = lines[0]
-                if not re.search(r"(channel|official|gabung|join|link)", first_line, re.I):
+                if not is_invalid_movie_title(first_line, plain):
                     parsed_line = _engine.parser.parse(first_line)
-                    if parsed_line.get("title"):
-                        title = parsed_line["title"]
+                    cand_title = parsed_line.get("title")
+                    if cand_title and not is_invalid_movie_title(cand_title):
+                        title = cand_title
                         if not year and parsed_line.get("year"):
                             year = parsed_line["year"]
                         if not quality and parsed_line.get("resolution"):
                             quality = parsed_line["resolution"]
 
-    if not title:
+    if not title and has_video:
         file_name = getattr(media, "file_name", "") or ""
         if file_name:
             parsed = _engine.parser.parse(file_name)
-            title = parsed.get("title")
-            if not year and parsed.get("year"):
-                year = parsed.get("year")
-            if not quality and parsed.get("resolution"):
-                quality = parsed.get("resolution")
+            cand_title = parsed.get("title")
+            if cand_title and not is_invalid_movie_title(cand_title):
+                title = cand_title
+                if not year and parsed.get("year"):
+                    year = parsed.get("year")
+                if not quality and parsed.get("resolution"):
+                    quality = parsed.get("resolution")
 
-    if not title:
+    if not title or is_invalid_movie_title(title, plain):
         return None
 
     f_id = getattr(media, "file_id", None)
@@ -4587,7 +4605,7 @@ async def auto_hydrate_channel_catalog(
                 if getattr(ch_msg, "service", None) or getattr(ch_msg, "pinned_message", None):
                     continue
                 msg_text = getattr(ch_msg, "text", "") or getattr(ch_msg, "caption", "") or ""
-                if "KATALOG KOLEKSI FILM" in msg_text or "KATALOG & DAFTAR ISI" in msg_text:
+                if is_invalid_movie_title(msg_text[:60], msg_text):
                     continue
 
                 info = parse_movie_from_channel_message(ch_msg)
@@ -7476,6 +7494,12 @@ async def auto_sync_edited_movie_post(client: Client, msg: Message):
         return
 
     try:
+        msg_text = getattr(msg, "text", "") or getattr(msg, "caption", "") or ""
+        if is_invalid_movie_title(msg_text[:60], msg_text):
+            return
+        if any(h in msg_text for h in ("KATALOG KOLEKSI FILM", "KATALOG & DAFTAR ISI", "PUSAT FILM INDONESIA")):
+            return
+
         info = parse_movie_from_channel_message(msg)
         if info:
             _engine.cache.save_movie_post(
@@ -7507,6 +7531,8 @@ async def auto_sync_new_channel_post(client: Client, msg: Message):
 
     try:
         msg_text = getattr(msg, "text", "") or getattr(msg, "caption", "") or ""
+        if is_invalid_movie_title(msg_text[:60], msg_text):
+            return
         if any(h in msg_text for h in ("KATALOG KOLEKSI FILM", "KATALOG & DAFTAR ISI", "PUSAT FILM INDONESIA")):
             return
 

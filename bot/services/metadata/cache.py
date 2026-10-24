@@ -73,6 +73,59 @@ def extract_movie_sequel_tag(title: str) -> Optional[str]:
     return None
 
 
+def is_invalid_movie_title(title: str, caption: str = "") -> bool:
+    """Strictly checks if a title or caption corresponds to a non-movie post, announcement,
+    pinned catalog header, or conversational chat sentence."""
+    if not title:
+        return True
+    t_clean = (title or "").strip()
+    t_lower = t_clean.lower()
+
+    # 1. System catalog, pinned messages, announcements
+    BAD_PATTERNS = (
+        "pusat film indonesia",
+        "katalog resmi",
+        "katalog koleksi film",
+        "katalog & daftar isi",
+        "pembaruan tampilan",
+        "stay tuned",
+        "pengumuman",
+        "update tampilan",
+        "aturan",
+        "rules",
+        "donasi",
+        "buka katalog",
+        "request film",
+        "join channel",
+        "link channel",
+        "info resmi",
+        "pemberitahuan",
+        "informasi penting"
+    )
+    if any(k in t_lower for k in BAD_PATTERNS):
+        return True
+
+    # 2. Conversational sentence markers
+    CONV_WORDS = ("nih", "yuk", "dong", "tunggu update", "selanjutnya", "stay tuned")
+    if any(w in t_lower for w in CONV_WORDS):
+        return True
+
+    # 3. Exclamations in sentences (e.g. "Nih Stay Tuned Terus!")
+    if "!" in t_clean and len(t_clean.split()) > 3:
+        return True
+
+    # 4. Long title without a release year
+    if len(t_clean) > 55 and not re.search(r"\b(19\d\d|20\d\d)\b", t_clean):
+        return True
+
+    # 5. Caption contains catalog marker
+    cap_lower = (caption or "").lower()
+    if any(k in cap_lower for k in ("katalog resmi", "katalog koleksi film", "katalog & daftar isi", "pusat streaming & download")):
+        return True
+
+    return False
+
+
 def calculate_search_relevance(
     query: str,
     title: str,
@@ -374,6 +427,15 @@ class MetadataCache:
     ):
         clean_channel = (channel_username or "").lstrip("@").strip().lower()
         clean_title, year, _ = normalize_movie_title_and_year(title, year)
+        if not clean_title or is_invalid_movie_title(clean_title, caption):
+            try:
+                conn = self._conn()
+                self._ensure_catalog_table(conn)
+                conn.execute("DELETE FROM movie_catalog WHERE LOWER(channel_username) = ? AND message_id = ?", (clean_channel, message_id))
+                conn.commit()
+            except Exception:
+                pass
+            return
         try:
             conn = self._conn()
             self._ensure_catalog_table(conn)
@@ -496,11 +558,50 @@ class MetadataCache:
             logger.error(f"Delete movie by title error: {e}")
         return affected_channels
 
+    def purge_invalid_catalog_entries(self, channel_username: Optional[str] = None) -> int:
+        """Purges any non-movie entries (announcements, banners, catalog headers) from movie_catalog."""
+        deleted_count = 0
+        try:
+            conn = self._conn()
+            self._ensure_catalog_table(conn)
+            clean_chan = (channel_username or "").lstrip("@").strip().lower()
+            if clean_chan:
+                cur = conn.execute("SELECT id, title, caption, message_id FROM movie_catalog WHERE LOWER(channel_username) = ?", (clean_chan,))
+            else:
+                cur = conn.execute("SELECT id, title, caption, message_id FROM movie_catalog")
+            rows = cur.fetchall()
+            to_delete_ids = []
+            to_delete_msg_ids = []
+
+            for r_id, t, cap, mid in rows:
+                if is_invalid_movie_title(t, cap):
+                    to_delete_ids.append(r_id)
+                    if mid:
+                        to_delete_msg_ids.append(mid)
+
+            if to_delete_ids:
+                placeholders = ",".join("?" for _ in to_delete_ids)
+                conn.execute(f"DELETE FROM movie_catalog WHERE id IN ({placeholders})", to_delete_ids)
+                conn.commit()
+                deleted_count = len(to_delete_ids)
+                logger.info(f"Purged {deleted_count} invalid non-movie entries from movie_catalog.")
+
+                if self.cloud.is_enabled and to_delete_msg_ids:
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(self.cloud.async_delete_catalog(to_delete_msg_ids, clean_chan or None))
+                    except RuntimeError:
+                        pass
+        except Exception as e:
+            logger.error(f"Error purging invalid catalog entries: {e}")
+        return deleted_count
+
     def get_deduplicated_catalog(self, channel_username: str) -> List[Dict[str, Any]]:
         """Retrieve unique movies for a channel, automatically keeping only the latest post for duplicates."""
         raw_items = []
         clean_channel = (channel_username or "").lstrip("@").strip().lower()
         try:
+            self.purge_invalid_catalog_entries(clean_channel)
             conn = self._conn()
             self._ensure_catalog_table(conn)
             cur = conn.execute("""
@@ -511,6 +612,8 @@ class MetadataCache:
             """, (clean_channel,))
 
             for row in cur.fetchall():
+                if is_invalid_movie_title(row[0], row[7]):
+                    continue
                 raw_items.append({
                     "title": row[0],
                     "year": row[1],
@@ -617,6 +720,8 @@ class MetadataCache:
                 """)
 
             for row in cur.fetchall():
+                if is_invalid_movie_title(row[0], row[7]):
+                    continue
                 raw_items.append({
                     "title": row[0],
                     "year": row[1],

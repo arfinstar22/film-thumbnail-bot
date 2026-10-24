@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.services.metadata.cache import (
     MetadataCache,
     calculate_search_relevance,
-    normalize_movie_title_and_year
+    normalize_movie_title_and_year,
+    is_invalid_movie_title
 )
 from bot.services.metadata.tmdb import TMDbService
 from bot.services.metadata.rating import MovieRatingService
@@ -192,6 +193,46 @@ class TestSmartSearchAndFuzzyMatching(unittest.TestCase):
         # Search should no longer return Pengabdi Setan (2017), only Pengabdi Setan 2
         results_after = self.cache.search_catalog("Pengabdi Setan")
         self.assertFalse(any(r["title"] == "Pengabdi Setan" and r.get("year") == 2017 for r in results_after))
+
+    def test_is_invalid_movie_title(self):
+        self.assertTrue(is_invalid_movie_title("PUSAT FILM INDONESIA"))
+        self.assertTrue(is_invalid_movie_title("Akan Ada Pembaruan Tampilan, Nih Stay Tuned Terus Dan Tunggu Update Selanjutnya!"))
+        self.assertTrue(is_invalid_movie_title("KATALOG KOLEKSI FILM • UPDATE RESMI"))
+        self.assertTrue(is_invalid_movie_title("Buka Katalog Lengkap"))
+        self.assertFalse(is_invalid_movie_title("Agak Laen"))
+        self.assertFalse(is_invalid_movie_title("Pengabdi Setan"))
+        self.assertFalse(is_invalid_movie_title("Suzzanna Santet Dosa Di Atas Dosa"))
+
+    def test_purge_invalid_catalog_entries(self):
+        conn = self.cache._conn()
+        self.cache._ensure_catalog_table(conn)
+        conn.execute("""
+            INSERT INTO movie_catalog (title, year, channel_username, message_id)
+            VALUES
+            ('PUSAT FILM INDONESIA', NULL, 'film_indonesia1', 1250),
+            ('Akan Ada Pembaruan Tampilan, Nih Stay Tuned Terus Dan Tunggu Update Selanjutnya!', NULL, 'film_indonesia1', 1204),
+            ('Suzzanna Santet Dosa Di Atas Dosa', 2026, 'film_indonesia1', 1205)
+        """)
+        conn.commit()
+
+        purged = self.cache.purge_invalid_catalog_entries("film_indonesia1")
+        self.assertEqual(purged, 2)
+
+        cur = conn.execute("SELECT title, message_id FROM movie_catalog WHERE message_id IN (1250, 1204, 1205)")
+        rows = cur.fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "Suzzanna Santet Dosa Di Atas Dosa")
+        self.assertEqual(rows[0][1], 1205)
+
+    def test_save_movie_post_rejects_invalid_title(self):
+        self.cache.save_movie_post(
+            title="PUSAT FILM INDONESIA",
+            channel_username="film_indonesia1",
+            message_id=9999
+        )
+        conn = self.cache._conn()
+        cur = conn.execute("SELECT id FROM movie_catalog WHERE message_id = 9999")
+        self.assertIsNone(cur.fetchone())
 
 
 class TestTMDbService(unittest.TestCase):
