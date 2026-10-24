@@ -207,15 +207,26 @@ def build_rich_article_payload(
     if tagline:
         html_parts.append(f"<p>✨ <i>&ldquo;{html_mod.escape(tagline)}&rdquo;</i></p>")
 
-    # 3. SLIDESHOW (Banner, Poster & Stills swipeable gallery — collapsible)
+    # 3. SLIDESHOW (Banner, Poster & Stills swipeable gallery — max 3 distinct images)
     slideshow_imgs: List[str] = []
     all_gallery: List[str] = []
     if banner_file_id_or_url:
         all_gallery.append(banner_file_id_or_url)
     if poster_file_id_or_url and poster_file_id_or_url not in all_gallery:
         all_gallery.append(poster_file_id_or_url)
+
+    known_primary = set()
+    if banner_file_id_or_url:
+        known_primary.add(banner_file_id_or_url)
+        if metadata.get("backdrop_url"):
+            known_primary.add(metadata.get("backdrop_url"))
+    if poster_file_id_or_url:
+        known_primary.add(poster_file_id_or_url)
+        if metadata.get("poster_url"):
+            known_primary.add(metadata.get("poster_url"))
+
     for g_url in gallery_images:
-        if g_url and g_url not in all_gallery and len(all_gallery) < 5:
+        if g_url and g_url not in all_gallery and g_url not in known_primary and len(all_gallery) < 3:
             all_gallery.append(g_url)
 
     for idx, img_src in enumerate(all_gallery):

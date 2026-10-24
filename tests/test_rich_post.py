@@ -243,8 +243,8 @@ class TestRichArticlePost(unittest.TestCase):
         self.assertIn("⏱️ 1j 59m", html)
         self.assertIn("🏷️ 13+", html)
 
-        # Slideshow gallery count
-        self.assertIn("🖼️ Poster &amp; Banner HD (4 gambar)", html)
+        # Slideshow gallery count (max 3 distinct images: banner + poster + 1 still)
+        self.assertIn("🖼️ Poster &amp; Banner HD (3 gambar)", html)
 
         # Trending badge because popularity > 50
         self.assertIn("🔥 <b>SEDANG TRENDING</b>", html)
@@ -271,6 +271,39 @@ class TestRichArticlePost(unittest.TestCase):
         self.assertIn("• <b>Netflix</b> 🟥", html)
         self.assertIn("• <b>Disney+ Hotstar</b> 🟦", html)
         self.assertIn("• <b>Vidio</b> 🟩", html)
+
+    def test_slideshow_deduplication_and_cap(self):
+        """Verify slideshow caps at 3 images and deduplicates banner/poster URLs."""
+        meta = {
+            "title": "Film Uji",
+            "backdrop_url": "https://image.tmdb.org/t/p/w1280/banner_tmdb.jpg",
+            "poster_url": "https://image.tmdb.org/t/p/w780/poster_tmdb.jpg",
+            "gallery_images": [
+                "https://image.tmdb.org/t/p/w1280/banner_tmdb.jpg",  # duplicate of backdrop
+                "https://image.tmdb.org/t/p/w780/poster_tmdb.jpg",   # duplicate of poster
+                "https://image.tmdb.org/t/p/w1280/still_unique1.jpg",
+                "https://image.tmdb.org/t/p/w1280/still_unique2.jpg"
+            ]
+        }
+        payload = build_rich_article_payload(
+            chat_id="@testchan",
+            metadata=meta,
+            watermark="@testchan",
+            banner_file_id_or_url="attach://banner_file",
+            poster_file_id_or_url="attach://poster_file"
+        )
+        media_list = payload["rich_message"]["media"]
+        photos = [m for m in media_list if m["media"]["type"] == "photo"]
+        # Exactly 3 images: banner, poster, and still_unique1
+        self.assertEqual(len(photos), 3)
+        photo_targets = [p["media"]["media"] for p in photos]
+        self.assertEqual(photo_targets, [
+            "attach://banner_file",
+            "attach://poster_file",
+            "https://image.tmdb.org/t/p/w1280/still_unique1.jpg"
+        ])
+        html = payload["rich_message"]["html"]
+        self.assertIn("🖼️ Poster &amp; Banner HD (3 gambar)", html)
 
 
 if __name__ == "__main__":

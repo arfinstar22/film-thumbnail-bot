@@ -486,25 +486,24 @@ class TMDbService:
         if studio_str:
             res["studio"] = studio_str
 
-        # Additional gallery images (up to 4 images for slideshow)
+        # Additional gallery images (distinct backdrops/stills, excluding primary backdrop and poster)
         gallery_images = []
-        if backdrop_url:
-            gallery_images.append(backdrop_url)
-        if poster_url and poster_url not in gallery_images:
-            gallery_images.append(poster_url)
-
         img_data = main.get("images") or fallback.get("images") or {}
         for bd in img_data.get("backdrops", []):
             fp = bd.get("file_path")
             if fp:
                 img_u = f"https://image.tmdb.org/t/p/w1280{fp}"
-                if img_u not in gallery_images and len(gallery_images) < 4:
+                if img_u != backdrop_url and img_u not in gallery_images:
                     gallery_images.append(img_u)
+                    if len(gallery_images) >= 2:
+                        break
         for po in img_data.get("posters", []):
+            if len(gallery_images) >= 2:
+                break
             fp = po.get("file_path")
             if fp:
                 img_u = f"https://image.tmdb.org/t/p/w780{fp}"
-                if img_u not in gallery_images and len(gallery_images) < 5:
+                if img_u != poster_url and img_u not in gallery_images:
                     gallery_images.append(img_u)
 
         if gallery_images:
