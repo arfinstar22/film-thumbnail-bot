@@ -6181,14 +6181,7 @@ async def _process_video_task(client: Client, msg: Message):
                     parse_mode=ParseMode.HTML
                 )
         elif autopost_mode in ("on", "auto"):
-            if existing_movie:
-                await msg.reply_text(
-                    f"✋ <b>Auto-Post Ditahan Sementara:</b>\n"
-                    f"Karena film terdeteksi sudah ada di channel, auto-post tidak dijalankan otomatis agar channel tidak banjir file duplikat.\n"
-                    f"Tekan tombol <b>🚀 Posting ke Channel</b> di atas jika Anda memang ingin mempostingnya.",
-                    parse_mode=ParseMode.HTML
-                )
-            elif not wm.startswith("@") or len(wm) <= 1:
+            if not wm.startswith("@") or len(wm) <= 1:
                 await msg.reply_text(
                     "⚠️ <b>Auto-Post aktif tetapi channel watermark belum diatur!</b>\n\n"
                     "Gunakan <code>/setwatermark @namachannel</code> agar bot bisa posting otomatis ke channel Anda.",
@@ -6197,6 +6190,24 @@ async def _process_video_task(client: Client, msg: Message):
             else:
                 try:
                     sent_video_fid = sent.video.file_id if (sent and getattr(sent, "video", None)) else media.file_id
+                    # ================================================================
+                    # DUPLIKAT AUTO-REPLACE (AUTO-POST MODE)
+                    # ----------------------------------------------------------------
+                    # JANGAN DIHAPUS / DIUBAH LOGIKA INI!
+                    # Jika film sudah ada di channel, hapus post lama + stiker
+                    # pembatas sebelum posting versi baru. Channel tetap bersih.
+                    # ================================================================
+                    if existing_movie and existing_movie.get("message_id"):
+                        old_mid_ap = existing_movie["message_id"]
+                        old_disp_ap = f"{existing_movie.get('title', meta_title)} ({existing_movie.get('year', '')})"
+                        logger.info(f"Auto-post duplikat replace: '{old_disp_ap}' (#{old_mid_ap}) dihapus.")
+                        for del_id in [old_mid_ap, old_mid_ap + 1]:
+                            try:
+                                await client.delete_messages(chat_id=wm, message_ids=del_id)
+                            except Exception:
+                                pass
+                        _engine.cache.delete_movie_posts([old_mid_ap], clean_wm)
+
                     sent_channel = await publish_video_to_channel(
                         client=client,
                         chat_id=chat_id,
@@ -6208,10 +6219,14 @@ async def _process_video_task(client: Client, msg: Message):
                     clean_wm = wm.lstrip("@").strip()
                     title_name = result.get("metadata", {}).get("title") or filename
                     post_link = f"https://t.me/{clean_wm}/{sent_channel.id}" if sent_channel else f"https://t.me/{clean_wm}"
+                    replaced_note = ""
+                    if existing_movie and existing_movie.get("message_id"):
+                        replaced_note = "🗑️ <i>Post duplikat lama otomatis dihapus & diganti versi baru!</i>\n\n"
                     await msg.reply_text(
                         f"🚀 <b>Auto-Post: Berhasil Diposting ke Channel!</b>\n\n"
                         f"🎬 <b>Film:</b> {title_name}\n"
                         f"📢 <b>Channel:</b> {wm}\n\n"
+                        f"{replaced_note}"
                         f"• Tombol interaktif lengkap otomatis dibuat.\n"
                         f"• Pinned Catalog A-Z channel otomatis diperbarui.\n"
                         f"• Stiker pembatas channel otomatis dikirim.\n\n"
@@ -6947,6 +6962,39 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
         if not video_fid:
             await call.message.reply_text("❌ Video tidak ditemukan dalam job.")
             return
+
+        # ================================================================
+        # DUPLIKAT AUTO-REPLACE: Hapus post lama dari channel jika duplikat
+        # ----------------------------------------------------------------
+        # JANGAN DIHAPUS / DIUBAH LOGIKA INI!
+        # Fitur ini memastikan channel tetap bersih tanpa duplikasi.
+        # Saat user tekan "Posting ke Channel" dan film sudah pernah ada,
+        # post lama + stiker pembatas di bawahnya otomatis dihapus,
+        # lalu katalog di-update. Film baru menggantikan yang lama.
+        # ================================================================
+        clean_wm_dup = wm.lstrip("@").strip().lower()
+        meta_year = meta.get("year")
+        old_movie = _engine.cache.find_existing_movie(title_meta, meta_year, clean_wm_dup) if clean_wm_dup else None
+        if old_movie and old_movie.get("message_id"):
+            old_mid = old_movie["message_id"]
+            old_disp = f"{old_movie.get('title', title_meta)} ({old_movie.get('year', '')})"
+            logger.info(f"Duplikat terdeteksi: '{old_disp}' (#{old_mid}) akan dihapus dan diganti versi baru.")
+            # Hapus post lama + stiker pembatas (biasanya message_id + 1) dari channel
+            delete_ids = [old_mid, old_mid + 1]
+            for del_id in delete_ids:
+                try:
+                    await client.delete_messages(chat_id=f"@{clean_wm_dup}", message_ids=del_id)
+                except Exception as del_err:
+                    logger.debug(f"Gagal hapus message #{del_id} dari channel: {del_err}")
+            # Hapus dari katalog database
+            _engine.cache.delete_movie_posts([old_mid], clean_wm_dup)
+            await call.message.reply_text(
+                f"🗑️ <b>Duplikat Lama Dihapus:</b>\n"
+                f"Post <b>{html.escape(old_disp)}</b> (#{old_mid}) berhasil dihapus dari @{clean_wm_dup}.\n"
+                f"<i>Mengunggah versi terbaru sekarang...</i>",
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True
+            )
 
         session = _banner_sessions.get(chat_id)
         latest_poster = (
