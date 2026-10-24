@@ -305,6 +305,26 @@ class TestRichArticlePost(unittest.TestCase):
         html = payload["rich_message"]["html"]
         self.assertIn("🖼️ Poster &amp; Banner HD (3 gambar)", html)
 
+    def test_slideshow_with_tmdb_still_url(self):
+        """Verify still_url from TMDB is placed as 3rd image in slideshow."""
+        meta = {
+            "title": "Film Cuplikan",
+            "backdrop_url": "https://image.tmdb.org/t/p/original/banner.jpg",
+            "poster_url": "https://image.tmdb.org/t/p/original/poster.jpg",
+            "still_url": "https://image.tmdb.org/t/p/w1280/cuplikan_adegan_tmdb.jpg"
+        }
+        payload = build_rich_article_payload(
+            chat_id="@testchan",
+            metadata=meta,
+            watermark="@testchan",
+            banner_file_id_or_url="attach://banner_file",
+            poster_file_id_or_url="attach://poster_file"
+        )
+        media_list = payload["rich_message"]["media"]
+        photos = [m for m in media_list if m["media"]["type"] == "photo"]
+        self.assertEqual(len(photos), 3)
+        self.assertEqual(photos[2]["media"]["media"], "https://image.tmdb.org/t/p/w1280/cuplikan_adegan_tmdb.jpg")
+
 
 if __name__ == "__main__":
     unittest.main()

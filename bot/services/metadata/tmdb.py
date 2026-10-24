@@ -189,7 +189,11 @@ class TMDbService:
         append_all = f"credits,videos,images,watch/providers,{append_extra}"
         details_id = self._http_get(
             detail_endpoint,
-            {"language": "id-ID", "append_to_response": append_all}
+            {
+                "language": "id-ID",
+                "append_to_response": append_all,
+                "include_image_language": "id,en,null"
+            }
         ) or {}
 
         # If Indonesian overview is blank, fetch en-US details for plot/overview
@@ -197,7 +201,11 @@ class TMDbService:
         if not details_id.get("overview"):
             details_en = self._http_get(
                 detail_endpoint,
-                {"language": "en-US", "append_to_response": append_all}
+                {
+                    "language": "en-US",
+                    "append_to_response": append_all,
+                    "include_image_language": "id,en,null"
+                }
             ) or {}
 
         # Combine details prioritizing Indonesian
@@ -486,26 +494,37 @@ class TMDbService:
         if studio_str:
             res["studio"] = studio_str
 
-        # Additional gallery images (distinct backdrops/stills, excluding primary backdrop and poster)
+        # Extract cuplikan adegan film (movie still) from TMDB backdrops
+        still_url = ""
         gallery_images = []
         img_data = main.get("images") or fallback.get("images") or {}
-        for bd in img_data.get("backdrops", []):
-            fp = bd.get("file_path")
-            if fp:
-                img_u = f"https://image.tmdb.org/t/p/w1280{fp}"
-                if img_u != backdrop_url and img_u not in gallery_images:
-                    gallery_images.append(img_u)
-                    if len(gallery_images) >= 2:
-                        break
-        for po in img_data.get("posters", []):
-            if len(gallery_images) >= 2:
-                break
-            fp = po.get("file_path")
-            if fp:
-                img_u = f"https://image.tmdb.org/t/p/w780{fp}"
-                if img_u != poster_url and img_u not in gallery_images:
-                    gallery_images.append(img_u)
+        primary_bd_fp = (main.get("backdrop_path") or fallback.get("backdrop_path") or "").strip()
+        primary_po_fp = (main.get("poster_path") or fallback.get("poster_path") or "").strip()
 
+        # Find all scene stills (backdrops) distinct from primary backdrop and poster
+        bds = img_data.get("backdrops", [])
+        cuplikan_candidates = [
+            b for b in bds
+            if b.get("file_path") and b.get("file_path").strip() not in (primary_bd_fp, primary_po_fp)
+        ]
+
+        if cuplikan_candidates:
+            # Prefer textless scene stills (iso_639_1 is None or empty)
+            textless = [b for b in cuplikan_candidates if b.get("iso_639_1") in (None, "", "null")]
+            best_cuplikan = textless[0] if textless else cuplikan_candidates[0]
+            chosen_fp = best_cuplikan.get("file_path")
+            if chosen_fp:
+                still_url = f"https://image.tmdb.org/t/p/w1280{chosen_fp}"
+                gallery_images.append(still_url)
+        elif main.get("still_path") or fallback.get("still_path"):
+            # For TV episodes that have still_path directly
+            sp = (main.get("still_path") or fallback.get("still_path") or "").strip()
+            if sp:
+                still_url = f"https://image.tmdb.org/t/p/w1280{sp}"
+                gallery_images.append(still_url)
+
+        if still_url:
+            res["still_url"] = still_url
         if gallery_images:
             res["gallery_images"] = gallery_images
 

@@ -107,7 +107,7 @@ class MetadataEngine:
                     "budget", "revenue", "popularity", "release_date",
                     "certification", "writer", "studio",
                     "awards", "rotten_tomatoes", "metascore",
-                    "watch_providers", "gallery_images"
+                    "watch_providers", "gallery_images", "still_url"
                 ):
                     if rate_res.get(field) and not metadata.get(field):
                         metadata[field] = rate_res[field]

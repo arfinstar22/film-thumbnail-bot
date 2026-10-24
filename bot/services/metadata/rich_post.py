@@ -225,9 +225,14 @@ def build_rich_article_payload(
         if metadata.get("poster_url"):
             known_primary.add(metadata.get("poster_url"))
 
-    for g_url in gallery_images:
-        if g_url and g_url not in all_gallery and g_url not in known_primary and len(all_gallery) < 3:
-            all_gallery.append(g_url)
+    # Gambar ke-3: Cuplikan adegan film langsung dari API TMDB
+    tmdb_still = metadata.get("still_url")
+    if tmdb_still and tmdb_still not in all_gallery and tmdb_still not in known_primary and len(all_gallery) < 3:
+        all_gallery.append(tmdb_still)
+    else:
+        for g_url in gallery_images:
+            if g_url and g_url not in all_gallery and g_url not in known_primary and len(all_gallery) < 3:
+                all_gallery.append(g_url)
 
     for idx, img_src in enumerate(all_gallery):
         img_id = "banner_img" if idx == 0 else ("poster_img" if idx == 1 else f"gallery_img_{idx + 1}")
