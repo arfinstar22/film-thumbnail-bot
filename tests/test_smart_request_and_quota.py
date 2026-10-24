@@ -107,6 +107,36 @@ class TestSmartRequestAndQuota(unittest.TestCase):
         self.assertEqual(res_typo[0]["title"], "Agak Laen")
         self.assertTrue(res_typo[0]["_is_fuzzy"])
 
+    def test_catalog_empty_query_returns_latest_movies(self):
+        """When query is empty, catalog search must return all latest indexed movies."""
+        self.cache.save_movie_post(title="Film A", year=2021, channel_username="film_indonesia1", message_id=10)
+        self.cache.save_movie_post(title="Film B", year=2022, channel_username="film_indonesia1", message_id=20)
+        res = self.cache.search_catalog("", limit=10)
+        self.assertEqual(len(res), 2)
+        self.assertEqual(res[0]["title"], "Film B")
+        self.assertEqual(res[1]["title"], "Film A")
+
+    def test_catalog_gibberish_query_returns_empty(self):
+        """Gibberish query must not return unrelated movies."""
+        self.cache.save_movie_post(title="Dilan 1990", year=2018, channel_username="film_indonesia1", message_id=10)
+        res = self.cache.search_catalog("film yang tidak ada sama sekali xyz")
+        self.assertEqual(len(res), 0)
+
+    def test_supabase_hydrate_ensures_sqlite_tables(self):
+        """Supabase hydration into completely empty database must create all tables and not crash."""
+        import sqlite3
+        from bot.services.metadata.supabase_sync import SupabaseSyncService
+        sync = SupabaseSyncService()
+        mem_conn = sqlite3.connect(":memory:")
+        res = sync.hydrate_to_sqlite(mem_conn)
+        self.assertIsInstance(res, dict)
+        cur = mem_conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [t[0] for t in cur.fetchall()]
+        self.assertIn("movie_catalog", tables)
+        self.assertIn("settings", tables)
+        self.assertIn("bot_users", tables)
+
 
 if __name__ == "__main__":
     unittest.main()

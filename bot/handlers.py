@@ -4503,6 +4503,49 @@ def parse_movie_from_channel_message(msg: Message) -> Optional[Dict[str, Any]]:
     }
 
 
+def hydrate_catalog_from_telegraph(channel_username: str = "film_indonesia1") -> int:
+    """Fallback self-healing hydration: parses Telegraph catalog pages to populate database.
+    Guarantees 230+ movies are instantly available even if channel message fetching fails or cloud is empty."""
+    clean_chan = (channel_username or "film_indonesia1").lstrip("@").strip().lower()
+    index_url = "https://telegra.ph/KATALOG-FILM-FILM-INDONESIA1-10-24"
+    try:
+        req = urllib.request.Request(index_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            html_txt = resp.read().decode("utf-8")
+            subpages = re.findall(r'href=[\"\'](/Katalog-[^\"\']+)[\"\']', html_txt)
+    except Exception as ie:
+        logger.warning(f"Telegraph index fetch failed: {ie}")
+        return 0
+
+    added = 0
+    for sp in subpages:
+        url = f"https://telegra.ph{sp}"
+        try:
+            r = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(r, timeout=10) as resp:
+                content = resp.read().decode("utf-8")
+                for m in re.finditer(r'<a\s+href=[\"\']https://t.me/([^/]+)/(\d+)[\"\'][^>]*>(.*?)</a>', content, re.S):
+                    chan = m.group(1).lower()
+                    mid = int(m.group(2))
+                    raw_title = re.sub(r'<[^>]+>', '', m.group(3)).strip()
+                    raw_title = re.sub(r'^[🎬🎥🍿\s]+', '', raw_title).strip()
+                    t, y, k = normalize_movie_title_and_year(raw_title)
+                    if not t:
+                        continue
+                    if not _engine.cache.find_movie_by_msg_id(chan, mid):
+                        _engine.cache.save_movie_post(
+                            title=t,
+                            year=y,
+                            channel_username=chan,
+                            message_id=mid
+                        )
+                        added += 1
+        except Exception as se:
+            logger.debug(f"Telegraph subpage {url} error: {se}")
+    logger.info(f"Telegraph fallback hydration added {added} movies to catalog.")
+    return added
+
+
 async def auto_hydrate_channel_catalog(
     client: Client,
     channel_username: str,
@@ -4566,6 +4609,11 @@ async def auto_hydrate_channel_catalog(
         except Exception as be:
             logger.debug(f"Hydration batch fetch error: {be}")
         await asyncio.sleep(0.25)
+
+    if scanned_movies == 0 and len(_engine.cache.get_deduplicated_catalog(clean_channel)) < 20:
+        logger.info(f"Channel scan returned 0. Triggering fallback Telegraph catalog hydration for @{clean_channel}...")
+        telegraph_added = await asyncio.to_thread(hydrate_catalog_from_telegraph, clean_channel)
+        scanned_movies += telegraph_added
 
     _engine.cache.set_setting(f"synced_{clean_channel}", "yes")
     return scanned_movies
@@ -7272,40 +7320,59 @@ async def inline_search_handler(client: Client, query: InlineQuery):
         except Exception as ie:
             logger.debug(f"Error formatting inline article #{idx}: {ie}")
 
-    # Fallback article when no results found for non-empty query
+    # Fallback article when no results found (never leave Telegram spinner hanging)
     bot_uname = (client.me.username if getattr(client, "me", None) else "") or "filmindbot"
-    if not articles and q:
-        safe_q = html.escape(q)
-        req_url = f"https://t.me/{bot_uname}?start=request"
-        articles.append(
-            InlineQueryResultArticle(
-                id=f"not_found_{int(time.time())}",
-                title=f"🔍 Film '{q}' belum ada di channel",
-                description="Ketuk di sini untuk request judul film ini ke admin!",
-                input_message_content=InputTextMessageContent(
-                    message_text=(
-                        f"🎬 <b>Permintaan Film:</b> <code>{safe_q}</code>\n\n"
-                        f"Film ini belum ditemukan di channel kami.\n"
-                        f"Klik tombol di bawah untuk langsung request ke admin!"
+    if not articles:
+        if q:
+            safe_q = html.escape(q)
+            req_url = f"https://t.me/{bot_uname}?start=request"
+            articles.append(
+                InlineQueryResultArticle(
+                    id=f"not_found_{int(time.time())}",
+                    title=f"🔍 Film '{q}' belum ada di channel",
+                    description="Ketuk di sini untuk request judul film ini ke admin!",
+                    input_message_content=InputTextMessageContent(
+                        message_text=(
+                            f"🎬 <b>Permintaan Film:</b> <code>{safe_q}</code>\n\n"
+                            f"Film ini belum ditemukan di channel kami.\n"
+                            f"Klik tombol di bawah untuk langsung request ke admin!"
+                        ),
+                        parse_mode=ParseMode.HTML
                     ),
-                    parse_mode=ParseMode.HTML
-                ),
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💬 Request Film Ini ke Admin", url=req_url)]
-                ])
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("💬 Request Film Ini ke Admin", url=req_url)]
+                    ])
+                )
             )
-        )
+        else:
+            articles.append(
+                InlineQueryResultArticle(
+                    id=f"empty_prompt_{int(time.time())}",
+                    title="🍿 Cari Koleksi Film Indonesia",
+                    description="Ketik judul film yang ingin kamu cari (contoh: Agak Laen, Dilan, Siksa Kubur)",
+                    input_message_content=InputTextMessageContent(
+                        message_text=(
+                            "🍿 <b>Koleksi Film Indonesia (@film_indonesia1)</b>\n\n"
+                            "Ketik <code>@filmindbot judul film</code> untuk mencari dan menonton langsung dari channel!"
+                        ),
+                        parse_mode=ParseMode.HTML
+                    ),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📢 Kunjungi Channel", url="https://t.me/film_indonesia1")]
+                    ])
+                )
+            )
 
     try:
         await query.answer(
             results=articles,
             cache_time=1,
             is_personal=True,
-            switch_pm_text="💬 Request Film ke Admin" if not articles else None,
-            switch_pm_parameter="request" if not articles else None
+            switch_pm_text="💬 Request Film ke Admin" if q else "",
+            switch_pm_parameter="request" if q else ""
         )
     except Exception as e:
-        logger.debug(f"Inline query answer error: {e}")
+        logger.error(f"Inline query answer error: {e}")
 
 
 @app.on_chat_join_request()

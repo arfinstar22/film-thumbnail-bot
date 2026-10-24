@@ -133,11 +133,18 @@ def calculate_search_relevance(
 
     # Word-level fuzzy on text words only (ignore numbers/years)
     if q_words_text and t_words_text:
-        for qw in q_words_text:
-            for tw in t_words_text:
-                rw = difflib.SequenceMatcher(None, qw, tw).ratio()
-                if rw > best_ratio:
-                    best_ratio = max(best_ratio, rw * 0.88)
+        if len(q_words_text) == 1:
+            best_rw = max((difflib.SequenceMatcher(None, q_words_text[0], tw).ratio() for tw in t_words_text), default=0.0)
+            if best_rw > best_ratio:
+                best_ratio = max(best_ratio, best_rw * 0.88)
+        else:
+            word_scores = [
+                max((difflib.SequenceMatcher(None, qw, tw).ratio() for tw in t_words_text), default=0.0)
+                for qw in q_words_text
+            ]
+            avg_rw = sum(word_scores) / len(word_scores)
+            if avg_rw > best_ratio:
+                best_ratio = max(best_ratio, avg_rw * 0.92)
 
     if best_ratio >= 0.52:
         if q_words_text and t_words_text:
@@ -151,12 +158,23 @@ def calculate_search_relevance(
             candidates.append((best_ratio * 70.0, False))
 
     # 5. Caption / Genre / Cast match
+    STOP_WORDS = {
+        "ada", "ini", "itu", "dan", "di", "ke", "nya", "si", "film", "movie", "sinopsis",
+        "nonton", "streaming", "full", "indo", "indonesia", "yang", "dari", "pada", "untuk",
+        "dengan", "bisa", "akan", "atau", "oleh", "juga", "sudah", "dalam", "serta", "tidak",
+        "sama", "sekali", "tentang", "menceritakan", "adalah", "seorang"
+    }
+    content_q_words = [w for w in q_words if w not in STOP_WORDS and len(w) > 2]
     cap_clean = (caption or "").lower()
     gen_clean = (genre or "").lower()
-    if q_clean and (q_clean in cap_clean or q_clean in gen_clean):
-        candidates.append((50.0, True))
-    elif any(qw in cap_clean for qw in q_words if len(qw) > 3):
-        candidates.append((38.0, False))
+    if q_clean and len(q_clean) > 3 and (re.search(r"\b" + re.escape(q_clean) + r"\b", cap_clean) or q_clean in gen_clean):
+        candidates.append((55.0, True))
+    elif content_q_words:
+        matched_content = [qw for qw in content_q_words if re.search(r"\b" + re.escape(qw) + r"\b", cap_clean)]
+        if matched_content:
+            cov = len(matched_content) / len(content_q_words)
+            if cov >= 0.5:
+                candidates.append((40.0 + cov * 15.0, False))
 
     if not candidates:
         return 0.0, False
@@ -343,12 +361,12 @@ class MetadataCache:
     def save_movie_post(
         self,
         title: str,
-        year: Optional[int],
-        rating: Optional[str],
-        genre: Optional[str],
-        quality: Optional[str],
-        channel_username: str,
-        message_id: int,
+        year: Optional[int] = None,
+        rating: Optional[str] = None,
+        genre: Optional[str] = None,
+        quality: Optional[str] = None,
+        channel_username: str = "film_indonesia1",
+        message_id: int = 0,
         caption: str = "",
         file_id: Optional[str] = None,
         season: Optional[int] = None,

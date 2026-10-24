@@ -61,6 +61,64 @@ class SupabaseSyncService:
             p_cur = pg_conn.cursor()
             s_cur = sqlite_conn.cursor()
 
+            # Ensure all SQLite tables exist before reading from cloud
+            s_cur.executescript("""
+                CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+                CREATE TABLE IF NOT EXISTS movie_catalog (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT,
+                    year INTEGER,
+                    rating TEXT,
+                    genre TEXT,
+                    quality TEXT,
+                    channel_username TEXT,
+                    message_id INTEGER,
+                    caption TEXT,
+                    file_id TEXT,
+                    season INTEGER,
+                    episode INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_cat_chan_msg ON movie_catalog (channel_username, message_id);
+                CREATE TABLE IF NOT EXISTS bot_users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT,
+                    registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS scheduled_posts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER,
+                    video_file_id TEXT,
+                    caption_text TEXT,
+                    metadata_json TEXT,
+                    watermark TEXT,
+                    scheduled_timestamp INTEGER,
+                    title TEXT,
+                    status TEXT DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS ai_cache (
+                    query TEXT PRIMARY KEY,
+                    caption TEXT
+                );
+                CREATE TABLE IF NOT EXISTS metadata_cache (
+                    query TEXT PRIMARY KEY,
+                    metadata TEXT
+                );
+                CREATE TABLE IF NOT EXISTS movie_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    username TEXT,
+                    movie_title TEXT,
+                    clean_title TEXT,
+                    channel_username TEXT,
+                    status TEXT DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    fulfilled_at TIMESTAMP
+                );
+            """)
+
             # 1. Settings
             try:
                 p_cur.execute("SELECT key, value FROM settings")
