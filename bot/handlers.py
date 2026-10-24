@@ -7225,9 +7225,15 @@ async def handle_incoming_text(client: Client, msg: Message):
         )
         return
 
-    # 4. Handle casual member chat in PM (auto search & 1-tap request)
-    if msg.chat.type == ChatType.PRIVATE and not is_admin(user_id, username):
-        query = msg.text.strip()
+    # 4. Handle casual search in PM (member & admin) or group mention
+    is_group = msg.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+    bot_uname = (client.me.username if getattr(client, "me", None) else "") or "filmindbot"
+    is_bot_mentioned = bool(bot_uname and f"@{bot_uname.lower()}" in msg.text.lower())
+
+    if (msg.chat.type == ChatType.PRIVATE) or (is_group and is_bot_mentioned):
+        raw_text = msg.text.strip()
+        query = re.sub(rf"^@?{re.escape(bot_uname)}\s*", "", raw_text, flags=re.IGNORECASE).strip()
+        query = " ".join(query.split())
         if len(query) >= 2:
             wm = _get_user_watermark(chat_id)
             clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
@@ -7266,7 +7272,10 @@ async def handle_incoming_text(client: Client, msg: Message):
 
 @app.on_inline_query()
 async def inline_search_handler(client: Client, query: InlineQuery):
-    q = " ".join((query.query or "").split())
+    bot_uname = (client.me.username if getattr(client, "me", None) else "") or "filmindbot"
+    raw_q = query.query or ""
+    clean_q = re.sub(rf"^@?{re.escape(bot_uname)}\s*", "", raw_q, flags=re.IGNORECASE).strip()
+    q = " ".join(clean_q.split())
     try:
         results = _engine.cache.search_catalog(q, limit=15)
     except Exception as se:
