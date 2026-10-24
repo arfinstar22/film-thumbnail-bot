@@ -916,6 +916,7 @@ BOT_COMMANDS_LIST = [
     BotCommand("sethighlight", "Atur rekomendasi harian otomatis"),
     BotCommand("retarget", "Update tombol post lama massal"),
     BotCommand("synckatalog", "Scan channel & update Pinned Catalog"),
+    BotCommand("hapusfilm", "Hapus film dari katalog channel"),
     BotCommand("backup", "Ekspor backup database JSON"),
     BotCommand("restorechannel", "Restore/migrasi film ke channel baru"),
     BotCommand("setwatermark", "Atur channel tujuan (@namachannel)"),
@@ -7440,10 +7441,25 @@ async def auto_sync_deleted_movies(client: Client, messages: List[Message]):
         return
 
     try:
-        affected_channels = _engine.cache.delete_movie_posts(deleted_ids)
+        chan_hint = None
+        if messages and messages[0].chat:
+            if getattr(messages[0].chat, "username", None):
+                chan_hint = messages[0].chat.username.lstrip("@").strip().lower()
+            elif getattr(messages[0].chat, "id", None):
+                try:
+                    c = await client.get_chat(messages[0].chat.id)
+                    if c and c.username:
+                        chan_hint = c.username.lstrip("@").strip().lower()
+                except Exception:
+                    pass
+
+        affected_channels = _engine.cache.delete_movie_posts(deleted_ids, channel_username=chan_hint)
+        if not affected_channels and chan_hint:
+            affected_channels = _engine.cache.delete_movie_posts(deleted_ids)
+
         for channel in affected_channels:
-            logger.info(f"Detected deleted movie in @{channel}, auto-updating pinned catalog...")
-            await update_pinned_catalog(client, channel)
+            logger.info(f"🗑️ Detected deleted movie in @{channel} (IDs: {deleted_ids}), auto-updating pinned catalog...")
+            asyncio.create_task(update_pinned_catalog(client, channel))
     except Exception as e:
         logger.error(f"Error handling deleted messages sync: {e}")
 
@@ -7561,6 +7577,82 @@ async def sync_channel_catalog_cmd(client: Client, msg: Message):
     except Exception as e:
         logger.error(f"Error in manual syncchannel cmd: {e}")
         await status_msg.edit_text(f"❌ <b>Gagal sinkronisasi:</b> <code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
+
+
+@app.on_message(filters.command(["hapusfilm", "delmovie", "deletemovie"]))
+async def delete_movie_cmd(client: Client, msg: Message):
+    """Admin command to remove a movie from catalog by title or message ID."""
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Khusus Administrator.", parse_mode=ParseMode.HTML)
+        return
+
+    query = " ".join(msg.command[1:]).strip()
+    if not query:
+        await msg.reply_text(
+            "ℹ️ <b>Format Perintah:</b>\n"
+            "<code>/hapusfilm [judul film atau message_id]</code>\n\n"
+            "<b>Contoh:</b>\n"
+            "• <code>/hapusfilm Agak Laen</code>\n"
+            "• <code>/hapusfilm 539</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    chat_id = msg.chat.id
+    wm = _get_user_watermark(chat_id)
+    clean_wm = (wm or "@film_indonesia1").lstrip("@").strip().lower()
+
+    # If query is numeric, treat as message_id
+    if query.isdigit():
+        msg_id = int(query)
+        affected = _engine.cache.delete_movie_posts([msg_id], channel_username=clean_wm)
+        if not affected:
+            affected = _engine.cache.delete_movie_posts([msg_id])
+        if affected:
+            for ch in affected:
+                asyncio.create_task(update_pinned_catalog(client, ch))
+            total_now = len(_engine.cache.get_deduplicated_catalog(clean_wm))
+            await msg.reply_text(
+                f"✅ <b>Film Berhasil Dihapus!</b>\n\n"
+                f"🗑️ Postingan ID: <code>#{msg_id}</code>\n"
+                f"📢 Channel: @{clean_wm}\n"
+                f"🎬 Sisa Koleksi: <b>{total_now} Film</b>\n\n"
+                f"<i>Daftar katalog disematkan & Telegra.ph sudah otomatis diperbarui!</i>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        else:
+            await msg.reply_text(f"⚠️ Tidak ditemukan film dengan message ID <code>#{msg_id}</code> di katalog.", parse_mode=ParseMode.HTML)
+            return
+
+    # Otherwise search by title
+    matches = _engine.cache.search_catalog(query, limit=5, channel_username=clean_wm)
+    if not matches:
+        await msg.reply_text(f"🔍 Film <b>{html.escape(query)}</b> tidak ditemukan di katalog.", parse_mode=ParseMode.HTML)
+        return
+
+    target_movie = matches[0]
+    target_title = target_movie["title"]
+    m_id = target_movie.get("message_id")
+
+    if m_id:
+        affected = _engine.cache.delete_movie_posts([m_id], channel_username=clean_wm)
+    else:
+        affected = _engine.cache.delete_movie_by_title(target_title, channel_username=clean_wm)
+
+    for ch in (affected or [clean_wm]):
+        asyncio.create_task(update_pinned_catalog(client, ch))
+
+    total_now = len(_engine.cache.get_deduplicated_catalog(clean_wm))
+    y_str = f" ({target_movie['year']})" if target_movie.get("year") else ""
+    await msg.reply_text(
+        f"✅ <b>Film Berhasil Dihapus dari Katalog!</b>\n\n"
+        f"🎬 <b>{html.escape(target_title)}{y_str}</b>\n"
+        f"📢 Channel: @{clean_wm}\n"
+        f"📊 Sisa Koleksi: <b>{total_now} Film</b>\n\n"
+        f"<i>Katalog disematkan di channel, Telegra.ph, dan pencarian inline telah diperbarui secara instan!</i>",
+        parse_mode=ParseMode.HTML
+    )
 
 
 async def on_bot_startup(client: Client):

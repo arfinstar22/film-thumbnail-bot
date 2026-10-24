@@ -389,6 +389,72 @@ class SupabaseSyncService:
                 except Exception:
                     pass
 
+    async def async_delete_catalog(self, message_ids: List[int], channel_username: Optional[str] = None):
+        """Asynchronously deletes movie catalog records from Supabase by message_ids."""
+        if not self._enabled or not message_ids:
+            return
+        await asyncio.to_thread(self._sync_delete_catalog, message_ids, channel_username)
+
+    def _sync_delete_catalog(self, message_ids: List[int], channel_username: Optional[str] = None):
+        conn = None
+        try:
+            conn = self._get_connection()
+            if conn:
+                with conn.cursor() as cur:
+                    clean_chan = (channel_username or "").lstrip("@").strip().lower()
+                    if clean_chan:
+                        cur.execute(
+                            "DELETE FROM movie_catalog WHERE message_id = ANY(%s) AND LOWER(channel_username) = %s",
+                            (list(message_ids), clean_chan)
+                        )
+                    else:
+                        cur.execute(
+                            "DELETE FROM movie_catalog WHERE message_id = ANY(%s)",
+                            (list(message_ids),)
+                        )
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"Supabase async_delete_catalog error: {e}")
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    async def async_delete_catalog_by_title(self, clean_title: str, channel_username: Optional[str] = None):
+        """Asynchronously deletes movie catalog records from Supabase by title."""
+        if not self._enabled or not clean_title:
+            return
+        await asyncio.to_thread(self._sync_delete_catalog_by_title, clean_title, channel_username)
+
+    def _sync_delete_catalog_by_title(self, clean_title: str, channel_username: Optional[str] = None):
+        conn = None
+        try:
+            conn = self._get_connection()
+            if conn:
+                with conn.cursor() as cur:
+                    clean_chan = (channel_username or "").lstrip("@").strip().lower()
+                    if clean_chan:
+                        cur.execute(
+                            "DELETE FROM movie_catalog WHERE LOWER(title) = LOWER(%s) AND LOWER(channel_username) = %s",
+                            (clean_title, clean_chan)
+                        )
+                    else:
+                        cur.execute(
+                            "DELETE FROM movie_catalog WHERE LOWER(title) = LOWER(%s)",
+                            (clean_title,)
+                        )
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"Supabase async_delete_catalog_by_title error: {e}")
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
     async def async_delete_requests(self, clean_title: str):
         """Asynchronously deletes requests from Supabase."""
         if not self._enabled:

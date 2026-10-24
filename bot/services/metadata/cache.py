@@ -440,8 +440,60 @@ class MetadataCache:
                     conn.commit()
             if affected_channels:
                 logger.info(f"Deleted {len(message_ids)} message IDs from catalog, affected channels: {affected_channels}")
+                if self.cloud.is_enabled:
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(self.cloud.async_delete_catalog(
+                            list(message_ids),
+                            clean_chan or (affected_channels[0] if affected_channels else None)
+                        ))
+                    except RuntimeError:
+                        pass
         except Exception as e:
             logger.error(f"Delete movie posts error: {e}")
+        return affected_channels
+
+    def delete_movie_by_title(self, title: str, channel_username: Optional[str] = None) -> List[str]:
+        """Delete records from movie_catalog by movie title and return affected channel usernames."""
+        clean_title = (title or "").strip()
+        if not clean_title:
+            return []
+        affected_channels = []
+        try:
+            conn = self._conn()
+            self._ensure_catalog_table(conn)
+            clean_chan = (channel_username or "").lstrip("@").strip().lower()
+            if clean_chan:
+                cur = conn.execute(
+                    "SELECT DISTINCT channel_username FROM movie_catalog WHERE LOWER(title) = LOWER(?) AND LOWER(channel_username) = ?",
+                    (clean_title, clean_chan)
+                )
+                affected_channels = [r[0] for r in cur.fetchall() if r[0]]
+                if affected_channels:
+                    conn.execute(
+                        "DELETE FROM movie_catalog WHERE LOWER(title) = LOWER(?) AND LOWER(channel_username) = ?",
+                        (clean_title, clean_chan)
+                    )
+                    conn.commit()
+            else:
+                cur = conn.execute("SELECT DISTINCT channel_username FROM movie_catalog WHERE LOWER(title) = LOWER(?)", (clean_title,))
+                affected_channels = [r[0] for r in cur.fetchall() if r[0]]
+                if affected_channels:
+                    conn.execute("DELETE FROM movie_catalog WHERE LOWER(title) = LOWER(?)", (clean_title,))
+                    conn.commit()
+            if affected_channels:
+                logger.info(f"Deleted movie '{clean_title}' from catalog, affected channels: {affected_channels}")
+                if self.cloud.is_enabled:
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(self.cloud.async_delete_catalog_by_title(
+                            clean_title,
+                            clean_chan or (affected_channels[0] if affected_channels else None)
+                        ))
+                    except RuntimeError:
+                        pass
+        except Exception as e:
+            logger.error(f"Delete movie by title error: {e}")
         return affected_channels
 
     def get_deduplicated_catalog(self, channel_username: str) -> List[Dict[str, Any]]:

@@ -167,6 +167,32 @@ class TestSmartSearchAndFuzzyMatching(unittest.TestCase):
         self.assertIsNotNone(found_exact)
         self.assertEqual(found_exact["title"], "Rasuk")
 
+    def test_delete_movie_posts_removes_from_search(self):
+        # Movie 103 is Agak Laen
+        results_before = self.cache.search_catalog("agak laen")
+        self.assertTrue(any(r["title"] == "Agak Laen" for r in results_before))
+
+        # Delete message_id 103
+        affected = self.cache.delete_movie_posts([103], channel_username="film_indonesia1")
+        self.assertIn("film_indonesia1", affected)
+
+        # Search should no longer return Agak Laen
+        results_after = self.cache.search_catalog("agak laen")
+        self.assertFalse(any(r["title"] == "Agak Laen" for r in results_after))
+
+    def test_delete_movie_by_title_removes_from_search(self):
+        # Movie 101 is Pengabdi Setan
+        results_before = self.cache.search_catalog("Pengabdi Setan")
+        self.assertTrue(any(r["title"] == "Pengabdi Setan" for r in results_before))
+
+        # Delete by title
+        affected = self.cache.delete_movie_by_title("Pengabdi Setan", channel_username="film_indonesia1")
+        self.assertIn("film_indonesia1", affected)
+
+        # Search should no longer return Pengabdi Setan (2017), only Pengabdi Setan 2
+        results_after = self.cache.search_catalog("Pengabdi Setan")
+        self.assertFalse(any(r["title"] == "Pengabdi Setan" and r.get("year") == 2017 for r in results_after))
+
 
 class TestTMDbService(unittest.TestCase):
     def setUp(self):
