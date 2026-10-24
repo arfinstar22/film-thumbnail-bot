@@ -65,8 +65,8 @@ class TestRichArticlePost(unittest.TestCase):
         self.assertIn("📦 <b>Ukuran :</b> 1.5 GB", html_content)
         self.assertIn("⏱️ <b>Durasi :</b> 1 jam 40 menit", html_content)
 
-        # Check badges row: Rating and Genre only (no duplicate resolution/duration in badges)
-        self.assertIn("<p>⭐ <b>7.0/10</b> • 🎭 Drama, Keluarga</p>", html_content)
+        # Check badges row: Rating bar and Genre only (no duplicate resolution/duration in badges)
+        self.assertIn("<p>⭐ <b>7.0/10</b> ███████░░░ • 🎭 Drama, Keluarga</p>", html_content)
         badge_section = html_content.split("<details>")[0] if "<details>" in html_content else ""
         self.assertNotIn("1080p", badge_section)
         self.assertNotIn("1 jam 40 menit", badge_section)
@@ -213,23 +213,38 @@ class TestRichArticlePost(unittest.TestCase):
             "studio": "Rapi Films",
             "actors": "Tara Basro, Endy Arfian",
             "synopsis": "Keluarga Rini mencoba memulai hidup baru di rumah susun.",
+            "rotten_tomatoes": "85%",
+            "metascore": "72",
+            "awards": "Pemenang Festival Film Indonesia 2025",
+            "watch_providers": ["Netflix", "Disney+ Hotstar", "Vidio"],
+            "gallery_images": [
+                "https://image.tmdb.org/t/p/w1280/still1.jpg",
+                "https://image.tmdb.org/t/p/w1280/still2.jpg"
+            ]
         }
 
         payload = build_rich_article_payload(
             chat_id="@filmindochannel",
             metadata=meta,
             watermark="@filmindochannel",
-            video_file_id="dummy_vid_123"
+            video_file_id="dummy_vid_123",
+            banner_file_id_or_url="https://image.tmdb.org/t/p/w1280/banner.jpg",
+            poster_file_id_or_url="https://image.tmdb.org/t/p/w780/poster.jpg"
         )
         html = payload["rich_message"]["html"]
 
         # Tagline
         self.assertIn("✨ <i>&ldquo;Semua akan kembali ke asalnya.&rdquo;</i>", html)
 
-        # Flag & Runtime & Certification in Badges
+        # Rating bar & Genre emoji mapping & Badges
+        self.assertIn("⭐ <b>7.4/10</b> ███████░░░", html)
+        self.assertIn("😱 Horor, Misteri", html)
         self.assertIn("🇮🇩", html)
         self.assertIn("⏱️ 1j 59m", html)
         self.assertIn("🏷️ 13+", html)
+
+        # Slideshow gallery count
+        self.assertIn("🖼️ Poster &amp; Banner HD (4 gambar)", html)
 
         # Trending badge because popularity > 50
         self.assertIn("🔥 <b>SEDANG TRENDING</b>", html)
@@ -244,6 +259,18 @@ class TestRichArticlePost(unittest.TestCase):
         self.assertIn("💰 <b>Budget :</b> $20M", html)
         self.assertIn("💵 <b>Box Office :</b> $100M", html)
         self.assertIn("⏱️ <b>Durasi :</b> 1j 59m (119 menit)", html)
+
+        # Awards & Ratings Fold
+        self.assertIn("🏆 Penghargaan &amp; Rating Lain", html)
+        self.assertIn("🍅 <b>Rotten Tomatoes :</b> 85%", html)
+        self.assertIn("📊 <b>Metascore :</b> 72", html)
+        self.assertIn("🏅 <b>Penghargaan :</b> Pemenang Festival Film Indonesia 2025", html)
+
+        # Watch Providers / Streaming Fold
+        self.assertIn("📺 Tersedia di Platform", html)
+        self.assertIn("• <b>Netflix</b> 🟥", html)
+        self.assertIn("• <b>Disney+ Hotstar</b> 🟦", html)
+        self.assertIn("• <b>Vidio</b> 🟩", html)
 
 
 if __name__ == "__main__":

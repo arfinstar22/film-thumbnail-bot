@@ -68,6 +68,60 @@ def _format_indonesian_date(date_str: str) -> str:
     return str(date_str).strip()
 
 
+GENRE_EMOJIS = {
+    "action": "💥",
+    "aksi": "💥",
+    "adventure": "🗺️",
+    "petualangan": "🗺️",
+    "animation": "🎨",
+    "animasi": "🎨",
+    "comedy": "🤣",
+    "komedi": "🤣",
+    "crime": "🕵️",
+    "kriminal": "🕵️",
+    "documentary": "📹",
+    "dokumenter": "📹",
+    "drama": "🎭",
+    "family": "👨‍👩‍👧",
+    "keluarga": "👨‍👩‍👧",
+    "fantasy": "🧙",
+    "fantasi": "🧙",
+    "history": "📜",
+    "sejarah": "📜",
+    "horror": "😱",
+    "horor": "😱",
+    "music": "🎵",
+    "musik": "🎵",
+    "mystery": "🔍",
+    "misteri": "🔍",
+    "romance": "💖",
+    "romantis": "💖",
+    "science fiction": "🚀",
+    "sci-fi": "🚀",
+    "fiksi ilmiah": "🚀",
+    "thriller": "🔪",
+    "tv movie": "📺",
+    "film tv": "📺",
+    "war": "⚔️",
+    "perang": "⚔️",
+    "western": "🤠",
+}
+
+
+def _format_genre_with_emojis(genre_str: str) -> str:
+    """Format genre string with matching emoji for the primary genre."""
+    if not genre_str:
+        return ""
+    g_s = str(genre_str).strip()
+    if any(ord(c) > 127 for c in g_s[:3]):
+        return g_s
+    first_part = g_s.split(",")[0].strip().lower()
+    for k, emo in GENRE_EMOJIS.items():
+        if k in first_part:
+            return f"{emo} {g_s}"
+    return f"🎭 {g_s}"
+
+
 def build_rich_article_payload(
     chat_id: Union[int, str],
     metadata: Dict[str, Any],
@@ -118,6 +172,11 @@ def build_rich_article_payload(
     certification = (metadata.get("certification") or "").strip()
     writer = (metadata.get("writer") or "").strip()
     studio = (metadata.get("studio") or "").strip()
+    awards = (metadata.get("awards") or "").strip()
+    rotten_tomatoes = (metadata.get("rotten_tomatoes") or "").strip()
+    metascore = (metadata.get("metascore") or "").strip()
+    watch_providers = metadata.get("watch_providers") or []
+    gallery_images = metadata.get("gallery_images") or []
 
     clean_wm = (watermark or "").lstrip("@").strip()
     channel_display = f"@{clean_wm}" if clean_wm else "@filmindochannel"
@@ -148,38 +207,38 @@ def build_rich_article_payload(
     if tagline:
         html_parts.append(f"<p>✨ <i>&ldquo;{html_mod.escape(tagline)}&rdquo;</i></p>")
 
-    # 3. SLIDESHOW (Banner & Poster swipeable gallery — collapsible)
+    # 3. SLIDESHOW (Banner, Poster & Stills swipeable gallery — collapsible)
     slideshow_imgs: List[str] = []
+    all_gallery: List[str] = []
     if banner_file_id_or_url:
-        slideshow_imgs.append('<img src="tg://photo?id=banner_img"/>')
+        all_gallery.append(banner_file_id_or_url)
+    if poster_file_id_or_url and poster_file_id_or_url not in all_gallery:
+        all_gallery.append(poster_file_id_or_url)
+    for g_url in gallery_images:
+        if g_url and g_url not in all_gallery and len(all_gallery) < 5:
+            all_gallery.append(g_url)
+
+    for idx, img_src in enumerate(all_gallery):
+        img_id = "banner_img" if idx == 0 else ("poster_img" if idx == 1 else f"gallery_img_{idx + 1}")
+        slideshow_imgs.append(f'<img src="tg://photo?id={img_id}"/>')
         media_items.append({
-            "id": "banner_img",
+            "id": img_id,
             "media": {
                 "type": "photo",
-                "media": banner_file_id_or_url
-            }
-        })
-    if (
-        poster_file_id_or_url
-        and poster_file_id_or_url != banner_file_id_or_url
-    ):
-        slideshow_imgs.append('<img src="tg://photo?id=poster_img"/>')
-        media_items.append({
-            "id": "poster_img",
-            "media": {
-                "type": "photo",
-                "media": poster_file_id_or_url
+                "media": img_src
             }
         })
 
     if slideshow_imgs:
         if len(slideshow_imgs) > 1:
             imgs_content = f"<tg-slideshow>\n{''.join(slideshow_imgs)}\n</tg-slideshow>"
+            summary_label = f"🖼️ Poster &amp; Banner HD ({len(slideshow_imgs)} gambar)"
         else:
             imgs_content = slideshow_imgs[0]
+            summary_label = "🖼️ Poster &amp; Banner HD"
         html_parts.append(
             f"<details>\n"
-            f"<summary>🖼️ Poster &amp; Banner HD</summary>\n"
+            f"<summary>{summary_label}</summary>\n"
             f"{imgs_content}\n"
             f"</details>"
         )
@@ -228,10 +287,18 @@ def build_rich_article_payload(
                     writer = c_data["writer"]
                 if not studio and c_data.get("studio"):
                     studio = c_data["studio"]
+                if not awards and c_data.get("awards"):
+                    awards = c_data["awards"]
+                if not rotten_tomatoes and c_data.get("rotten_tomatoes"):
+                    rotten_tomatoes = c_data["rotten_tomatoes"]
+                if not metascore and c_data.get("metascore"):
+                    metascore = c_data["metascore"]
+                if not watch_providers and c_data.get("watch_providers"):
+                    watch_providers = c_data["watch_providers"]
         except Exception:
             pass
 
-    # 4. BADGES (Rating & Genre, plus Country flags, Runtime, Content Rating)
+    # 4. BADGES (Rating Bar & Genre, plus Country flags, Runtime, Content Rating)
     badge_items: List[str] = []
 
     clean_rating = None
@@ -243,12 +310,21 @@ def build_rich_article_payload(
             clean_rating = str(rating).strip()
 
     if clean_rating:
-        badge_items.append(f"⭐ <b>{html_mod.escape(clean_rating)}</b>")
+        m_s = re.search(r"(\d+(?:\.\d+)?)", clean_rating)
+        bar_str = ""
+        if m_s:
+            try:
+                score = float(m_s.group(1))
+                filled = max(0, min(10, int(round(score))))
+                bar_str = " " + ("█" * filled + "░" * (10 - filled))
+            except ValueError:
+                pass
+        badge_items.append(f"⭐ <b>{html_mod.escape(clean_rating)}</b>{bar_str}")
     else:
         badge_items.append("⭐ <b>Belum ada</b>")
 
     if genre:
-        badge_items.append(f"🎭 {html_mod.escape(str(genre))}")
+        badge_items.append(html_mod.escape(_format_genre_with_emojis(str(genre))))
 
     if country_codes and isinstance(country_codes, list):
         flags = "".join([_country_code_to_flag(c) for c in country_codes[:2] if _country_code_to_flag(c)])
@@ -387,6 +463,63 @@ def build_rich_article_payload(
             f"{specs_body}\n"
             f"</details>"
         )
+
+    # 7. EXPANDABLE DETAILS — Penghargaan & Rating Lain (Awards, Rotten Tomatoes, Metascore)
+    awards_lines: List[str] = []
+    if rotten_tomatoes:
+        awards_lines.append(f"🍅 <b>Rotten Tomatoes :</b> {html_mod.escape(str(rotten_tomatoes))}")
+    if metascore:
+        awards_lines.append(f"📊 <b>Metascore :</b> {html_mod.escape(str(metascore))}")
+    if awards:
+        awards_lines.append(f"🏅 <b>Penghargaan :</b> {html_mod.escape(str(awards))}")
+
+    if awards_lines:
+        awards_body = "<br/>\n".join(awards_lines)
+        html_parts.append(
+            f"<details>\n"
+            f"<summary>🏆 Penghargaan &amp; Rating Lain</summary>\n"
+            f"{awards_body}\n"
+            f"</details>"
+        )
+
+    # 8. EXPANDABLE DETAILS — Tersedia di Platform (Streaming Providers)
+    if watch_providers:
+        platform_icons = {
+            "netflix": "🟥",
+            "disney": "🟦",
+            "hotstar": "🟦",
+            "vidio": "🟩",
+            "prime": "🟨",
+            "amazon": "🟨",
+            "apple": "⬛",
+            "hbo": "🟪",
+            "max": "🟪",
+            "viu": "🟨",
+            "wetv": "🟧",
+            "catchplay": "🟧",
+            "iqiyi": "🟩",
+        }
+        wp_lines: List[str] = []
+        for wp in watch_providers:
+            wp_name = wp.strip() if isinstance(wp, str) else (wp.get("provider_name") or wp.get("name") or "").strip()
+            if not wp_name:
+                continue
+            icon = "▶️"
+            clean_wp = wp_name.lower()
+            for k, ico in platform_icons.items():
+                if k in clean_wp:
+                    icon = ico
+                    break
+            wp_lines.append(f"• <b>{html_mod.escape(wp_name)}</b> {icon}")
+
+        if wp_lines:
+            wp_body = "<br/>\n".join(wp_lines)
+            html_parts.append(
+                f"<details>\n"
+                f"<summary>📺 Tersedia di Platform</summary>\n"
+                f"{wp_body}\n"
+                f"</details>"
+            )
 
     # 7. EXPANDABLE DETAILS — Tonton Juga Film Lain (Rekomendasi Pintar Katalog Channel)
     if clean_wm and genre:

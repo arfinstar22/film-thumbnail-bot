@@ -105,7 +105,9 @@ class MetadataEngine:
                     "tagline", "original_title", "production_countries", "country_codes",
                     "spoken_languages", "original_language", "runtime_minutes",
                     "budget", "revenue", "popularity", "release_date",
-                    "certification", "writer", "studio"
+                    "certification", "writer", "studio",
+                    "awards", "rotten_tomatoes", "metascore",
+                    "watch_providers", "gallery_images"
                 ):
                     if rate_res.get(field) and not metadata.get(field):
                         metadata[field] = rate_res[field]

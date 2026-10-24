@@ -183,12 +183,13 @@ class TMDbService:
         tmdb_id = best_item.get("id")
         media_type = best_item.get("media_type") or ("tv" if is_series or "first_air_date" in best_item else "movie")
 
-        # 2. Fetch full details with credits, videos, and certification
+        # 2. Fetch full details with credits, videos, certification, images, and watch providers
         detail_endpoint = f"{media_type}/{tmdb_id}"
         append_extra = "release_dates" if media_type == "movie" else "content_ratings"
+        append_all = f"credits,videos,images,watch/providers,{append_extra}"
         details_id = self._http_get(
             detail_endpoint,
-            {"language": "id-ID", "append_to_response": f"credits,videos,{append_extra}"}
+            {"language": "id-ID", "append_to_response": append_all}
         ) or {}
 
         # If Indonesian overview is blank, fetch en-US details for plot/overview
@@ -196,7 +197,7 @@ class TMDbService:
         if not details_id.get("overview"):
             details_en = self._http_get(
                 detail_endpoint,
-                {"language": "en-US", "append_to_response": f"credits,videos,{append_extra}"}
+                {"language": "en-US", "append_to_response": append_all}
             ) or {}
 
         # Combine details prioritizing Indonesian
@@ -485,6 +486,56 @@ class TMDbService:
         if studio_str:
             res["studio"] = studio_str
 
+        # Additional gallery images (up to 4 images for slideshow)
+        gallery_images = []
+        if backdrop_url:
+            gallery_images.append(backdrop_url)
+        if poster_url and poster_url not in gallery_images:
+            gallery_images.append(poster_url)
+
+        img_data = main.get("images") or fallback.get("images") or {}
+        for bd in img_data.get("backdrops", []):
+            fp = bd.get("file_path")
+            if fp:
+                img_u = f"https://image.tmdb.org/t/p/w1280{fp}"
+                if img_u not in gallery_images and len(gallery_images) < 4:
+                    gallery_images.append(img_u)
+        for po in img_data.get("posters", []):
+            fp = po.get("file_path")
+            if fp:
+                img_u = f"https://image.tmdb.org/t/p/w780{fp}"
+                if img_u not in gallery_images and len(gallery_images) < 5:
+                    gallery_images.append(img_u)
+
+        if gallery_images:
+            res["gallery_images"] = gallery_images
+
+        # Watch Providers (ID first, fallback to US)
+        wp_data = (main.get("watch/providers") or fallback.get("watch/providers") or {}).get("results", {})
+        id_wp = wp_data.get("ID") or wp_data.get("US") or {}
+        providers_list = []
+        for p in id_wp.get("flatrate", []):
+            p_name = p.get("provider_name")
+            if p_name and p_name not in providers_list:
+                providers_list.append(p_name)
+        if not providers_list:
+            for p in (id_wp.get("rent", []) + id_wp.get("buy", [])):
+                p_name = p.get("provider_name")
+                if p_name and p_name not in providers_list:
+                    providers_list.append(p_name)
+        if providers_list:
+            res["watch_providers"] = providers_list
+
+        # OMDb Extra: Awards, Rotten Tomatoes, Metascore
+        imdb_id = main.get("imdb_id") or fallback.get("imdb_id")
+        omdb_extra = self._fetch_omdb_extra(imdb_id, verified_title or main.get("title") or fallback.get("title"), year)
+        if omdb_extra.get("awards"):
+            res["awards"] = omdb_extra["awards"]
+        if omdb_extra.get("rotten_tomatoes"):
+            res["rotten_tomatoes"] = omdb_extra["rotten_tomatoes"]
+        if omdb_extra.get("metascore"):
+            res["metascore"] = omdb_extra["metascore"]
+
         # Franchise / Universe Collection
         collection_raw = main.get("belongs_to_collection") or fallback.get("belongs_to_collection")
         if collection_raw and isinstance(collection_raw, dict) and collection_raw.get("id"):
@@ -497,6 +548,46 @@ class TMDbService:
                 logger.debug(f"Failed to fetch collection {collection_raw}: {ce}")
 
         return res
+
+    def _fetch_omdb_extra(self, imdb_id: Optional[str], title: Optional[str], year: Optional[int]) -> Dict[str, Any]:
+        """Fetch Awards, Rotten Tomatoes, and Metascore from OMDb API."""
+        out: Dict[str, Any] = {}
+        urls = []
+        if imdb_id and str(imdb_id).startswith("tt"):
+            urls.append(f"http://www.omdbapi.com/?i={imdb_id}&apikey=trilogy")
+        if title:
+            q_t = urllib.parse.quote(str(title).strip())
+            if year:
+                urls.append(f"http://www.omdbapi.com/?t={q_t}&y={year}&apikey=trilogy")
+            urls.append(f"http://www.omdbapi.com/?t={q_t}&apikey=trilogy")
+
+        for u in urls:
+            try:
+                req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=1.8) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    if data.get("Response") == "True":
+                        # Awards
+                        awards = data.get("Awards")
+                        if awards and awards != "N/A":
+                            out["awards"] = awards
+
+                        # Metascore
+                        ms = data.get("Metascore")
+                        if ms and ms != "N/A":
+                            out["metascore"] = ms
+
+                        # Rotten Tomatoes
+                        ratings = data.get("Ratings") or []
+                        for r in ratings:
+                            if r.get("Source") == "Rotten Tomatoes":
+                                out["rotten_tomatoes"] = r.get("Value")
+                                break
+                        if out:
+                            return out
+            except Exception:
+                pass
+        return out
 
     def get_collection(self, collection_id: int) -> Optional[Dict[str, Any]]:
         """Fetch details of a movie franchise/collection and all its parts in chronological order."""
