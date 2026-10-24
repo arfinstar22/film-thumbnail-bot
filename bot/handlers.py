@@ -33,6 +33,7 @@ from .services.video import (
 )
 from .services.metadata.engine import MetadataEngine
 from .services.metadata.catalog import format_pinned_catalog, publish_or_update_telegraph_catalog, publish_movie_instant_view
+from .services.metadata.rich_post import async_send_rich_article_post, build_rich_article_payload
 from .services.metadata.cache import (
     WIB, get_next_prime_time_slots, normalize_movie_title_and_year, is_invalid_movie_title
 )
@@ -5162,31 +5163,127 @@ async def sync_collection_sibling_posts(
             if orig_caption and re.search(pat, orig_caption, re.I):
                 updated_caption = re.sub(pat, rf'\g<num>{link_html}', orig_caption, count=1, flags=re.I)
 
-            # 3. Update caption ONLY. NEVER TOUCH OR REPLACE THE VIDEO FILE!
+            # 3. Method 1: If message is a media post with caption, update caption via editMessageCaption
             success = False
-            kb = target_msg.reply_markup if target_msg and getattr(target_msg, "reply_markup", None) else None
-            if updated_caption:
+            if updated_caption and BOT_TOKEN:
+                cap_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageCaption"
+                cap_payload = {
+                    "chat_id": f"@{clean_channel}",
+                    "message_id": sibling_mid,
+                    "caption": updated_caption,
+                    "parse_mode": "HTML"
+                }
+                if target_msg and getattr(target_msg, "reply_markup", None):
+                    cap_payload["reply_markup"] = _build_bot_api_reply_markup(target_msg.reply_markup)
+
+                def _edit_cap():
+                    req = urllib.request.Request(
+                        cap_url,
+                        data=json.dumps(cap_payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"}
+                    )
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        return json.loads(resp.read().decode("utf-8"))
+
+                try:
+                    res = await asyncio.to_thread(_edit_cap)
+                    if res and res.get("ok"):
+                        success = True
+                        logger.info(f"✨ Successfully updated caption with franchise link in post #{sibling_mid} for {p_title}!")
+                except urllib.error.HTTPError as he:
+                    err_msg = he.read().decode("utf-8", errors="ignore")
+                    logger.debug(f"editMessageCaption #{sibling_mid} HTTP {he.code}: {err_msg}")
+                except Exception as ee:
+                    logger.debug(f"editMessageCaption error: {ee}")
+
+            if not success and updated_caption and target_msg and target_msg.caption:
                 try:
                     await client.edit_message_caption(
                         chat_id=clean_channel,
                         message_id=sibling_mid,
                         caption=updated_caption,
                         parse_mode=ParseMode.HTML,
-                        reply_markup=kb
+                        reply_markup=target_msg.reply_markup
                     )
                     success = True
-                    logger.info(f"✨ Successfully updated caption via client in video post #{sibling_mid} for {p_title}!")
+                    logger.info(f"✨ Successfully updated caption via client in post #{sibling_mid} for {p_title}!")
                 except Exception as c_err:
                     logger.debug(f"client.edit_message_caption error: {c_err}")
 
-                if not success and BOT_TOKEN:
-                    # Use Bot API editMessageCaption with blockquote expandable support
+            # 4. Method 2: If message was sent via sendRichMessage (or editMessageCaption indicated no caption)
+            if not success and BOT_TOKEN:
+                s_clean_t = re.sub(r"[^\w\s]", "", p_title).strip()
+                s_key = f"rating_v2_{s_clean_t.lower()}_{p_year}" if p_year else f"rating_v2_{s_clean_t.lower()}"
+                sibling_meta = None
+                s_cached = _engine.cache.get_setting(s_key, "")
+                if s_cached:
                     try:
-                        await _apply_expandable_caption(f"@{clean_channel}", sibling_mid, updated_caption, kb)
+                        sibling_meta = json.loads(s_cached)
+                    except Exception:
+                        pass
+                if not sibling_meta:
+                    try:
+                        sibling_meta = await _engine.rating_service.get_rating_and_genre(p_title, p_year)
+                    except Exception:
+                        sibling_meta = {}
+
+                if not sibling_meta:
+                    sibling_meta = {}
+                sibling_meta.setdefault("title", p_title)
+                sibling_meta.setdefault("year", p_year)
+                sibling_meta["collection"] = collection
+
+                bot_uname = (client.me.username if getattr(client, "me", None) else "") or _engine.cache.get_setting("bot_username", "")
+                req_link = _get_user_request_link(chat_id or 0, bot_username=bot_uname)
+                sibling_kb = build_channel_post_keyboard(
+                    watermark=f"@{clean_channel}",
+                    title=p_title,
+                    trailer_url=sibling_meta.get("trailer_url"),
+                    request_link=req_link
+                )
+                rich_kb = _build_bot_api_reply_markup(sibling_kb)
+
+                cached_fid = _engine.cache.get_setting(f"video_fid_{s_clean_t.lower()}_{p_year}", "") or _engine.cache.get_setting(f"video_fid_{s_clean_t.lower()}", "")
+                actual_fid = sibling_file_id or cached_fid or sibling_item.get("file_id")
+
+                cached_banner = _engine.cache.get_setting(f"banner_fid_{s_clean_t.lower()}_{p_year}", "") or _engine.cache.get_setting(f"banner_fid_{s_clean_t.lower()}", "")
+                banner_url = sibling_meta.get("banner_url") or sibling_meta.get("backdrop_url") or cached_banner
+
+                poster_url = sibling_meta.get("poster_url") or sibling_meta.get("poster_path")
+                rich_payload = build_rich_article_payload(
+                    chat_id=f"@{clean_channel}",
+                    metadata=sibling_meta,
+                    watermark=f"@{clean_channel}",
+                    video_file_id=actual_fid,
+                    banner_file_id_or_url=banner_url,
+                    poster_file_id_or_url=poster_url,
+                    reply_markup=rich_kb
+                )
+
+                edit_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+                edit_body = {
+                    "chat_id": f"@{clean_channel}",
+                    "message_id": sibling_mid,
+                    "rich_message": rich_payload["rich_message"],
+                    "reply_markup": rich_kb
+                }
+
+                def _edit_rich():
+                    req = urllib.request.Request(
+                        edit_url,
+                        data=json.dumps(edit_body).encode("utf-8"),
+                        headers={"Content-Type": "application/json"}
+                    )
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        return json.loads(resp.read().decode("utf-8"))
+
+                try:
+                    res = await asyncio.to_thread(_edit_rich)
+                    if res and res.get("ok"):
                         success = True
-                        logger.info(f"✨ Successfully updated caption via Bot API in video post #{sibling_mid} for {p_title}!")
-                    except Exception as b_err:
-                        logger.debug(f"Bot API editMessageCaption error: {b_err}")
+                        logger.info(f"✨ Successfully updated rich post #{sibling_mid} for {p_title} with franchise link!")
+                except Exception as r_err:
+                    logger.debug(f"editMessageText (rich_message) error for #{sibling_mid}: {r_err}")
 
             # 5. Persist updated caption to local database cache if updated
             if success and updated_caption:
@@ -5346,94 +5443,128 @@ async def publish_video_to_channel(
         logger.debug(f"Failed to prepare local poster for rich post: {pe}")
         poster_path = None
 
+    # === TRY RICH ARTICLE POST (sendRichMessage, Bot API 10.1+) ===
     sent_channel = None
+    rich_post_success = False
 
-    # === Publish Native Video Post with Rich Caption ===
-    if use_banner and banner_path and os.path.exists(banner_path):
+    if BOT_TOKEN:
         try:
-            sent_banner = await client.send_photo(
+            # Build reply markup for Bot API format
+            rich_kb = _build_bot_api_reply_markup(channel_kb)
+
+            # Send native rich article post via Bot API sendRichMessage with multipart file attachment
+            # Direct attachment via attach:// completely avoids sending temporary photos to the bot chat
+            result = await async_send_rich_article_post(
+                bot_token=BOT_TOKEN,
                 chat_id=watermark,
-                photo=banner_path,
-                caption=caption_text,
-                parse_mode=ParseMode.HTML,
-                protect_content=protect_flag
+                metadata=meta,
+                watermark=watermark,
+                video_file_id=video_file_id,
+                banner_path=banner_path,
+                poster_path=poster_path,
+                reply_markup=rich_kb,
+                protect_content=protect_flag,
             )
-            if sent_banner:
-                await _apply_expandable_caption(watermark, sent_banner.id, caption_text, None)
-        except Exception as be:
-            logger.warning(f"Failed to publish banner photo to {watermark}: {be}")
-            sent_banner = None
 
-    # Video caption: format with article card layout (collapsible poster, synopsis, specs)
-    if sent_banner:
-        v_lines = [f"🎬 <b>{html.escape(title_display.upper())}</b>"]
-        tech_parts = []
-        if meta.get("resolution"):
-            tech_parts.append(html.escape(str(meta['resolution'])))
-        if meta.get("source"):
-            tech_parts.append(html.escape(str(meta['source'])))
-        if meta.get("fileSize"):
-            tech_parts.append(html.escape(str(meta['fileSize'])))
-        elif meta.get("duration"):
-            tech_parts.append(html.escape(str(meta['duration'])))
-        if tech_parts:
-            v_lines.append(f"📦 {' • '.join(tech_parts)}")
-        v_lines.append(f"🍿 <b>Channel Resmi:</b> <a href=\"{html.escape(channel_url, quote=True)}\">{html.escape(watermark)}</a>")
-        video_caption = "\n".join(v_lines)
-    else:
-        if "POSTER & BANNER HD" not in caption_text:
-            try:
-                article_caption = _engine.caption_gen.generate(meta, custom_watermark=watermark, style="article")
-                video_caption = article_caption or caption_text
-            except Exception:
-                video_caption = caption_text
-        else:
-            video_caption = caption_text
+            if result and result.get("message_id"):
+                # Create a minimal Message-like object for downstream compatibility
+                class _RichMsg:
+                    def __init__(self, mid):
+                        self.id = mid
+                sent_channel = _RichMsg(result["message_id"])
+                rich_post_success = True
+                logger.info(f"Rich article post published: {title_display} (msg_id={sent_channel.id})")
+        except Exception as rich_err:
+            logger.info(f"sendRichMessage not available or failed, falling back to legacy: {rich_err}")
+            rich_post_success = False
 
-    # Ensure thumbnail exists (prioritize Banner HD, then branded poster)
-    final_thumb = thumb_path
-    cleanup_thumb = False
-    if not final_thumb or not os.path.exists(final_thumb):
-        banner_src = pregenerated_banner_path if (pregenerated_banner_path and os.path.exists(pregenerated_banner_path)) else None
-        poster_src = banner_src or meta.get("poster_url") or meta.get("poster_path") or meta.get("thumb_path")
-        if poster_src:
+    # === FALLBACK: Legacy sendVideo with caption ===
+    if not rich_post_success:
+        if use_banner and banner_path and os.path.exists(banner_path):
             try:
-                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
-                    final_thumb = tf.name
-                _engine.thumb_gen.create_thumbnail(
-                    source=poster_src,
-                    watermark=watermark,
-                    title=title_display,
-                    output_path=final_thumb
+                sent_banner = await client.send_photo(
+                    chat_id=watermark,
+                    photo=banner_path,
+                    caption=caption_text,
+                    parse_mode=ParseMode.HTML,
+                    protect_content=protect_flag
                 )
-                cleanup_thumb = True
-            except Exception as te:
-                logger.debug(f"Failed to auto-generate thumb for channel post: {te}")
-                final_thumb = None
+                if sent_banner:
+                    await _apply_expandable_caption(watermark, sent_banner.id, caption_text, None)
+            except Exception as be:
+                logger.warning(f"Failed to publish banner photo to {watermark}: {be}")
+                sent_banner = None
 
-    try:
-        sent_channel = await client.send_video(
-            chat_id=watermark,
-            video=video_file_id,
-            caption=video_caption,
-            parse_mode=ParseMode.HTML,
-            thumb=final_thumb if (final_thumb and os.path.exists(final_thumb)) else None,
-            supports_streaming=True,
-            protect_content=protect_flag,
-            reply_markup=channel_kb
-        )
-    finally:
-        if cleanup_thumb and final_thumb and os.path.exists(final_thumb):
-            try:
-                os.remove(final_thumb)
-            except Exception:
-                pass
-
-    if sent_channel:
-        if not sent_banner and video_caption and "<blockquote expandable>" in video_caption:
-            await _apply_expandable_caption(watermark, sent_channel.id, video_caption, channel_kb)
+        # Video caption: format with article card layout (collapsible poster, synopsis, specs)
+        if sent_banner:
+            v_lines = [f"🎬 <b>{html.escape(title_display.upper())}</b>"]
+            tech_parts = []
+            if meta.get("resolution"):
+                tech_parts.append(html.escape(str(meta['resolution'])))
+            if meta.get("source"):
+                tech_parts.append(html.escape(str(meta['source'])))
+            if meta.get("fileSize"):
+                tech_parts.append(html.escape(str(meta['fileSize'])))
+            elif meta.get("duration"):
+                tech_parts.append(html.escape(str(meta['duration'])))
+            if tech_parts:
+                v_lines.append(f"📦 {' • '.join(tech_parts)}")
+            v_lines.append(f"🍿 <b>Channel Resmi:</b> <a href=\"{html.escape(channel_url, quote=True)}\">{html.escape(watermark)}</a>")
+            video_caption = "\n".join(v_lines)
         else:
-            await _apply_channel_post_styling(watermark, sent_channel.id, channel_kb)
+            if "POSTER & BANNER HD" not in caption_text:
+                try:
+                    article_caption = _engine.caption_gen.generate(meta, custom_watermark=watermark, style="article")
+                    video_caption = article_caption or caption_text
+                except Exception:
+                    video_caption = caption_text
+            else:
+                video_caption = caption_text
+
+        # Ensure thumbnail exists (prioritize Banner HD, then branded poster)
+        final_thumb = thumb_path
+        cleanup_thumb = False
+        if not final_thumb or not os.path.exists(final_thumb):
+            banner_src = pregenerated_banner_path if (pregenerated_banner_path and os.path.exists(pregenerated_banner_path)) else None
+            poster_src = banner_src or meta.get("poster_url") or meta.get("poster_path") or meta.get("thumb_path")
+            if poster_src:
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+                        final_thumb = tf.name
+                    _engine.thumb_gen.create_thumbnail(
+                        source=poster_src,
+                        watermark=watermark,
+                        title=title_display,
+                        output_path=final_thumb
+                    )
+                    cleanup_thumb = True
+                except Exception as te:
+                    logger.debug(f"Failed to auto-generate thumb for channel post: {te}")
+                    final_thumb = None
+
+        try:
+            sent_channel = await client.send_video(
+                chat_id=watermark,
+                video=video_file_id,
+                caption=video_caption,
+                parse_mode=ParseMode.HTML,
+                thumb=final_thumb if (final_thumb and os.path.exists(final_thumb)) else None,
+                supports_streaming=True,
+                protect_content=protect_flag,
+                reply_markup=channel_kb
+            )
+        finally:
+            if cleanup_thumb and final_thumb and os.path.exists(final_thumb):
+                try:
+                    os.remove(final_thumb)
+                except Exception:
+                    pass
+
+        if sent_channel:
+            if not sent_banner and video_caption and "<blockquote expandable>" in video_caption:
+                await _apply_expandable_caption(watermark, sent_channel.id, video_caption, channel_kb)
+            else:
+                await _apply_channel_post_styling(watermark, sent_channel.id, channel_kb)
 
     # Cleanup banner and poster files
     if cleanup_banner and banner_path and os.path.exists(banner_path):
@@ -5555,6 +5686,16 @@ async def publish_video_to_channel(
             season=season_meta,
             episode=episode_meta
         )
+        clean_t = re.sub(r"[^\w\s]", "", title_meta).strip()
+        if video_file_id:
+            if year_meta:
+                _engine.cache.set_setting(f"video_fid_{clean_t.lower()}_{year_meta}", video_file_id)
+            _engine.cache.set_setting(f"video_fid_{clean_t.lower()}", video_file_id)
+        banner_src = meta.get("banner_url") or meta.get("backdrop_url") or poster_source or meta.get("poster_url")
+        if banner_src:
+            if year_meta:
+                _engine.cache.set_setting(f"banner_fid_{clean_t.lower()}_{year_meta}", str(banner_src))
+            _engine.cache.set_setting(f"banner_fid_{clean_t.lower()}", str(banner_src))
     except Exception as ce:
         logger.warning(f"Gagal mencatat ke katalog film: {ce}")
 
