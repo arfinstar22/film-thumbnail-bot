@@ -7266,7 +7266,7 @@ async def handle_incoming_text(client: Client, msg: Message):
 
 @app.on_inline_query()
 async def inline_search_handler(client: Client, query: InlineQuery):
-    q = query.query.strip()
+    q = " ".join((query.query or "").split())
     try:
         results = _engine.cache.search_catalog(q, limit=15)
     except Exception as se:
@@ -7368,8 +7368,8 @@ async def inline_search_handler(client: Client, query: InlineQuery):
             results=articles,
             cache_time=1,
             is_personal=True,
-            switch_pm_text="💬 Request Film ke Admin" if q else "",
-            switch_pm_parameter="request" if q else ""
+            switch_pm_text="💬 Request Film ke Admin" if (q and not results) else "",
+            switch_pm_parameter="request" if (q and not results) else ""
         )
     except Exception as e:
         logger.error(f"Inline query answer error: {e}")

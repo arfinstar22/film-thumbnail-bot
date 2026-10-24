@@ -35,6 +35,30 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(res).encode("utf-8"))
+        if self.path == "/status":
+            import json
+            from .handlers import _engine
+            cat_count = 0
+            has_cache = False
+            supabase_on = False
+            if _engine and hasattr(_engine, "cache"):
+                has_cache = True
+                supabase_on = bool(_engine.cache.cloud.is_enabled)
+                try:
+                    cat_count = len(_engine.cache.get_deduplicated_catalog("film_indonesia1"))
+                except Exception:
+                    pass
+            info = {
+                "status": "online",
+                "version": "v1.3-inline",
+                "catalog_count": cat_count,
+                "supabase_enabled": supabase_on,
+                "has_engine": has_cache
+            }
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(info).encode("utf-8"))
             return
 
         self.send_response(200)

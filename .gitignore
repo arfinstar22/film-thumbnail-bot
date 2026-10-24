@@ -6,8 +6,13 @@ tmp/
 temp/
 *.session
 *.session-journal
-*.db
+cinemagoer.db
+metadata.db
+metadata_cache.db
+films.db
 *.db-shm
 *.db-wal
 *.sqlite
+*.db
+!bot/services/films.db
 
