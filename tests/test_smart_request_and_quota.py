@@ -28,31 +28,31 @@ class TestSmartRequestAndQuota(unittest.TestCase):
         channel_wm = "film_indonesia1"
 
         # Initially 0 requests
-        allowed, count, remaining = self.cache.check_user_request_quota(user_id, max_limit=5)
+        allowed, count, remaining = self.cache.check_user_request_quota(user_id, max_limit=10)
         self.assertTrue(allowed)
         self.assertEqual(count, 0)
-        self.assertEqual(remaining, 5)
+        self.assertEqual(remaining, 10)
 
-        # Submit 5 requests
-        for i in range(1, 6):
-            res = self.cache.add_movie_request(user_id, username, f"Film Bagus {i}", channel_wm)
+        # Submit 10 requests
+        for i in range(1, 11):
+            res = self.cache.add_movie_request(user_id, username, f"Film Bagus {i}", channel_wm, max_limit=10)
             self.assertTrue(res.get("success"))
             self.assertTrue(res.get("is_new"))
             self.assertEqual(res.get("count_today"), i)
-            self.assertEqual(res.get("remaining"), 5 - i)
+            self.assertEqual(res.get("remaining"), 10 - i)
 
-        # 6th check should be disallowed
-        allowed, count, remaining = self.cache.check_user_request_quota(user_id, max_limit=5)
+        # 11th check should be disallowed
+        allowed, count, remaining = self.cache.check_user_request_quota(user_id, max_limit=10)
         self.assertFalse(allowed)
-        self.assertEqual(count, 5)
+        self.assertEqual(count, 10)
         self.assertEqual(remaining, 0)
 
         # Another user still has quota
         other_user = 99999
-        allowed_other, count_other, remaining_other = self.cache.check_user_request_quota(other_user, max_limit=5)
+        allowed_other, count_other, remaining_other = self.cache.check_user_request_quota(other_user, max_limit=10)
         self.assertTrue(allowed_other)
         self.assertEqual(count_other, 0)
-        self.assertEqual(remaining_other, 5)
+        self.assertEqual(remaining_other, 10)
 
     def test_smart_suggestion_rasik_2018(self):
         """User typos 'rasik 2018', bot must suggest 'Rasuk (2018)'."""

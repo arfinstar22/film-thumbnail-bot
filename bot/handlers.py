@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import hashlib
 import html
 import json
 import logging
@@ -1920,13 +1921,13 @@ async def execute_movie_request_flow(
     """Unified handler for movie requests with daily quota enforcement and typo/year correction."""
     is_adm = is_admin(user_id, raw_username)
 
-    # 1. Enforce Daily Quota (5 requests/day/user) - Admins bypass
+    # 1. Enforce Daily Quota (10 requests/day/user) - Admins bypass
     if not is_adm:
-        allowed, count_today, remaining = _engine.cache.check_user_request_quota(user_id, max_limit=5)
+        allowed, count_today, remaining = _engine.cache.check_user_request_quota(user_id, max_limit=10)
         if not allowed:
             quota_text = (
-                f"⚠️ <b>Batas Request Harian Tercapai (5/5)</b>\n\n"
-                f"Halo <b>{html.escape(first_name)}</b>, kamu sudah mencapai batas maksimal <b>5 request film</b> untuk hari ini.\n\n"
+                f"⚠️ <b>Batas Request Harian Tercapai (10/10)</b>\n\n"
+                f"Halo <b>{html.escape(first_name)}</b>, kamu sudah mencapai batas maksimal <b>10 request film</b> untuk hari ini.\n\n"
                 f"🔄 <i>Kuota request akan di-reset otomatis setiap pukul <b>00:00 WIB</b>. Terima kasih atas pengertiannya! 🙏🍿</i>"
             )
             kb = InlineKeyboardMarkup([
@@ -1943,13 +1944,67 @@ async def execute_movie_request_flow(
                 await reply_msg.reply_text(quota_text, parse_mode=ParseMode.HTML, reply_markup=kb)
             return
 
-    # 2. Save Request Directly to Database & Enforce Quota (No parser/interception)
+    # 2. Smart Catalog Check — redirect user to existing film if found (typo-tolerant)
     clean_query = query.strip()
+    if not force_submit:
+        existing = _engine.cache.find_existing_movie(clean_query, channel_username=clean_wm)
+        if existing:
+            ex_title = existing.get("title", clean_query)
+            ex_year = f" ({existing['year']})" if existing.get("year") else ""
+            ex_mid = existing.get("message_id")
+            ex_chan = (existing.get("channel_username") or clean_wm).lstrip("@").strip()
+            post_url = f"https://t.me/{ex_chan}/{ex_mid}" if ex_mid else f"https://t.me/{ex_chan}"
+
+            # Determine if match was fuzzy (typo) vs exact
+            _, _, req_key = normalize_movie_title_and_year(clean_query)
+            _, _, ex_key = normalize_movie_title_and_year(ex_title, existing.get("year"))
+            is_typo = req_key != ex_key
+
+            typo_note = f"\n💡 <i>Mungkin maksud kamu: <b>{html.escape(ex_title)}{ex_year}</b></i>\n" if is_typo else ""
+
+            found_text = (
+                f"🎬 <b>Film Sudah Ada di Channel!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"{typo_note}"
+                f"Film <b>{html.escape(ex_title)}{ex_year}</b> sudah tersedia di channel @{ex_chan}.\n\n"
+                f"👉 <b>Klik tombol di bawah</b> untuk langsung menonton filmnya!\n\n"
+                f"<i>Kalau bukan film ini yang kamu cari, tekan 'Tetap Request' untuk mengirim permintaan ke admin.</i>"
+            )
+
+            # Store pending data for force-submit
+            token = hashlib.md5(f"{user_id}:{clean_query}:{time.time()}".encode()).hexdigest()[:12]
+            _pending_smart_requests[token] = {
+                "user_id": user_id,
+                "username": username,
+                "raw_username": raw_username,
+                "first_name": first_name,
+                "original_query": clean_query,
+                "suggested_title": clean_query,
+                "clean_wm": clean_wm,
+            }
+
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"🍿 Tonton {ex_title[:25]}", url=post_url)],
+                [InlineKeyboardButton("📝 Tetap Request ke Admin", callback_data=f"force_req:{token}")],
+                [InlineKeyboardButton("💬 Request Film Lain", callback_data="btn_start_request")]
+            ])
+
+            if edit_msg:
+                try:
+                    await edit_msg.edit_text(found_text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
+                    return
+                except Exception:
+                    pass
+            if reply_msg:
+                await reply_msg.reply_text(found_text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
+            return
+
+    # 3. Save Request to Database & Enforce Quota
     res = _engine.cache.add_movie_request(user_id, username, clean_query, clean_wm)
     remaining_quota = res.get("remaining", 0)
     count_today = res.get("count_today", 1)
 
-    quota_badge = f"\n📊 <b>Sisa Kuota Hari Ini:</b> <code>{remaining_quota} dari 5 film</code>" if not is_adm else ""
+    quota_badge = f"\n📊 <b>Sisa Kuota Hari Ini:</b> <code>{remaining_quota} dari 10 film</code>" if not is_adm else ""
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("💬 Request Film Lain", callback_data="btn_start_request")],

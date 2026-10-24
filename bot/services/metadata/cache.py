@@ -921,7 +921,7 @@ class MetadataCache:
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_req_status_title ON movie_requests (status, clean_title)")
 
-    def add_movie_request(self, user_id: int, username: str, movie_title: str, channel_username: str) -> dict:
+    def add_movie_request(self, user_id: int, username: str, movie_title: str, channel_username: str, max_limit: int = 10) -> dict:
         conn = self._conn()
         self._ensure_requests_table(conn)
         clean_t = re.sub(r'[^a-zA-Z0-9]', '', movie_title).lower()
@@ -954,7 +954,7 @@ class MetadataCache:
                 pass
 
         count_today = self.get_user_daily_request_count(user_id)
-        remaining = max(0, 5 - count_today)
+        remaining = max(0, max_limit - count_today)
         return {"success": True, "is_new": True, "title": movie_title, "id": new_id, "count_today": count_today, "remaining": remaining}
 
     def get_user_daily_request_count(self, user_id: int) -> int:
@@ -972,7 +972,7 @@ class MetadataCache:
         row = cur.fetchone()
         return row[0] if row else 0
 
-    def check_user_request_quota(self, user_id: int, max_limit: int = 5) -> Tuple[bool, int, int]:
+    def check_user_request_quota(self, user_id: int, max_limit: int = 10) -> Tuple[bool, int, int]:
         """Checks if the user has remaining daily movie request quota.
         Returns: (allowed: bool, count_today: int, remaining_quota: int)"""
         count_today = self.get_user_daily_request_count(user_id)
