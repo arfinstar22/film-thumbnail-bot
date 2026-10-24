@@ -101,6 +101,15 @@ class MetadataEngine:
                 if rate_res.get("collection") and not metadata.get("collection"):
                     metadata["collection"] = rate_res["collection"]
 
+                for field in (
+                    "tagline", "original_title", "production_countries", "country_codes",
+                    "spoken_languages", "original_language", "runtime_minutes",
+                    "budget", "revenue", "popularity", "release_date",
+                    "certification", "writer", "studio"
+                ):
+                    if rate_res.get(field) and not metadata.get(field):
+                        metadata[field] = rate_res[field]
+
             if syn_res and not metadata.get("synopsis"):
                 metadata["synopsis"] = syn_res
             elif enable_synopsis and not metadata.get("synopsis"):

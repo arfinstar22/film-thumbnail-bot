@@ -191,6 +191,60 @@ class TestRichArticlePost(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("CHAT_ADMIN_REQUIRED", err)
 
+    def test_rich_post_enhancements(self):
+        meta = {
+            "title": "Pengabdi Setan 2: Communion",
+            "original_title": "Satan's Slaves 2: Communion",
+            "year": 2022,
+            "rating": "7.4",
+            "genre": "Horor, Misteri",
+            "tagline": "Semua akan kembali ke asalnya.",
+            "country_codes": ["ID"],
+            "production_countries": "Indonesia",
+            "spoken_languages": "Bahasa Indonesia",
+            "runtime_minutes": 119,
+            "budget": 20000000,
+            "revenue": 100000000,
+            "popularity": 85.0,
+            "release_date": "2022-08-04",
+            "certification": "13+",
+            "director": "Joko Anwar",
+            "writer": "Joko Anwar",
+            "studio": "Rapi Films",
+            "actors": "Tara Basro, Endy Arfian",
+            "synopsis": "Keluarga Rini mencoba memulai hidup baru di rumah susun.",
+        }
+
+        payload = build_rich_article_payload(
+            chat_id="@filmindochannel",
+            metadata=meta,
+            watermark="@filmindochannel",
+            video_file_id="dummy_vid_123"
+        )
+        html = payload["rich_message"]["html"]
+
+        # Tagline
+        self.assertIn("✨ <i>&ldquo;Semua akan kembali ke asalnya.&rdquo;</i>", html)
+
+        # Flag & Runtime & Certification in Badges
+        self.assertIn("🇮🇩", html)
+        self.assertIn("⏱️ 1j 59m", html)
+        self.assertIn("🏷️ 13+", html)
+
+        # Trending badge because popularity > 50
+        self.assertIn("🔥 <b>SEDANG TRENDING</b>", html)
+
+        # Specs
+        self.assertIn("🏷️ <b>Judul Asli :</b> Satan&#x27;s Slaves 2: Communion", html)
+        self.assertIn("📅 <b>Rilis :</b> 4 Agustus 2022", html)
+        self.assertIn("✍️ <b>Penulis :</b> Joko Anwar", html)
+        self.assertIn("🌍 <b>Negara :</b> 🇮🇩 Indonesia", html)
+        self.assertIn("🏢 <b>Studio :</b> Rapi Films", html)
+        self.assertIn("🔞 <b>Rating Usia :</b> 13+", html)
+        self.assertIn("💰 <b>Budget :</b> $20M", html)
+        self.assertIn("💵 <b>Box Office :</b> $100M", html)
+        self.assertIn("⏱️ <b>Durasi :</b> 1j 59m (119 menit)", html)
+
 
 if __name__ == "__main__":
     unittest.main()

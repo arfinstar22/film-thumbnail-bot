@@ -183,11 +183,12 @@ class TMDbService:
         tmdb_id = best_item.get("id")
         media_type = best_item.get("media_type") or ("tv" if is_series or "first_air_date" in best_item else "movie")
 
-        # 2. Fetch full details with credits and videos
+        # 2. Fetch full details with credits, videos, and certification
         detail_endpoint = f"{media_type}/{tmdb_id}"
+        append_extra = "release_dates" if media_type == "movie" else "content_ratings"
         details_id = self._http_get(
             detail_endpoint,
-            {"language": "id-ID", "append_to_response": "credits,videos"}
+            {"language": "id-ID", "append_to_response": f"credits,videos,{append_extra}"}
         ) or {}
 
         # If Indonesian overview is blank, fetch en-US details for plot/overview
@@ -195,7 +196,7 @@ class TMDbService:
         if not details_id.get("overview"):
             details_en = self._http_get(
                 detail_endpoint,
-                {"language": "en-US", "append_to_response": "credits,videos"}
+                {"language": "en-US", "append_to_response": f"credits,videos,{append_extra}"}
             ) or {}
 
         # Combine details prioritizing Indonesian
@@ -356,6 +357,77 @@ class TMDbService:
                     if v_type == "trailer":
                         break  # preferred
 
+        # Tagline
+        tagline = (main.get("tagline") or fallback.get("tagline") or "").strip()
+
+        # Production Countries with flag codes
+        prod_countries = main.get("production_countries") or fallback.get("production_countries") or []
+        countries_display = [pc.get("name", "") for pc in prod_countries if pc.get("name")]
+        country_codes = [pc.get("iso_3166_1", "") for pc in prod_countries if pc.get("iso_3166_1")]
+        countries_str = ", ".join(countries_display)
+
+        # Spoken Languages
+        spoken_langs = main.get("spoken_languages") or fallback.get("spoken_languages") or []
+        languages_str = ", ".join([lang.get("name", "") for lang in spoken_langs if lang.get("name")])
+        orig_lang = main.get("original_language") or fallback.get("original_language") or ""
+
+        # Runtime (minutes)
+        runtime = main.get("runtime") or fallback.get("runtime")
+
+        # Budget & Revenue
+        budget = main.get("budget") or fallback.get("budget") or 0
+        revenue = main.get("revenue") or fallback.get("revenue") or 0
+
+        # Popularity
+        popularity = main.get("popularity") or fallback.get("popularity") or 0.0
+
+        # Full Release Date (reuse date_str from year extraction above)
+        release_date_full = date_str
+
+        # Content Rating / Certification (priority: ID → US → first available)
+        certification = ""
+        if media_type == "movie":
+            rd_results = (main.get("release_dates") or {}).get("results", []) or (fallback.get("release_dates") or {}).get("results", [])
+            for priority in ["ID", "US"]:
+                for rd in rd_results:
+                    if rd.get("iso_3166_1") == priority:
+                        for r in rd.get("release_dates", []):
+                            cert = (r.get("certification") or "").strip()
+                            if cert:
+                                certification = cert
+                                break
+                    if certification:
+                        break
+                if certification:
+                    break
+        else:
+            cr_results = (main.get("content_ratings") or {}).get("results", []) or (fallback.get("content_ratings") or {}).get("results", [])
+            for priority in ["ID", "US"]:
+                for cr in cr_results:
+                    if cr.get("iso_3166_1") == priority:
+                        cert = (cr.get("rating") or "").strip()
+                        if cert:
+                            certification = cert
+                            break
+                if certification:
+                    break
+
+        # Screenwriter
+        writers = []
+        for crew in credits.get("crew", []):
+            if crew.get("job") in ("Screenplay", "Writer", "Story"):
+                w_name = crew.get("name")
+                if w_name and w_name not in writers:
+                    writers.append(w_name)
+                    if len(writers) >= 2:
+                        break
+        writer_str = ", ".join(writers)
+
+        # Production Companies
+        prod_companies = main.get("production_companies") or fallback.get("production_companies") or []
+        studio_names = [pc.get("name", "") for pc in prod_companies if pc.get("name")]
+        studio_str = ", ".join(studio_names[:2])
+
         res: Dict[str, Any] = {
             "source": "tmdb",
             "tmdb_id": main.get("id"),
@@ -384,6 +456,34 @@ class TMDbService:
             res["backdrop_url"] = backdrop_url
         if trailer_url:
             res["trailer_url"] = trailer_url
+        if tagline:
+            res["tagline"] = tagline
+        if original_title:
+            res["original_title"] = original_title
+        if countries_str:
+            res["production_countries"] = countries_str
+        if country_codes:
+            res["country_codes"] = country_codes
+        if languages_str:
+            res["spoken_languages"] = languages_str
+        if orig_lang:
+            res["original_language"] = orig_lang
+        if runtime:
+            res["runtime_minutes"] = runtime
+        if budget > 0:
+            res["budget"] = budget
+        if revenue > 0:
+            res["revenue"] = revenue
+        if popularity:
+            res["popularity"] = popularity
+        if release_date_full:
+            res["release_date"] = release_date_full
+        if certification:
+            res["certification"] = certification
+        if writer_str:
+            res["writer"] = writer_str
+        if studio_str:
+            res["studio"] = studio_str
 
         # Franchise / Universe Collection
         collection_raw = main.get("belongs_to_collection") or fallback.get("belongs_to_collection")

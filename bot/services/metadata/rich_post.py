@@ -28,6 +28,46 @@ from .synopsis import ensure_indonesian_text
 logger = logging.getLogger(__name__)
 
 
+def _country_code_to_flag(code: str) -> str:
+    """Convert a 2-letter ISO country code to its Unicode flag emoji."""
+    if isinstance(code, str) and len(code) == 2 and code.isalpha():
+        return chr(127397 + ord(code[0].upper())) + chr(127397 + ord(code[1].upper()))
+    return ""
+
+
+def _format_money(amount: Union[int, float]) -> str:
+    """Format monetary amount to compact string (e.g., $15M, $1.2B)."""
+    try:
+        val = float(amount)
+        if val <= 0:
+            return ""
+        if val >= 1_000_000_000:
+            return f"${val / 1_000_000_000:.1f}B".replace(".0B", "B")
+        if val >= 1_000_000:
+            return f"${val / 1_000_000:.1f}M".replace(".0M", "M")
+        if val >= 1_000:
+            return f"${val / 1_000:.0f}K"
+        return f"${val:,.0f}"
+    except Exception:
+        return ""
+
+
+def _format_indonesian_date(date_str: str) -> str:
+    """Format YYYY-MM-DD date string to Indonesian formatted date."""
+    if not date_str:
+        return ""
+    months = [
+        "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+        "Juli", "Agustus", "September", "Oktober", "November", "Desember"
+    ]
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", str(date_str).strip())
+    if m:
+        year, month, day = m.group(1), int(m.group(2)), int(m.group(3))
+        if 1 <= month <= 12:
+            return f"{day} {months[month - 1]} {year}"
+    return str(date_str).strip()
+
+
 def build_rich_article_payload(
     chat_id: Union[int, str],
     metadata: Dict[str, Any],
@@ -65,6 +105,20 @@ def build_rich_article_payload(
     audio_channels = metadata.get("audioChannels")
     release_group = metadata.get("releaseGroup")
 
+    tagline = (metadata.get("tagline") or "").strip()
+    original_title = (metadata.get("original_title") or "").strip()
+    prod_countries = (metadata.get("production_countries") or "").strip()
+    country_codes = metadata.get("country_codes") or []
+    spoken_langs = (metadata.get("spoken_languages") or "").strip()
+    runtime_min = metadata.get("runtime_minutes")
+    budget = metadata.get("budget") or 0
+    revenue = metadata.get("revenue") or 0
+    popularity = metadata.get("popularity") or 0.0
+    release_date = (metadata.get("release_date") or "").strip()
+    certification = (metadata.get("certification") or "").strip()
+    writer = (metadata.get("writer") or "").strip()
+    studio = (metadata.get("studio") or "").strip()
+
     clean_wm = (watermark or "").lstrip("@").strip()
     channel_display = f"@{clean_wm}" if clean_wm else "@filmindochannel"
 
@@ -89,8 +143,10 @@ def build_rich_article_payload(
             }
         })
 
-    # 2. HEADING (Film Title)
+    # 2. HEADING (Film Title & Tagline)
     html_parts.append(f"<h1>🎬 {title_disp}</h1>")
+    if tagline:
+        html_parts.append(f"<p>✨ <i>&ldquo;{html_mod.escape(tagline)}&rdquo;</i></p>")
 
     # 3. SLIDESHOW (Banner & Poster swipeable gallery — collapsible)
     slideshow_imgs: List[str] = []
@@ -128,8 +184,8 @@ def build_rich_article_payload(
             f"</details>"
         )
 
-    # Fallback retrieve rating/genre if missing
-    if not rating and title:
+    # Fallback retrieve rating/genre/extra fields if missing from cache
+    if title:
         try:
             from .cache import MetadataCache
             _c = MetadataCache()
@@ -138,7 +194,7 @@ def build_rich_article_payload(
             cached_raw = _c.get_setting(c_key, "")
             if cached_raw:
                 c_data = json.loads(cached_raw)
-                if c_data.get("rating"):
+                if not rating and c_data.get("rating"):
                     rating = c_data["rating"]
                 if not genre and c_data.get("genre"):
                     genre = c_data["genre"]
@@ -146,10 +202,36 @@ def build_rich_article_payload(
                     director = c_data["director"]
                 if not actors and c_data.get("actors"):
                     actors = c_data["actors"]
+                if not tagline and c_data.get("tagline"):
+                    tagline = c_data["tagline"]
+                if not original_title and c_data.get("original_title"):
+                    original_title = c_data["original_title"]
+                if not prod_countries and c_data.get("production_countries"):
+                    prod_countries = c_data["production_countries"]
+                if not country_codes and c_data.get("country_codes"):
+                    country_codes = c_data["country_codes"]
+                if not spoken_langs and c_data.get("spoken_languages"):
+                    spoken_langs = c_data["spoken_languages"]
+                if not runtime_min and c_data.get("runtime_minutes"):
+                    runtime_min = c_data["runtime_minutes"]
+                if not budget and c_data.get("budget"):
+                    budget = c_data["budget"]
+                if not revenue and c_data.get("revenue"):
+                    revenue = c_data["revenue"]
+                if not popularity and c_data.get("popularity"):
+                    popularity = c_data["popularity"]
+                if not release_date and c_data.get("release_date"):
+                    release_date = c_data["release_date"]
+                if not certification and c_data.get("certification"):
+                    certification = c_data["certification"]
+                if not writer and c_data.get("writer"):
+                    writer = c_data["writer"]
+                if not studio and c_data.get("studio"):
+                    studio = c_data["studio"]
         except Exception:
             pass
 
-    # 4. BADGES (Rating & Genre only — zero duplication, resolution and duration stay in details)
+    # 4. BADGES (Rating & Genre, plus Country flags, Runtime, Content Rating)
     badge_items: List[str] = []
 
     clean_rating = None
@@ -168,8 +250,55 @@ def build_rich_article_payload(
     if genre:
         badge_items.append(f"🎭 {html_mod.escape(str(genre))}")
 
+    if country_codes and isinstance(country_codes, list):
+        flags = "".join([_country_code_to_flag(c) for c in country_codes[:2] if _country_code_to_flag(c)])
+        if flags:
+            badge_items.append(flags)
+
+    if runtime_min and isinstance(runtime_min, (int, float)) and runtime_min > 0:
+        h = int(runtime_min) // 60
+        m = int(runtime_min) % 60
+        rt_str = f"{h}j {m}m" if h else f"{m}m"
+        badge_items.append(f"⏱️ {rt_str}")
+
+    if certification:
+        cert_icon = "🔞" if any(x in certification.upper() for x in ["17", "18", "21", "R", "NC-17", "DEWASA"]) else "🏷️"
+        badge_items.append(f"{cert_icon} {html_mod.escape(certification)}")
+
     if badge_items:
         html_parts.append(f"<p>{' • '.join(badge_items)}</p>")
+
+    # Status Badges: Trending, Baru Rilis, Rating Tinggi
+    status_badges: List[str] = []
+    if release_date:
+        try:
+            import datetime
+            rel_dt = datetime.datetime.strptime(str(release_date)[:10], "%Y-%m-%d").date()
+            diff_days = (datetime.date.today() - rel_dt).days
+            if 0 <= diff_days <= 45:
+                status_badges.append("🆕 <b>BARU RILIS</b>")
+            elif diff_days < 0:
+                status_badges.append("🔜 <b>SEGERA TAYANG</b>")
+        except Exception:
+            pass
+
+    try:
+        if float(popularity) >= 50.0:
+            status_badges.append("🔥 <b>SEDANG TRENDING</b>")
+    except (ValueError, TypeError):
+        pass
+
+    if clean_rating:
+        m_s = re.search(r"(\d+(?:\.\d+)?)", clean_rating)
+        if m_s:
+            try:
+                if float(m_s.group(1)) >= 8.0 and "🔥 <b>SEDANG TRENDING</b>" not in status_badges:
+                    status_badges.append("🏆 <b>RATING TINGGI</b>")
+            except ValueError:
+                pass
+
+    if status_badges:
+        html_parts.append(f"<p>{' • '.join(status_badges)}</p>")
 
     html_parts.append("<hr/>")
 
@@ -187,12 +316,37 @@ def build_rich_article_payload(
     spec_lines: List[str] = ["📌 <b>Informasi Film:</b>"]
     if year:
         spec_lines.append(f"🗓️ <b>Tahun :</b> {html_mod.escape(str(year))}")
+    if original_title and original_title.lower() != title.lower():
+        spec_lines.append(f"🏷️ <b>Judul Asli :</b> {html_mod.escape(original_title)}")
+    if release_date:
+        formatted_date = _format_indonesian_date(release_date)
+        if formatted_date:
+            spec_lines.append(f"📅 <b>Rilis :</b> {html_mod.escape(formatted_date)}")
     if genre:
         spec_lines.append(f"🎭 <b>Genre :</b> {html_mod.escape(str(genre))}")
     if director:
         spec_lines.append(f"🎬 <b>Sutradara :</b> {html_mod.escape(str(director))}")
+    if writer:
+        spec_lines.append(f"✍️ <b>Penulis :</b> {html_mod.escape(writer)}")
     if actors:
         spec_lines.append(f"👥 <b>Pemeran :</b> {html_mod.escape(str(actors))}")
+    if prod_countries:
+        country_display = prod_countries
+        if country_codes and isinstance(country_codes, list):
+            flags = " ".join([_country_code_to_flag(c) for c in country_codes[:2] if _country_code_to_flag(c)])
+            if flags:
+                country_display = f"{flags} {country_display}"
+        spec_lines.append(f"🌍 <b>Negara :</b> {html_mod.escape(country_display)}")
+    if spoken_langs:
+        spec_lines.append(f"🗣️ <b>Bahasa :</b> {html_mod.escape(spoken_langs)}")
+    if studio:
+        spec_lines.append(f"🏢 <b>Studio :</b> {html_mod.escape(studio)}")
+    if certification:
+        spec_lines.append(f"🔞 <b>Rating Usia :</b> {html_mod.escape(certification)}")
+    if budget and isinstance(budget, (int, float)) and budget > 0:
+        spec_lines.append(f"💰 <b>Budget :</b> {html_mod.escape(_format_money(budget))}")
+    if revenue and isinstance(revenue, (int, float)) and revenue > 0:
+        spec_lines.append(f"💵 <b>Box Office :</b> {html_mod.escape(_format_money(revenue))}")
     if resolution:
         res_display = str(resolution)
         if resolution == "1080p":
@@ -212,6 +366,11 @@ def build_rich_article_payload(
         spec_lines.append(f"📦 <b>Ukuran :</b> {html_mod.escape(str(file_size))}")
     if duration:
         spec_lines.append(f"⏱️ <b>Durasi :</b> {html_mod.escape(str(duration))}")
+    elif runtime_min and isinstance(runtime_min, (int, float)) and runtime_min > 0:
+        h = int(runtime_min) // 60
+        m = int(runtime_min) % 60
+        rt_full = f"{h}j {m}m ({int(runtime_min)} menit)" if h else f"{int(runtime_min)} menit"
+        spec_lines.append(f"⏱️ <b>Durasi :</b> {html_mod.escape(rt_full)}")
     if audio:
         spec_lines.append(f"🔊 <b>Audio :</b> {html_mod.escape(str(audio))}")
     elif audio_codec:

@@ -73,6 +73,16 @@ class CaptionGenerator:
         clean_wm = wm.lstrip("@").strip()
         channel_url = f"https://t.me/{clean_wm}" if clean_wm else "https://t.me"
 
+        tagline = (metadata.get("tagline") or "").strip()
+        writer = (metadata.get("writer") or "").strip()
+        studio = (metadata.get("studio") or "").strip()
+        country = (metadata.get("production_countries") or "").strip()
+        country_codes = metadata.get("country_codes") or []
+        certification = (metadata.get("certification") or "").strip()
+        original_title = (metadata.get("original_title") or "").strip()
+        release_date = (metadata.get("release_date") or "").strip()
+        runtime_min = metadata.get("runtime_minutes")
+
         return {
             "title": title,
             "year": year,
@@ -82,10 +92,19 @@ class CaptionGenerator:
             "episode": episode,
             "file_size": file_size,
             "duration": duration,
+            "runtime_min": runtime_min,
             "rating": rating,
             "clean_rating": clean_rating,
             "genre": genre,
             "director": director,
+            "writer": writer,
+            "studio": studio,
+            "country": country,
+            "country_codes": country_codes,
+            "certification": certification,
+            "original_title": original_title,
+            "release_date": release_date,
+            "tagline": tagline,
             "actors": actors,
             "audio": audio,
             "sub": sub,
@@ -130,6 +149,8 @@ class CaptionGenerator:
             header += f" ({f['year']})"
 
         lines = [header]
+        if f.get("tagline"):
+            lines.append(f"✨ <i>&ldquo;{html.escape(f['tagline'])}&rdquo;</i>")
 
         # Badges row: Rating & Genre only (no duplicate resolution/duration)
         badges = []
@@ -171,12 +192,29 @@ class CaptionGenerator:
         ]
         if f["year"]:
             spec_lines.append(f"🗓️ <b>Tahun :</b> {html.escape(str(f['year']))}")
+        if f.get("original_title") and f["original_title"].lower() != f["title"].lower():
+            spec_lines.append(f"🏷️ <b>Judul Asli :</b> {html.escape(f['original_title'])}")
+        if f.get("release_date"):
+            spec_lines.append(f"📅 <b>Rilis :</b> {html.escape(f['release_date'])}")
         if f["genre"]:
             spec_lines.append(f"🎭 <b>Genre :</b> {html.escape(str(f['genre']))}")
         if f["director"]:
             spec_lines.append(f"🎬 <b>Sutradara :</b> {html.escape(str(f['director']))}")
+        if f.get("writer"):
+            spec_lines.append(f"✍️ <b>Penulis :</b> {html.escape(f['writer'])}")
         if f["actors"]:
             spec_lines.append(f"👥 <b>Pemeran :</b> {html.escape(str(f['actors']))}")
+        if f.get("country"):
+            c_str = f["country"]
+            if f.get("country_codes") and isinstance(f["country_codes"], list):
+                flags = "".join([chr(127397 + ord(c[0].upper())) + chr(127397 + ord(c[1].upper())) for c in f["country_codes"][:2] if len(c) == 2 and c.isalpha()])
+                if flags:
+                    c_str = f"{flags} {c_str}"
+            spec_lines.append(f"🌍 <b>Negara :</b> {html.escape(c_str)}")
+        if f.get("studio"):
+            spec_lines.append(f"🏢 <b>Studio :</b> {html.escape(f['studio'])}")
+        if f.get("certification"):
+            spec_lines.append(f"🔞 <b>Rating Usia :</b> {html.escape(f['certification'])}")
         if f["res_disp"]:
             spec_lines.append(f"🎞️ <b>Kualitas :</b> {html.escape(f['res_disp'])}")
         if f["src"]:
@@ -189,6 +227,11 @@ class CaptionGenerator:
             spec_lines.append(f"📦 <b>Ukuran :</b> {html.escape(str(f['file_size']))}")
         if f["duration"]:
             spec_lines.append(f"⏱️ <b>Durasi :</b> {html.escape(str(f['duration']))}")
+        elif f.get("runtime_min") and isinstance(f["runtime_min"], (int, float)) and f["runtime_min"] > 0:
+            h = int(f["runtime_min"]) // 60
+            m = int(f["runtime_min"]) % 60
+            rt_full = f"{h}j {m}m ({int(f['runtime_min'])} menit)" if h else f"{int(f['runtime_min'])} menit"
+            spec_lines.append(f"⏱️ <b>Durasi :</b> {html.escape(rt_full)}")
         if f["audio"]:
             spec_lines.append(f"🔊 <b>Audio :</b> {html.escape(str(f['audio']))}")
         if f["sub"]:
