@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+import asyncio
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -157,6 +158,40 @@ class TestRichArticlePost(unittest.TestCase):
         self.assertIn("2️⃣ <b>Dilan 1991 (2019)</b> 📍 <i>(Film Ini)</i>", html_content)
         self.assertIn("3️⃣ Milea: Suara dari Dilan (2020)", html_content)
 
+    def test_delete_channel_post_logic(self):
+        from unittest.mock import patch, AsyncMock
+        from bot.services.metadata.rich_post import async_delete_telegram_message, async_delete_channel_post
+
+        # Test empty token
+        ok, err = asyncio.run(async_delete_telegram_message("", "@testchan", 123))
+        self.assertFalse(ok)
+
+        # Test successful Bot API delete
+        with patch("bot.services.metadata.rich_post.async_delete_telegram_message", new_callable=AsyncMock) as mock_del:
+            mock_del.return_value = (True, None)
+            ok, err = asyncio.run(async_delete_channel_post(None, "dummy_token", "@testchan", 123))
+            self.assertTrue(ok)
+            self.assertIsNone(err)
+
+        # Test Bot API fail then Pyrogram success
+        with patch("bot.services.metadata.rich_post.async_delete_telegram_message", new_callable=AsyncMock) as mock_del:
+            mock_del.return_value = (False, "Bot API error")
+            mock_client = AsyncMock()
+            mock_client.delete_messages = AsyncMock(return_value=1)
+            ok, err = asyncio.run(async_delete_channel_post(mock_client, "dummy_token", "@testchan", 123))
+            self.assertTrue(ok)
+            self.assertIsNone(err)
+
+        # Test both fail
+        with patch("bot.services.metadata.rich_post.async_delete_telegram_message", new_callable=AsyncMock) as mock_del:
+            mock_del.return_value = (False, "Bad Request: message can't be deleted")
+            mock_client = AsyncMock()
+            mock_client.delete_messages = AsyncMock(side_effect=Exception("CHAT_ADMIN_REQUIRED"))
+            ok, err = asyncio.run(async_delete_channel_post(mock_client, "dummy_token", "@testchan", 123))
+            self.assertFalse(ok)
+            self.assertIn("CHAT_ADMIN_REQUIRED", err)
+
 
 if __name__ == "__main__":
     unittest.main()
+

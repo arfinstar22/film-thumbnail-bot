@@ -33,7 +33,9 @@ from .services.video import (
 )
 from .services.metadata.engine import MetadataEngine
 from .services.metadata.catalog import format_pinned_catalog, publish_or_update_telegraph_catalog, publish_movie_instant_view
-from .services.metadata.rich_post import async_send_rich_article_post, build_rich_article_payload
+from .services.metadata.rich_post import (
+    async_send_rich_article_post, build_rich_article_payload, async_delete_channel_post
+)
 from .services.metadata.cache import (
     WIB, get_next_prime_time_slots, normalize_movie_title_and_year, is_invalid_movie_title
 )
@@ -6200,13 +6202,13 @@ async def _process_video_task(client: Client, msg: Message):
                     if existing_movie and existing_movie.get("message_id"):
                         old_mid_ap = existing_movie["message_id"]
                         old_disp_ap = f"{existing_movie.get('title', meta_title)} ({existing_movie.get('year', '')})"
-                        logger.info(f"Auto-post duplikat replace: '{old_disp_ap}' (#{old_mid_ap}) dihapus.")
-                        for del_id in [old_mid_ap, old_mid_ap + 1]:
-                            try:
-                                await client.delete_messages(chat_id=wm, message_ids=del_id)
-                            except Exception:
-                                pass
-                        _engine.cache.delete_movie_posts([old_mid_ap], clean_wm)
+                        logger.info(f"Auto-post duplikat replace: '{old_disp_ap}' (#{old_mid_ap}) akan dihapus.")
+                        del_ok_ap, del_err_ap = await async_delete_channel_post(client, BOT_TOKEN, wm, old_mid_ap)
+                        await async_delete_channel_post(client, BOT_TOKEN, wm, old_mid_ap + 1)
+                        if del_ok_ap:
+                            _engine.cache.delete_movie_posts([old_mid_ap], clean_wm)
+                        else:
+                            logger.error(f"Auto-post gagal menghapus post #{old_mid_ap} dari {wm}: {del_err_ap}")
 
                     sent_channel = await publish_video_to_channel(
                         client=client,
@@ -6979,22 +6981,32 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
             old_mid = old_movie["message_id"]
             old_disp = f"{old_movie.get('title', title_meta)} ({old_movie.get('year', '')})"
             logger.info(f"Duplikat terdeteksi: '{old_disp}' (#{old_mid}) akan dihapus dan diganti versi baru.")
-            # Hapus post lama + stiker pembatas (biasanya message_id + 1) dari channel
-            delete_ids = [old_mid, old_mid + 1]
-            for del_id in delete_ids:
-                try:
-                    await client.delete_messages(chat_id=f"@{clean_wm_dup}", message_ids=del_id)
-                except Exception as del_err:
-                    logger.debug(f"Gagal hapus message #{del_id} dari channel: {del_err}")
-            # Hapus dari katalog database
-            _engine.cache.delete_movie_posts([old_mid], clean_wm_dup)
-            await call.message.reply_text(
-                f"🗑️ <b>Duplikat Lama Dihapus:</b>\n"
-                f"Post <b>{html.escape(old_disp)}</b> (#{old_mid}) berhasil dihapus dari @{clean_wm_dup}.\n"
-                f"<i>Mengunggah versi terbaru sekarang...</i>",
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True
-            )
+            # Hapus post lama via Bot API & Pyrogram
+            del_ok, del_err = await async_delete_channel_post(client, BOT_TOKEN, f"@{clean_wm_dup}", old_mid)
+            # Hapus juga stiker pembatas jika ada
+            await async_delete_channel_post(client, BOT_TOKEN, f"@{clean_wm_dup}", old_mid + 1)
+
+            if del_ok:
+                # Hapus dari katalog database HANYA jika terbukti berhasil dihapus dari Telegram
+                _engine.cache.delete_movie_posts([old_mid], clean_wm_dup)
+                await call.message.reply_text(
+                    f"🗑️ <b>Duplikat Lama Dihapus:</b>\n"
+                    f"Post <b>{html.escape(old_disp)}</b> (#{old_mid}) berhasil dihapus dari @{clean_wm_dup}.\n"
+                    f"<i>Mengunggah versi terbaru sekarang...</i>",
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True
+                )
+            else:
+                logger.error(f"Gagal menghapus post duplikat #{old_mid} dari channel @{clean_wm_dup}: {del_err}")
+                await call.message.reply_text(
+                    f"⚠️ <b>Gagal Menghapus Post Lama #{old_mid}:</b>\n"
+                    f"Telegram menolak: <code>{html.escape(str(del_err or 'Izin ditolak'))}</code>\n\n"
+                    f"💡 <b>PENTING:</b> Pastikan Bot memiliki hak <b>Admin</b> di channel @{clean_wm_dup} "
+                    f"dengan izin <b>'Hapus Pesan' (Delete Messages)</b> diaktifkan!\n\n"
+                    f"<i>Melanjutkan upload versi terbaru...</i>",
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True
+                )
 
         session = _banner_sessions.get(chat_id)
         latest_poster = (

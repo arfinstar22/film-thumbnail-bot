@@ -430,3 +430,98 @@ async def async_send_rich_article_post(
     except Exception as e:
         logger.warning(f"sendRichMessage failed: {e}")
         return None
+
+
+async def async_delete_telegram_message(
+    bot_token: str,
+    chat_id: Union[int, str],
+    message_id: int
+) -> Tuple[bool, Optional[str]]:
+    """Delete a message from channel using Telegram Bot API deleteMessage.
+
+    Returns:
+        (True, None) if deleted successfully (or already deleted).
+        (False, error_description) if deletion failed.
+    """
+    if not bot_token:
+        return False, "BOT_TOKEN tidak tersedia"
+
+    clean_chat = str(chat_id).strip()
+    if not clean_chat.startswith("@") and not clean_chat.startswith("-"):
+        clean_chat = f"@{clean_chat}"
+
+    url = f"https://api.telegram.org/bot{bot_token}/deleteMessage"
+    payload = json.dumps({"chat_id": clean_chat, "message_id": int(message_id)}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"}
+    )
+
+    def _sync():
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if data.get("ok"):
+                    return True, None
+                desc = data.get("description", "Unknown error")
+                if "message to delete not found" in desc.lower():
+                    return True, None
+                return False, desc
+        except urllib.error.HTTPError as he:
+            try:
+                body = json.loads(he.read().decode("utf-8"))
+                desc = body.get("description", f"HTTP {he.code}")
+                if "message to delete not found" in desc.lower():
+                    return True, None
+                return False, desc
+            except Exception:
+                return False, f"HTTP {he.code}"
+        except Exception as e:
+            return False, str(e)
+
+    return await asyncio.to_thread(_sync)
+
+
+async def async_delete_channel_post(
+    client: Any,
+    bot_token: Optional[str],
+    chat_id: Union[int, str],
+    message_id: int
+) -> Tuple[bool, Optional[str]]:
+    """Delete a message from channel trying Bot API HTTP first, then Pyrogram MTProto fallback.
+
+    Returns:
+        (True, None) on success.
+        (False, error_reason) on failure.
+    """
+    clean_chat = str(chat_id).strip()
+    if not clean_chat.startswith("@") and not clean_chat.startswith("-"):
+        clean_chat = f"@{clean_chat}"
+
+    last_err: Optional[str] = None
+
+    # 1. Coba via HTTP Bot API deleteMessage (paling andal untuk bot)
+    if bot_token:
+        ok, err = await async_delete_telegram_message(bot_token, clean_chat, message_id)
+        if ok:
+            logger.info(f"Berhasil menghapus pesan #{message_id} dari {clean_chat} via Bot API")
+            return True, None
+        last_err = err
+        logger.warning(f"Bot API deleteMessage #{message_id} di {clean_chat} gagal: {err}")
+
+    # 2. Coba via Pyrogram client MTProto sebagai fallback
+    if client:
+        try:
+            await client.delete_messages(chat_id=clean_chat, message_ids=[int(message_id)])
+            logger.info(f"Berhasil menghapus pesan #{message_id} dari {clean_chat} via Pyrogram")
+            return True, None
+        except Exception as pe:
+            pe_str = str(pe)
+            if "message to delete not found" in pe_str.lower() or "MESSAGE_ID_INVALID" in pe_str:
+                return True, None
+            last_err = pe_str
+            logger.warning(f"Pyrogram delete_messages #{message_id} di {clean_chat} gagal: {pe}")
+
+    return False, last_err
+

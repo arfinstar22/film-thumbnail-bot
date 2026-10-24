@@ -10,8 +10,9 @@
 - **JANGAN UBAH** format tampilan rich post tanpa izin eksplisit dari user.
 
 ### 2. Duplikat Auto-Replace (`bot/handlers.py`)
-- `handle_post_callback()` (line ~6950): Saat user tekan "Posting ke Channel" dan film duplikat terdeteksi, post lama + stiker pembatas otomatis dihapus dari channel, lalu katalog di-update. Film baru menggantikan yang lama.
+- `handle_post_callback()` (line ~6950): Saat user tekan "Posting ke Channel" dan film duplikat terdeteksi, post lama + stiker pembatas otomatis dihapus dari channel menggunakan `async_delete_channel_post()` (Bot API deleteMessage + Pyrogram fallback), lalu katalog di-update. Film baru menggantikan yang lama.
 - Auto-post mode juga melakukan hal yang sama — tidak ada lagi "Auto-Post Ditahan Sementara".
+- **Syarat Channel**: Bot wajib diberi hak Admin di channel dengan izin **"Hapus Pesan" (Delete Messages)** agar Telegram mengizinkan penghapusan post lama.
 - Cari komentar `DUPLIKAT AUTO-REPLACE` di handlers.py.
 - **JANGAN HAPUS** logika ini.
 
