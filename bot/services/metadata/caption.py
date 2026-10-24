@@ -265,21 +265,43 @@ class CaptionGenerator:
         return self._clamp_caption(lines, synopsis, synopsis_idx)
 
     def _clamp_caption(self, lines: List[str], synopsis: str, synopsis_idx: Optional[int]) -> str:
-        """Guarantees caption length never exceeds Telegram's 1024 char limit."""
+        """Guarantees caption length never exceeds Telegram's 1024 char limit while preserving valid HTML."""
         result_text = "\n".join(lines)
-        if len(result_text) > 980 and synopsis and synopsis_idx is not None and synopsis_idx < len(lines):
-            excess = len(result_text) - 980
-            trimmed_len = max(40, len(synopsis) - excess - 15)
+        if len(result_text) <= 1024:
+            return result_text
+
+        # 1. First attempt: trim synopsis cleanly
+        if synopsis and synopsis_idx is not None and synopsis_idx < len(lines):
+            excess = len(result_text) - 1000
+            trimmed_len = max(30, len(synopsis) - excess - 20)
             trimmed = synopsis[:trimmed_len].rstrip() + "..."
             lines[synopsis_idx] = f"<blockquote expandable>\n📖 <b>SINOPSIS LENGKAP:</b>\n{html.escape(trimmed)}\n</blockquote>"
             result_text = "\n".join(lines)
 
-        if len(result_text) > 1020 and synopsis_idx is not None and synopsis_idx < len(lines):
-            short_syn = synopsis[:60].rstrip() + "..."
-            lines[synopsis_idx] = f"<blockquote expandable>\n📖 <b>SINOPSIS LENGKAP:</b>\n{html.escape(short_syn)}\n</blockquote>"
+        # 2. Second attempt: if still > 1024, drop optional 'Tonton Juga Film Lain' block
+        if len(result_text) > 1024:
+            new_lines = []
+            skip = False
+            for line in lines:
+                if "TONTON JUGA FILM LAIN" in line:
+                    skip = True
+                    if new_lines and "<blockquote expandable>" in new_lines[-1]:
+                        new_lines.pop()
+                    continue
+                if skip:
+                    if "</blockquote>" in line:
+                        skip = False
+                    continue
+                new_lines.append(line)
+            lines = new_lines
             result_text = "\n".join(lines)
 
-        if len(result_text) > 1024:
-            result_text = result_text[:1020].rstrip() + "..."
+        # 3. Third attempt: aggressively shorten synopsis if still over 1024
+        if len(result_text) > 1024 and synopsis and synopsis_idx is not None and synopsis_idx < len(lines):
+            excess = len(result_text) - 1010
+            short_len = max(20, len(synopsis) - excess - 30)
+            short_syn = synopsis[:short_len].rstrip() + "..."
+            lines[synopsis_idx] = f"<blockquote expandable>\n📖 <b>SINOPSIS LENGKAP:</b>\n{html.escape(short_syn)}\n</blockquote>"
+            result_text = "\n".join(lines)
 
         return result_text
