@@ -376,37 +376,7 @@ def format_pinned_catalog(
         "━━━━━━━━━━━━━━━━━━━━\n\n"
     )
 
-    # 1. Top 5 Rating Tertinggi (Pilihan Komunitas)
-    rated_movies = []
-    for m in movies:
-        r_str = m.get("rating") or ""
-        m_r = re.search(r"([\d\.]+)", str(r_str))
-        if m_r:
-            try:
-                val = float(m_r.group(1))
-                if 1.0 <= val <= 10.0:
-                    rated_movies.append((val, m))
-            except ValueError:
-                pass
-
-    rated_movies.sort(key=lambda x: (x[0], x[1].get("year") or 0), reverse=True)
-    top_5 = [item[1] for item in rated_movies[:5]]
-
-    top_section = ""
-    if top_5:
-        top_lines = ["🏆 <b>TOP 5 FILM RATING TERTINGGI:</b>"]
-        for idx, m in enumerate(top_5, 1):
-            title = m["title"]
-            year_str = f" ({m['year']})" if m.get("year") else ""
-            msg_id = m.get("message_id")
-            post_url = f"https://t.me/{clean_channel}/{msg_id}" if msg_id else f"https://t.me/{clean_channel}"
-            q_badge = f" <code>[{m['quality']}]</code>" if m.get("quality") else ""
-            r_val = m.get("rating") or ""
-            clean_r = str(r_val).split('/')[0].replace('⭐', '').replace('★', '').strip() if r_val else "8.0"
-            top_lines.append(f"{idx}. ⭐ <b>{clean_r}</b> • <a href=\"{post_url}\">{title}{year_str}</a>{q_badge}")
-        top_section = "\n".join(top_lines) + "\n\n"
-
-    # 2. Update Rilis Terbaru (5 film terakhir)
+    # 1. Update Rilis Terbaru (5 film terakhir)
     latest_movies = sorted(movies, key=lambda x: x.get("message_id") or 0, reverse=True)[:5]
     latest_section = ""
     if latest_movies:
@@ -423,7 +393,7 @@ def format_pinned_catalog(
             latest_lines.append(f"• <a href=\"{post_url}\">{title}{year_str}</a>{chips_str}")
         latest_section = "\n".join(latest_lines) + "\n\n"
 
-    # 3. Jelajahi Koleksi Berdasarkan Mood / Genre
+    # 2. Jelajahi Koleksi Berdasarkan Mood / Genre
     bot_ref = f"https://t.me/{bot_username}" if bot_username else f"https://t.me/{clean_channel}"
     genre_section = (
         "🎭 <b>JELAJAHI GENRE POPULER:</b>\n"
@@ -434,7 +404,7 @@ def format_pinned_catalog(
         f"👉 <i>Temukan rekomendasi instan via <a href=\"{bot_ref}?start=mood\">Menu Mood Bot</a></i>\n\n"
     )
 
-    # 4. Pencarian & Navigasi Cepat
+    # 3. Navigasi & Pencarian Cepat
     nav_section = (
         "🔍 <b>NAVIGASI & PENCARIAN CEPAT:</b>\n"
         f"• <a href=\"{bot_ref}?start=cari\">🔎 Cari Judul Film Instan</a>\n"
@@ -447,7 +417,7 @@ def format_pinned_catalog(
         "📖 <i>Katalog lengkap seluruh film (A - Z) dapat dibuka tanpa batas melalui tombol <b>[ ⚡ BUKA KATALOG LENGKAP ]</b> di bawah!</i>"
     )
 
-    return header + top_section + latest_section + genre_section + nav_section + footer
+    return header + latest_section + genre_section + nav_section + footer
 
 
 def publish_movie_instant_view(

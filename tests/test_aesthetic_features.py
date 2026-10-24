@@ -91,11 +91,10 @@ class TestAestheticFeatures(unittest.TestCase):
         cat = format_pinned_catalog(movies, "film_indonesia1", "film_bot")
         self.assertLessEqual(len(cat), 3800)
         self.assertIn("PUSAT FILM INDONESIA • KATALOG RESMI", cat)
-        self.assertIn("TOP 5 FILM RATING TERTINGGI", cat)
+        self.assertNotIn("TOP 5 FILM RATING TERTINGGI", cat)
         self.assertIn("UPDATE RILIS TERBARU", cat)
         self.assertIn("JELAJAHI GENRE POPULER", cat)
-        # Top 1 should be The Raid (8.1)
-        self.assertIn("1. ⭐ <b>8.1</b> • <a href=\"https://t.me/film_indonesia1/10\">The Raid (2011)</a>", cat)
+        self.assertIn("Agak Laen (2024)", cat)
 
     # 4. TELEGRAPH INSTANT VIEW BROCHURE
     def test_movie_instant_view_cached(self):
