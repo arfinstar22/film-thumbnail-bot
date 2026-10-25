@@ -1084,6 +1084,7 @@ BOT_COMMANDS_LIST = [
     BotCommand("sethighlight", "Atur rekomendasi harian otomatis"),
     BotCommand("retarget", "Update tombol post lama massal"),
     BotCommand("synckatalog", "Scan channel & update Pinned Catalog"),
+    BotCommand("bersihkatalog", "Bersihkan link mati & update katalog aktif"),
     BotCommand("hapusfilm", "Hapus film dari katalog channel"),
     BotCommand("backup", "Ekspor backup database JSON"),
     BotCommand("restorechannel", "Restore/migrasi film ke channel baru"),
@@ -1235,6 +1236,8 @@ def build_admin_dashboard_parts(chat_id: int, user_id: int, first_name: str, use
         "  ▫️ <i>Mode Inline:</i> Ketik <code>@bot &lt;judul&gt;</code> di chat mana pun!\n\n"
         "• <code>/synckatalog</code>\n"
         "  Scan channel, bersihkan duplikat, dan update Pinned Catalog A-Z + Telegra.ph.\n\n"
+        "• <code>/bersihkatalog</code>\n"
+        "  Verifikasi postingan aktif & hapus seluruh film yang telah dihapus dari channel.\n\n"
         "🛡️ <b>PEMELIHARAAN & DISASTER RECOVERY:</b>\n"
         "• <code>/editpost &lt;link_post&gt; [judul baru]</code>\n"
         "  Edit caption, rating, sinopsis, atau tombol postingan lama di channel tanpa upload ulang.\n\n"
@@ -5306,6 +5309,68 @@ async def send_or_update_backup_document(
                 pass
 
 
+async def prune_dead_channel_catalog(
+    client: Client,
+    watermark: str,
+    clean_wm: str,
+    batch_size: int = 100
+) -> Tuple[int, int, int]:
+    """Inspects all movies in database for clean_wm and verifies message existence on Telegram.
+    Deletes any dead/removed messages and returns (total_checked, alive_count, pruned_count).
+    Ensures rich posts and legacy video posts that still exist in channel are kept safe.
+    """
+    clean_chan = (clean_wm or "").lstrip("@").strip().lower()
+    if not clean_chan:
+        return 0, 0, 0
+
+    target_chat = watermark if (watermark.startswith("@") or str(watermark).startswith("-100")) else f"@{clean_chan}"
+
+    try:
+        conn = _engine.cache._conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT message_id FROM movie_catalog WHERE LOWER(channel_username) = ? AND message_id IS NOT NULL",
+            (clean_chan,)
+        )
+        stored_mids = [r[0] for r in cur.fetchall() if r[0]]
+    except Exception as e:
+        logger.error(f"Failed to query stored message IDs for prune: {e}")
+        return 0, 0, 0
+
+    if not stored_mids:
+        return 0, 0, 0
+
+    dead_ids = []
+    alive_count = 0
+
+    for i in range(0, len(stored_mids), batch_size):
+        chunk = stored_mids[i:i + batch_size]
+        try:
+            msgs = await client.get_messages(target_chat, message_ids=chunk)
+            if not isinstance(msgs, list):
+                msgs = [msgs]
+            for idx, mid in enumerate(chunk):
+                m = msgs[idx] if idx < len(msgs) else None
+                if not m or getattr(m, "empty", False):
+                    dead_ids.append(mid)
+                elif getattr(m, "service", False) or getattr(m, "pinned_message", False):
+                    dead_ids.append(mid)
+                else:
+                    alive_count += 1
+        except FloodWait as fw:
+            logger.warning(f"FloodWait during prune: {fw.value}s")
+            await asyncio.sleep(fw.value + 1)
+        except Exception as be:
+            logger.warning(f"Error checking message batch in prune: {be}")
+        await asyncio.sleep(0.15)
+
+    if dead_ids:
+        _engine.cache.delete_movie_posts(dead_ids, clean_chan)
+        logger.info(f"Pruned {len(dead_ids)} dead movie posts from channel @{clean_chan}")
+
+    return len(stored_mids), alive_count, len(dead_ids)
+
+
 @app.on_message(filters.command(["synckatalog", "scanchannel"]))
 async def sync_catalog_cmd(client: Client, msg: Message):
     if not check_admin(msg):
@@ -5330,42 +5395,46 @@ async def sync_catalog_cmd(client: Client, msg: Message):
             scan_limit = min(10000, max(50, int(arg_val)))
 
     status_msg = await msg.reply_text(
-        f"⏳ <b>Memulai Pemindaian Channel @{clean_wm}...</b>\n\n"
-        f"• Membaca riwayat hingga {scan_limit} postingan...\n"
+        f"⏳ <b>Memulai Pemindaian & Sinkronisasi Channel @{clean_wm}...</b>\n\n"
+        f"• Memverifikasi link aktif & membersihkan film yang telah dihapus...\n"
+        f"• Membaca postingan baru hingga {scan_limit} riwayat...\n"
         "• Menyaring film duplikat (mengambil post paling terbaru)...\n"
         "• Membersihkan pesan tersemat (pin) & notifikasi lama...\n"
-        "• Memperbarui Pinned Catalog A-Z...",
+        "• Memperbarui Pinned Catalog A-Z & Telegra.ph...",
         parse_mode=ParseMode.HTML
     )
 
     try:
-        # Determine highest message ID in channel via silent probe message
-        probe = await client.send_message(wm, "🔄 Sinkronisasi katalog...", disable_notification=True)
-        max_id = probe.id
-        await probe.delete()
-    except Exception as pe:
-        logger.warning(f"Could not probe max message id in {wm}: {pe}")
-        stored_pin = _engine.cache.get_setting(f"pinned_catalog_{clean_wm}", "")
-        max_id = int(stored_pin) if stored_pin and stored_pin.isdigit() else 500
+        # Phase 1: Prune any deleted/dead links from existing database records first
+        tot_chk, alive_k, pruned_k = await prune_dead_channel_catalog(client, wm, clean_wm)
 
-    found_catalog_msg_ids = []
-    found_service_msg_ids = []
-    scanned_total = 0
-    scanned_movies = 0
-    start_id = max(1, max_id - scan_limit)
-    batch_size = 100
+        # Phase 2: Probe highest message ID
+        try:
+            probe = await client.send_message(wm, "🔄 Sinkronisasi katalog...", disable_notification=True)
+            max_id = probe.id
+            await probe.delete()
+        except Exception as pe:
+            logger.warning(f"Could not probe max message id in {wm}: {pe}")
+            stored_pin = _engine.cache.get_setting(f"pinned_catalog_{clean_wm}", "")
+            max_id = int(stored_pin) if stored_pin and stored_pin.isdigit() else 500
 
-    try:
+        found_catalog_msg_ids = []
+        found_service_msg_ids = []
+        scanned_total = 0
+        scanned_movies = 0
+        start_id = max(1, max_id - scan_limit)
+        batch_size = 100
+
         for batch_start in range(start_id, max_id, batch_size):
             batch_ids = list(range(batch_start, min(batch_start + batch_size, max_id)))
             try:
                 msgs = await client.get_messages(wm, message_ids=batch_ids)
                 if not isinstance(msgs, list):
                     msgs = [msgs]
-                for ch_msg in msgs:
+                for idx, mid in enumerate(batch_ids):
+                    ch_msg = msgs[idx] if idx < len(msgs) else None
                     if not ch_msg or getattr(ch_msg, "empty", False):
-                        if ch_msg and getattr(ch_msg, "id", None):
-                            _engine.cache.delete_movie_posts([ch_msg.id])
+                        _engine.cache.delete_movie_posts([mid], clean_wm)
                         continue
 
                     # Auto-detect service notification messages (e.g. "menyematkan...")
@@ -5397,14 +5466,6 @@ async def sync_catalog_cmd(client: Client, msg: Message):
                 logger.warning(f"Batch fetch error for ids {batch_ids[:2]}..: {be}")
             await asyncio.sleep(0.05)
 
-        # Also scan recent chat history to catch all lingering service messages
-        try:
-            async for m in client.get_chat_history(wm, limit=50):
-                if m and (getattr(m, "service", None) or getattr(m, "pinned_message", None)):
-                    found_service_msg_ids.append(m.id)
-        except Exception:
-            pass
-
         # Delete any service notification messages found in channel
         if found_service_msg_ids:
             try:
@@ -5415,16 +5476,14 @@ async def sync_catalog_cmd(client: Client, msg: Message):
                 logger.warning(f"Could not delete old service messages: {se}")
 
         unique_count = await update_pinned_catalog(client, wm, chat_id=chat_id, old_catalog_ids=found_catalog_msg_ids)
-        duplicates_removed = max(0, scanned_movies - unique_count)
 
         await status_msg.edit_text(
             f"✅ <b>Sinkronisasi & Pinned Catalog Selesai!</b>\n\n"
             f"📢 <b>Channel:</b> @{clean_wm}\n"
             f"📊 <b>Total Pesan Diperiksa:</b> {scanned_total}\n"
-            f"🎬 <b>Total Film Ditemukan:</b> {scanned_movies}\n"
-            f"🧹 <b>Film Duplikat Dibersihkan:</b> {duplicates_removed} (diambil post terbaru)\n"
-            f"🗑️ <b>Pesan Lama Dihapus:</b> {len(found_catalog_msg_ids)} pin & {len(found_service_msg_ids)} notifikasi lama\n"
-            f"📚 <b>Koleksi Unik di Pinned Catalog:</b> {unique_count} film\n\n"
+            f"🗑️ <b>Link Mati Dibersihkan:</b> {pruned_k} judul terhapus dibuang\n"
+            f"🧹 <b>Pesan Lama Dihapus:</b> {len(found_catalog_msg_ids)} pin & {len(found_service_msg_ids)} notifikasi\n"
+            f"📚 <b>Koleksi Unik di Pinned Catalog:</b> {unique_count} film aktif (termasuk Rich Post)\n\n"
             f"📌 <i>Pesan indeks katalog A-Z telah diperbarui dan di-pin bersih di channel!</i>",
             parse_mode=ParseMode.HTML
         )
@@ -5440,6 +5499,61 @@ async def sync_catalog_cmd(client: Client, msg: Message):
         await status_msg.edit_text(
             f"❌ <b>Gagal Menyinkronkan Channel:</b>\n\n<code>{e}</code>\n\n"
             "<i>Pastikan bot sudah dijadikan Administrator di channel dengan izin Kirim & Pin Pesan!</i>",
+            parse_mode=ParseMode.HTML
+        )
+
+
+@app.on_message(filters.command(["bersihkatalog", "cleankatalog", "prunekatalog", "verifikasikatalog"]))
+async def clean_catalog_cmd(client: Client, msg: Message):
+    """Verifies all movie entries in database against Telegram, removes deleted/dead posts,
+    and updates Telegra.ph and Pinned Catalog with strictly active movies (including Rich Posts)."""
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
+    chat_id = msg.chat.id
+    args = msg.text.split()[1:] if msg.text else []
+    target_wm = args[0] if args else _get_user_watermark(chat_id)
+    clean_wm = (target_wm or "").lstrip("@").strip().lower()
+
+    if not clean_wm:
+        await msg.reply_text("❌ Channel watermark belum diatur. Gunakan <code>/setwatermark @namachannel</code> terlebih dahulu.")
+        return
+
+    status_msg = await msg.reply_text(
+        f"🧹 <b>Memulai Pembersihan Link Mati @{clean_wm}...</b>\n\n"
+        f"• Memeriksa seluruh tautan film di database terhadap postingan aktif di Telegram...\n"
+        f"• Mendeteksi dan membuang postingan yang telah dihapus dari channel...\n"
+        f"• Mempertahankan film aktif (termasuk seluruh postingan Rich Post)...\n"
+        f"• Menyinkronkan Telegra.ph & Pinned Catalog...",
+        parse_mode=ParseMode.HTML
+    )
+
+    try:
+        total_checked, alive_count, pruned_count = await prune_dead_channel_catalog(client, f"@{clean_wm}", clean_wm)
+        unique_count = await update_pinned_catalog(client, f"@{clean_wm}", chat_id=chat_id)
+
+        if chat_id and chat_id > 0:
+            try:
+                await send_or_update_backup_document(client, chat_id, f"@{clean_wm}", is_auto=True)
+            except Exception as be:
+                logger.warning(f"Gagal auto-update backup json pada clean catalog: {be}")
+
+        await status_msg.edit_text(
+            f"✅ <b>Pembersihan Katalog Selesai!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📢 <b>Channel:</b> @{clean_wm}\n"
+            f"📊 <b>Total Film Diperiksa:</b> {total_checked} judul\n"
+            f"🎬 <b>Film Aktif Dipertahankan:</b> {alive_count} film (termasuk Rich Post)\n"
+            f"🗑️ <b>Post Terhapus / Link Mati:</b> {pruned_count} judul dibersihkan\n"
+            f"📚 <b>Total Koleksi Aktif di Katalog:</b> {unique_count} film\n\n"
+            f"📌 <i>Katalog Telegra.ph & Pinned Catalog channel berhasil diperbarui hanya dengan film yang postingannya masih aktif!</i>",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.exception("Clean catalog error")
+        await status_msg.edit_text(
+            f"❌ <b>Gagal membersihkan katalog:</b>\n\n<code>{e}</code>",
             parse_mode=ParseMode.HTML
         )
 
