@@ -1,4 +1,5 @@
 import unittest
+import asyncio
 import tempfile
 import os
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -128,3 +129,29 @@ class TestCatalogPrune(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Pembersihan Katalog Selesai", call_text)
             self.assertIn("Film Aktif Dipertahankan:", call_text)
             self.assertIn("Post Terhapus / Link Mati:", call_text)
+
+    def test_seconds_until_next_wib_time(self):
+        """Should calculate positive sleep seconds within a 24h window."""
+        from bot.handlers import _seconds_until_next_wib_time
+        sec = _seconds_until_next_wib_time(target_hour=3, target_minute=0)
+        self.assertGreater(sec, 0)
+        self.assertLessEqual(sec, 86400)
+
+    async def test_daily_backup_worker_fires_for_admins(self):
+        """Should send consolidated backup document to configured admins."""
+        from bot.handlers import _daily_backup_worker
+        mock_client = MagicMock()
+        with patch("bot.handlers._seconds_until_next_wib_time", return_value=0.01), \
+             patch("bot.handlers.send_or_update_backup_document", new_callable=AsyncMock) as mock_send_backup, \
+             patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            # Let the loop execute once then break
+            mock_sleep.side_effect = [None, None, asyncio.CancelledError()]
+            try:
+                await _daily_backup_worker(mock_client)
+            except asyncio.CancelledError:
+                pass
+
+            mock_send_backup.assert_called()
+            # Must have passed is_auto=True
+            _, kwargs = mock_send_backup.call_args
+            self.assertTrue(kwargs.get("is_auto"))

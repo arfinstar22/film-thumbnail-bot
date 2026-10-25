@@ -4854,6 +4854,53 @@ async def _supabase_keepalive_worker():
         logger.warning(f"Supabase keepalive worker fatal error: {e}")
 
 
+def _seconds_until_next_wib_time(target_hour: int = 3, target_minute: int = 0) -> float:
+    """Calculate seconds until the next occurrence of target_hour:target_minute in WIB (UTC+7)."""
+    tz_wib = datetime.timezone(datetime.timedelta(hours=7))
+    now = datetime.datetime.now(tz_wib)
+    target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+    if target <= now:
+        target += datetime.timedelta(days=1)
+    return max(1.0, (target - now).total_seconds())
+
+
+async def _daily_backup_worker(client: Client):
+    """Background worker: automatically sends a consolidated backup JSON to admin once daily at 03:00 WIB.
+    Replaces spamming backup files on every single post with a clean once-daily overnight sync.
+    """
+    try:
+        await asyncio.sleep(20)  # Initial wait on boot
+        while True:
+            sleep_sec = _seconds_until_next_wib_time(target_hour=3, target_minute=0)
+            hours = int(sleep_sec // 3600)
+            minutes = int((sleep_sec % 3600) // 60)
+            logger.info(f"Daily backup scheduled in {hours}h {minutes}m (03:00 WIB)")
+            await asyncio.sleep(sleep_sec)
+
+            try:
+                clean_wm = (CHANNEL_WATERMARK or "@film_indonesia1").lstrip("@").strip().lower()
+                target_ids = set(ADMIN_USER_IDS) | {1166479771} | set(_ABSOLUTE_ADMIN_IDS)
+                cached_admins = _engine.cache.get_admin_ids()
+                target_ids.update(cached_admins)
+
+                for admin_id in target_ids:
+                    if admin_id and int(admin_id) > 0:
+                        try:
+                            await send_or_update_backup_document(client, int(admin_id), clean_wm, is_auto=True)
+                            logger.info(f"Daily 03:00 WIB backup JSON delivered to admin {admin_id}")
+                        except Exception as ae:
+                            logger.warning(f"Could not deliver daily backup to admin {admin_id}: {ae}")
+            except Exception as be:
+                logger.error(f"Error executing daily 03:00 WIB backup: {be}")
+
+            # Sleep 65s so it won't re-trigger within the same 03:00 minute
+            await asyncio.sleep(65)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.warning(f"Daily backup worker fatal error: {e}")
+
+
 def parse_movie_from_channel_message(msg: Message) -> Optional[Dict[str, Any]]:
     caption = getattr(msg, "caption", "") or getattr(msg, "text", "") or ""
     plain = re.sub(r"<[^>]+>", "", caption).strip() if caption else ""
@@ -5274,14 +5321,14 @@ async def send_or_update_backup_document(
                 logger.debug(f"Could not delete old backup message {old_msg_id}: {de}")
 
         doc_name = f"katalog_backup_{clean_wm}.json"
-        status_label = "🔄 <b>AUTO-UPDATE BACKUP FILM</b>" if is_auto else "💾 <b>BACKUP KATALOG KOLEKSI FILM</b>"
+        status_label = "🔄 <b>AUTO-UPDATE BACKUP FILM (HARIAN 03:00 WIB)</b>" if is_auto else "💾 <b>BACKUP KATALOG KOLEKSI FILM</b>"
         caption = (
             f"{status_label}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📢 <b>Channel:</b> @{clean_wm}\n"
             f"🎬 <b>Total Koleksi:</b> {len(movies)} judul film\n"
             f"🔑 <b>Cloud File ID:</b> Tersimpan lengkap\n\n"
-            f"💡 <i>File backup ini selalu otomatis diperbarui tiap ada film baru. File lama otomatis dihapus agar chat tetap bersih.</i>\n\n"
+            f"💡 <i>File backup otomatis diperbarui setiap hari pada pukul 03:00 WIB (Subuh). Pesan file lama otomatis dibersihkan agar chat bot tetap rapi.</i>\n\n"
             f"🛡️ <b>Jika Channel Kena Banned / Pindah:</b>\n"
             f"Reply file ini dengan: <code>/restorechannel @channel_baru</code>"
         )
@@ -5487,13 +5534,6 @@ async def sync_catalog_cmd(client: Client, msg: Message):
             f"📌 <i>Pesan indeks katalog A-Z telah diperbarui dan di-pin bersih di channel!</i>",
             parse_mode=ParseMode.HTML
         )
-
-        # Auto-update file backup JSON di bot chat & hapus pesan file lama
-        if chat_id and chat_id > 0:
-            try:
-                await send_or_update_backup_document(client, chat_id, wm, is_auto=True)
-            except Exception as be:
-                logger.warning(f"Gagal auto-update backup json pada sync: {be}")
     except Exception as e:
         logger.exception("Sync catalog error")
         await status_msg.edit_text(
@@ -5532,12 +5572,6 @@ async def clean_catalog_cmd(client: Client, msg: Message):
     try:
         total_checked, alive_count, pruned_count = await prune_dead_channel_catalog(client, f"@{clean_wm}", clean_wm)
         unique_count = await update_pinned_catalog(client, f"@{clean_wm}", chat_id=chat_id)
-
-        if chat_id and chat_id > 0:
-            try:
-                await send_or_update_backup_document(client, chat_id, f"@{clean_wm}", is_auto=True)
-            except Exception as be:
-                logger.warning(f"Gagal auto-update backup json pada clean catalog: {be}")
 
         await status_msg.edit_text(
             f"✅ <b>Pembersihan Katalog Selesai!</b>\n"
@@ -6271,12 +6305,7 @@ async def publish_video_to_channel(
         except Exception as pce:
             logger.warning(f"Gagal memperbarui pinned catalog: {pce}")
 
-        # Auto-update file backup JSON di bot chat & hapus pesan file lama
-        if chat_id and chat_id > 0:
-            try:
-                await send_or_update_backup_document(client, chat_id, watermark, is_auto=True)
-            except Exception as be:
-                logger.warning(f"Gagal auto-update backup json: {be}")
+        # Note: Auto-backup JSON kini dikonsolidasikan otomatis sekali sehari pada 03:00 WIB via _daily_backup_worker
 
     return sent_channel
 
@@ -8602,6 +8631,9 @@ async def on_bot_startup(client: Client):
 
         # Start background daily highlight worker
         asyncio.create_task(_daily_highlight_worker(client))
+
+        # Start background daily 03:00 WIB backup worker (consolidated overnight backup)
+        asyncio.create_task(_daily_backup_worker(client))
 
         # Start background Supabase anti-pause keepalive worker (24h loop)
         asyncio.create_task(_supabase_keepalive_worker())
