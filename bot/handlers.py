@@ -1243,17 +1243,11 @@ def build_admin_dashboard_parts(chat_id: int, user_id: int, first_name: str, use
         f"  <i>Status auto-join:</i> <b>{autojoin_status}</b>\n\n"
         "👑 <b>MANAJEMEN ADMINISTRATOR & PENGGUNA:</b>\n"
         "• <code>/users</code>\n"
-        "  Lihat daftar seluruh orang yang pernah berinteraksi/start bot secara berhalaman.\n\n"
-        "• <code>/block &lt;user_id&gt; [alasan]</code>\n"
-        "  Blokir pengguna agar tidak dapat mengakses bot lagi.\n\n"
-        "• <code>/unblock &lt;user_id&gt;</code>\n"
-        "  Buka blokir pengguna.\n\n"
-        "• <code>/addadmin &lt;user_id atau @username&gt;</code>\n"
-        "  Tambah hak akses admin baru (bisa juga reply pesan/forward orangnya dengan /addadmin).\n\n"
-        "• <code>/deladmin &lt;user_id atau @username&gt;</code>\n"
-        "  Cabut hak akses admin dari pengguna.\n\n"
-        "• <code>/admins</code>\n"
-        "  Lihat daftar semua admin bot yang sedang aktif.\n\n"
+        "  Lihat daftar seluruh orang yang pernah interaksi/start bot berpaginasi.\n\n"
+        "• <code>/block &lt;user_id&gt; [alasan]</code> & <code>/unblock &lt;user_id&gt;</code>\n"
+        "  Blokir atau buka blokir akses pengguna ke bot.\n\n"
+        "• <code>/addadmin</code> & <code>/deladmin</code> & <code>/admins</code>\n"
+        "  Kelola hak akses administrator bot.\n\n"
         "⚡ <b>FITUR UTAMA:</b>\n"
         "• 📺 <b>Auto-Navigation Serial / Drakor</b>: Tombol [◀️ Eps N-1] [📑 List] [Eps N+1 ▶️] dua arah otomatis.\n"
         "• 🛡️ <b>Content Protection</b>: Kunci video dari forward & download dengan proteksi resmi Telegram.\n"
@@ -1271,7 +1265,27 @@ def build_admin_dashboard_parts(chat_id: int, user_id: int, first_name: str, use
         "2. Bot otomatis memproses antrean dan merapikan caption.\n"
         "3. Tekan tombol <b>🚀 Posting ke Channel</b> (atau gunakan /autopost on untuk otomatis terbit)!"
     )
-    return [part1, part2]
+
+    final_parts = []
+    for p in [part1, part2]:
+        if len(p) <= 3900:
+            final_parts.append(p)
+        else:
+            sub_parts = []
+            curr = []
+            curr_len = 0
+            for block in p.split("\n\n"):
+                if curr_len + len(block) + 2 > 3900:
+                    sub_parts.append("\n\n".join(curr))
+                    curr = [block]
+                    curr_len = len(block)
+                else:
+                    curr.append(block)
+                    curr_len += len(block) + 2
+            if curr:
+                sub_parts.append("\n\n".join(curr))
+            final_parts.extend(sub_parts)
+    return final_parts
 
 
 def build_admin_dashboard_text(chat_id: int, user_id: int, first_name: str, username: str) -> str:
