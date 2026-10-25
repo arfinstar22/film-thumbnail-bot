@@ -1241,7 +1241,13 @@ def build_admin_dashboard_parts(chat_id: int, user_id: int, first_name: str, use
         "• <code>/autojoin on / off</code>\n"
         "  Otomatis setujui member yang minta join ke channel private.\n"
         f"  <i>Status auto-join:</i> <b>{autojoin_status}</b>\n\n"
-        "👑 <b>MANAJEMEN ADMINISTRATOR:</b>\n"
+        "👑 <b>MANAJEMEN ADMINISTRATOR & PENGGUNA:</b>\n"
+        "• <code>/users</code>\n"
+        "  Lihat daftar seluruh orang yang pernah berinteraksi/start bot secara berhalaman.\n\n"
+        "• <code>/block &lt;user_id&gt; [alasan]</code>\n"
+        "  Blokir pengguna agar tidak dapat mengakses bot lagi.\n\n"
+        "• <code>/unblock &lt;user_id&gt;</code>\n"
+        "  Buka blokir pengguna.\n\n"
         "• <code>/addadmin &lt;user_id atau @username&gt;</code>\n"
         "  Tambah hak akses admin baru (bisa juga reply pesan/forward orangnya dengan /addadmin).\n\n"
         "• <code>/deladmin &lt;user_id atau @username&gt;</code>\n"
@@ -1289,11 +1295,14 @@ async def send_admin_dashboard(client: Client, target, chat_id: int, user_id: in
         ],
         [
             InlineKeyboardButton("🎬 Input Judul Film", callback_data="adm_input_movie"),
-            InlineKeyboardButton("🔄 Refresh Dashboard", callback_data="adm_dashboard")
+            InlineKeyboardButton("👥 Kelola Pengguna", callback_data="adm_users:1")
         ],
         [
-            InlineKeyboardButton("🔍 Cari Film Instan", switch_inline_query_current_chat=""),
+            InlineKeyboardButton("🔄 Refresh Dashboard", callback_data="adm_dashboard"),
             InlineKeyboardButton(f"📢 Buka @{clean_wm}", url=channel_url)
+        ],
+        [
+            InlineKeyboardButton("🔍 Cari Film Instan", switch_inline_query_current_chat="")
         ]
     ])
 
@@ -2797,6 +2806,206 @@ async def list_admins_cmd(client: Client, msg: Message):
     lines.append("<i>• Hapus: <code>/deladmin &lt;user_id&gt;</code></i>")
 
     await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+# ================= USER MANAGEMENT & BLOCK/UNBLOCK =================
+def execute_admin_block_user(target_id: int, reason: str = "") -> Tuple[bool, str]:
+    """Admin action to block a user from using the bot."""
+    if not target_id or target_id <= 0:
+        return False, "User ID tidak valid."
+
+    if is_owner(target_id):
+        return False, "❌ Operasi Ditolak: Tuan Darfin adalah Admin Absolut & Pemilik Bot, tidak dapat diblokir!"
+
+    clean_reason = (reason or "Diblokir oleh Administrator").strip()
+    success = _engine.cache.block_user(target_id, clean_reason)
+    if success:
+        return True, f"✅ User <code>{target_id}</code> berhasil diblokir!\nAlasan: <i>{clean_reason}</i>"
+    return False, "Gagal memblokir user di database."
+
+
+def execute_admin_unblock_user(target_id: int) -> Tuple[bool, str]:
+    """Admin action to unblock a user."""
+    if not target_id or target_id <= 0:
+        return False, "User ID tidak valid."
+
+    success = _engine.cache.unblock_user(target_id)
+    if success:
+        return True, f"✅ Blokir untuk user <code>{target_id}</code> berhasil dibuka! Pengguna dapat menggunakan bot kembali."
+    return False, "Gagal membuka blokir user di database."
+
+
+def build_users_page(page: int = 1) -> Tuple[str, InlineKeyboardMarkup]:
+    """Builds interactive paginated view of users who have interacted with the bot."""
+    users, total_pages = _engine.cache.get_bot_users(page=page, page_size=6)
+    total_count = _engine.cache.get_bot_users_count()
+
+    lines = [
+        "👥 <b>DAFTAR PENGGUNA TERDAFTAR</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"📊 Total Pengguna yang Berinteraksi: <b>{total_count} orang</b>",
+        f"📄 Halaman: <b>{page} dari {total_pages}</b>",
+        "━━━━━━━━━━━━━━━━━━━━"
+    ]
+
+    kb_rows = []
+
+    if not users:
+        lines.append("<i>Belum ada pengguna yang berinteraksi dengan bot.</i>")
+    else:
+        for u in users:
+            uid = u["user_id"]
+            uname = f"@{u['username']}" if u["username"] else "<i>(tanpa username)</i>"
+            fname = html.escape(u["first_name"] or "Sobat Film")
+            last_act = u.get("last_active", "-")
+
+            if is_owner(uid, u.get("username", "")):
+                status_str = "👑 <b>Admin Absolut (Creator)</b>"
+            elif u.get("is_blocked"):
+                status_str = "🔴 <b>DIBLOKIR ADMIN</b>"
+            elif u.get("banned_until"):
+                status_str = f"⏳ <b>Banned Anti-Spam</b> (s/d {u['banned_until']})"
+            else:
+                status_str = "🟢 <b>Aktif</b>"
+
+            lines.append(
+                f"• <b>{fname}</b> ({uname})\n"
+                f"  🆔 <code>{uid}</code> | Status: {status_str}\n"
+                f"  🕒 <i>Aktif: {last_act}</i>"
+            )
+
+            if not is_owner(uid, u.get("username", "")):
+                if u.get("is_blocked") or u.get("banned_until"):
+                    btn_toggle = InlineKeyboardButton(f"✅ Buka Blokir ({uid})", callback_data=f"user_unblock:{uid}:{page}")
+                else:
+                    btn_toggle = InlineKeyboardButton(f"🚫 Blokir ({uid})", callback_data=f"user_block:{uid}:{page}")
+                kb_rows.append([btn_toggle])
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("<i>• Ketik <code>/block &lt;user_id&gt; [alasan]</code> untuk blokir</i>")
+    lines.append("<i>• Ketik <code>/unblock &lt;user_id&gt;</code> untuk buka blokir</i>")
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"adm_users:{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"🔄 Hal {page}/{total_pages}", callback_data=f"adm_users:{page}"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"adm_users:{page + 1}"))
+
+    if nav_row:
+        kb_rows.append(nav_row)
+
+    kb_rows.append([InlineKeyboardButton("🔙 Tutup / Refresh", callback_data="adm_dashboard")])
+
+    return "\n".join(lines), InlineKeyboardMarkup(kb_rows)
+
+
+@app.on_message(filters.command(["users", "pengguna", "members", "userlist"]))
+async def list_users_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Khusus Administrator.", parse_mode=ParseMode.HTML)
+        return
+
+    text, kb = build_users_page(page=1)
+    await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+@app.on_message(filters.command(["block", "blokir", "ban"]))
+async def block_user_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Khusus Administrator.", parse_mode=ParseMode.HTML)
+        return
+
+    args = msg.text.split(None, 2)
+    if len(args) < 2:
+        await msg.reply_text(
+            "📌 <b>CARA MEMBLOKIR PENGGUNA:</b>\n\n"
+            "Ketik: <code>/block &lt;user_id&gt; [alasan]</code>\n"
+            "<i>Contoh:</i> <code>/block 123456789 Spam promosi</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    target_raw = args[1].strip()
+    if not target_raw.isdigit():
+        await msg.reply_text("❌ User ID harus berupa angka.", parse_mode=ParseMode.HTML)
+        return
+
+    target_id = int(target_raw)
+    reason = args[2].strip() if len(args) > 2 else "Diblokir oleh Administrator"
+
+    ok, reply_str = execute_admin_block_user(target_id, reason)
+    await msg.reply_text(reply_str, parse_mode=ParseMode.HTML)
+
+
+@app.on_message(filters.command(["unblock", "bukablokir", "unban"]))
+async def unblock_user_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Khusus Administrator.", parse_mode=ParseMode.HTML)
+        return
+
+    args = msg.text.split(None, 1)
+    if len(args) < 2:
+        await msg.reply_text(
+            "📌 <b>CARA MEMBUKA BLOKIR PENGGUNA:</b>\n\n"
+            "Ketik: <code>/unblock &lt;user_id&gt;</code>\n"
+            "<i>Contoh:</i> <code>/unblock 123456789</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    target_raw = args[1].strip()
+    if not target_raw.isdigit():
+        await msg.reply_text("❌ User ID harus berupa angka.", parse_mode=ParseMode.HTML)
+        return
+
+    target_id = int(target_raw)
+    ok, reply_str = execute_admin_unblock_user(target_id)
+    await msg.reply_text(reply_str, parse_mode=ParseMode.HTML)
+
+
+@app.on_callback_query(filters.regex(r"^adm_users:(\d+)$"))
+async def cb_adm_users_page(client: Client, query: CallbackQuery):
+    if not check_admin(query):
+        await query.answer("⛔ Khusus Administrator.", show_alert=True)
+        return
+
+    m = re.match(r"^adm_users:(\d+)$", query.data)
+    page = int(m.group(1)) if m else 1
+    text, kb = build_users_page(page=page)
+    try:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    except Exception:
+        pass
+    await query.answer()
+
+
+@app.on_callback_query(filters.regex(r"^user_(block|unblock):(\d+):(\d+)$"))
+async def cb_user_block_toggle(client: Client, query: CallbackQuery):
+    if not check_admin(query):
+        await query.answer("⛔ Khusus Administrator.", show_alert=True)
+        return
+
+    m = re.match(r"^user_(block|unblock):(\d+):(\d+)$", query.data)
+    if not m:
+        await query.answer()
+        return
+
+    action, uid_str, page_str = m.group(1), m.group(2), m.group(3)
+    target_id = int(uid_str)
+    page = int(page_str)
+
+    if action == "block":
+        ok, res_msg = execute_admin_block_user(target_id, "Diblokir via menu pengguna")
+    else:
+        ok, res_msg = execute_admin_unblock_user(target_id)
+
+    await query.answer("Berhasil diperbarui!" if ok else res_msg, show_alert=not ok)
+    text, kb = build_users_page(page=page)
+    try:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    except Exception:
+        pass
 
 
 # ================= MULTI-CHANNEL SWITCHER =================

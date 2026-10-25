@@ -105,3 +105,43 @@ class TestAntiSpamAndMiddleware(unittest.TestCase):
         blocked, alert_sub = _check_antispam_and_banned(user_id, "testuser", "Normal")
         self.assertTrue(blocked)
 
+
+class TestAdminUserCommands(unittest.TestCase):
+    def test_cannot_block_absolute_admin(self):
+        """Admin commands must forbid blocking the absolute creator/owner."""
+        from bot.handlers import execute_admin_block_user
+        from bot.config import ABSOLUTE_ADMIN_USER_IDS
+        admin_id = list(ABSOLUTE_ADMIN_USER_IDS)[0]
+
+        ok, msg = execute_admin_block_user(admin_id, "Tes blokir")
+        self.assertFalse(ok)
+        self.assertIn("admin absolut", msg.lower())
+
+    def test_can_block_and_unblock_regular_user(self):
+        """Admin can block and unblock regular users."""
+        from bot.handlers import execute_admin_block_user, execute_admin_unblock_user, _engine
+        user_id = 777222
+        _engine.cache.register_bot_user(user_id, "spammer_target", "Spammer Target")
+
+        ok, msg = execute_admin_block_user(user_id, "Pelanggaran aturan")
+        self.assertTrue(ok)
+        self.assertIn("berhasil diblokir", msg.lower())
+        self.assertTrue(_engine.cache.is_user_banned(user_id)[0])
+
+        ok, msg = execute_admin_unblock_user(user_id)
+        self.assertTrue(ok)
+        self.assertIn("berhasil dibuka", msg.lower())
+        self.assertFalse(_engine.cache.is_user_banned(user_id)[0])
+
+    def test_build_users_page(self):
+        """build_users_page should return formatted text and keyboard."""
+        from bot.handlers import build_users_page, _engine
+        _engine.cache.register_bot_user(1001, "member1", "Member One")
+        _engine.cache.register_bot_user(1002, "member2", "Member Two")
+
+        text, kb = build_users_page(page=1)
+        self.assertIn("DAFTAR PENGGUNA", text.upper())
+        self.assertIn("Member One", text)
+        self.assertIsNotNone(kb)
+
+
