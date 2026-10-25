@@ -92,6 +92,8 @@ _is_processing: bool = False
 _queue_worker_task: Optional[asyncio.Task] = None
 _scheduler_worker_task: Optional[asyncio.Task] = None
 _ABSOLUTE_ADMIN_IDS: set = set(ABSOLUTE_ADMIN_USER_IDS)
+_user_message_timestamps: Dict[int, List[float]] = {}
+_user_last_ban_notice: Dict[int, float] = {}
 
 
 def is_owner(user_id: int, username: str = "") -> bool:
@@ -189,6 +191,64 @@ def check_admin(msg: Union[Message, CallbackQuery, Any]) -> bool:
     chat = getattr(msg, "chat", None)
     chat_id = chat.id if chat else 0
     return is_admin(chat_id)
+
+
+def _check_antispam_and_banned(user_id: int, username: str = "", first_name: str = "") -> Tuple[bool, str]:
+    """Checks user ban status and applies 1-day ban if spamming is detected.
+    Absolute admin (Tuan Darfin) is 100% immune to bans and anti-spam.
+    Returns: (is_blocked: bool, alert_message: str)
+    """
+    if not user_id or user_id <= 0:
+        return False, ""
+
+    # Always register user interaction
+    try:
+        _engine.cache.register_bot_user(user_id, username, first_name)
+    except Exception:
+        pass
+
+    # 1. Absolute Admin Immunity: Never blocked, never banned, never rate-limited
+    if is_owner(user_id, username):
+        return False, ""
+
+    # 2. Existing Ban Check
+    is_banned, ban_reason, banned_until = _engine.cache.is_user_banned(user_id)
+    if is_banned:
+        if banned_until:
+            alert = (
+                f"⛔ <b>Akses Bot Dibatasi Sementara!</b>\n\n"
+                f"Akun Anda diblokir sementara karena: <b>{ban_reason}</b>\n"
+                f"📅 <i>Berlaku hingga:</i> <code>{banned_until} UTC</code>\n\n"
+                f"<i>Silakan tunggu hingga masa blokir berakhir.</i>"
+            )
+        else:
+            alert = (
+                f"⛔ <b>Akses Bot Ditutup!</b>\n\n"
+                f"Akun Anda telah diblokir dari bot ini.\n"
+                f"Alasan: <i>{ban_reason or 'Pelanggaran aturan bot'}</i>"
+            )
+        return True, alert
+
+    # 3. Anti-Spam Detection (Sliding Window)
+    now = time.time()
+    timestamps = _user_message_timestamps.setdefault(user_id, [])
+    timestamps = [t for t in timestamps if now - t < 3.0]
+    timestamps.append(now)
+    _user_message_timestamps[user_id] = timestamps
+
+    # Threshold: More than 5 messages in 3 seconds -> 24-hour (1 day) ban
+    if len(timestamps) > 5:
+        _engine.cache.ban_user(user_id, duration_seconds=86400, reason="Spam chat terus-menerus")
+        _user_message_timestamps.pop(user_id, None)
+        alert = (
+            "⚠️ <b>Peringatan Anti-Spam!</b>\n\n"
+            "Anda terdeteksi mengirim pesan secara terus-menerus (spamming).\n"
+            "Akun Anda otomatis <b>diblokir selama 1 hari (24 jam)</b>.\n\n"
+            "<i>Silakan kembali berinteraksi setelah masa hukuman berakhir.</i>"
+        )
+        return True, alert
+
+    return False, ""
 
 
 async def check_fsub_member(client: Client, user_id: int, chat_id_or_wm: Union[int, str, None] = None, username: str = "") -> bool:
@@ -1243,6 +1303,51 @@ async def send_admin_dashboard(client: Client, target, chat_id: int, user_id: in
             await target.reply_text(part, parse_mode=ParseMode.HTML, reply_markup=reply_markup, disable_web_page_preview=True)
         else:
             await client.send_message(chat_id, part, parse_mode=ParseMode.HTML, reply_markup=reply_markup, disable_web_page_preview=True)
+
+
+@app.on_message(group=-1)
+async def _global_user_activity_and_antispam_guard(client: Client, message: Message):
+    """Global message middleware: records user activity, enforces anti-spam and bans."""
+    if not message.from_user:
+        return
+
+    user_id = message.from_user.id
+    username = message.from_user.username or ""
+    first_name = message.from_user.first_name or ""
+
+    is_blocked, alert = _check_antispam_and_banned(user_id, username, first_name)
+    if is_blocked:
+        # Cooldown for sending ban alert so bot doesn't spam back
+        now = time.time()
+        last_sent = _user_last_ban_notice.get(user_id, 0)
+        if now - last_sent > 10.0 and alert:
+            _user_last_ban_notice[user_id] = now
+            try:
+                await message.reply_text(alert, parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+        message.stop_propagation()
+
+
+@app.on_callback_query(group=-1)
+async def _global_callback_user_guard(client: Client, query: CallbackQuery):
+    """Global callback middleware: blocks banned users from clicking bot buttons."""
+    if not query.from_user:
+        return
+
+    user_id = query.from_user.id
+    username = query.from_user.username or ""
+
+    if is_owner(user_id, username):
+        return
+
+    is_banned, ban_reason, _ = _engine.cache.is_user_banned(user_id)
+    if is_banned:
+        try:
+            await query.answer("⛔ Akses Anda ke bot ini telah diblokir.", show_alert=True)
+        except Exception:
+            pass
+        query.stop_propagation()
 
 
 @app.on_message(filters.command("start"))

@@ -56,3 +56,52 @@ class TestUserManagementCache(unittest.TestCase):
 
         page2_users, _ = self.cache.get_bot_users(page=2, page_size=10)
         self.assertEqual(len(page2_users), 4)
+
+
+class TestAntiSpamAndMiddleware(unittest.TestCase):
+    def test_absolute_admin_immunity(self):
+        """Absolute admin must be completely immune to anti-spam and bans."""
+        from bot.handlers import is_owner, _check_antispam_and_banned
+        from bot.config import ABSOLUTE_ADMIN_USER_IDS
+        admin_id = list(ABSOLUTE_ADMIN_USER_IDS)[0]
+
+        self.assertTrue(is_owner(admin_id))
+
+        # Sending 20 messages rapidly should NEVER trigger ban for absolute admin
+        for _ in range(20):
+            blocked, _ = _check_antispam_and_banned(admin_id, "dxstar22", "Darfin")
+            self.assertFalse(blocked)
+
+    def test_regular_user_spam_triggers_ban(self):
+        """Regular user typing continuously should trigger 1-day ban."""
+        from bot.handlers import _check_antispam_and_banned, _user_message_timestamps, _engine
+        user_id = 999111
+        _user_message_timestamps.pop(user_id, None)
+        _engine.cache.unblock_user(user_id)
+
+        # First message is OK
+        blocked, _ = _check_antispam_and_banned(user_id, "testuser", "Normal")
+        self.assertFalse(blocked)
+
+        # Rapidly spam messages (> 5 messages within 3 seconds)
+        banned = False
+        alert_msg = ""
+        for _ in range(6):
+            blocked, alert = _check_antispam_and_banned(user_id, "testuser", "Normal")
+            if blocked:
+                banned = True
+                alert_msg = alert
+                break
+
+        self.assertTrue(banned)
+        self.assertIn("1 hari", alert_msg.lower())
+
+        # Now is_user_banned in cache should be True
+        is_b, reason, _ = _engine.cache.is_user_banned(user_id)
+        self.assertTrue(is_b)
+        self.assertIn("spam", reason.lower())
+
+        # Subsequent messages should immediately be blocked
+        blocked, alert_sub = _check_antispam_and_banned(user_id, "testuser", "Normal")
+        self.assertTrue(blocked)
+
