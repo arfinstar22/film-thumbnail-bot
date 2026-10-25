@@ -127,16 +127,19 @@ class TestAestheticFeatures(unittest.TestCase):
         )
         texts = [[b.text for b in row] for row in kb.inline_keyboard]
 
-        # Clean, exact 4 buttons text
+        # Clean, exact 5 buttons text across 3 rows
         self.assertEqual(texts[0], ["📢 Gabung @film_indonesia1", "🎬 Tonton Trailer"])
         self.assertEqual(texts[1], ["💬 Request Film", "🔄 Bagikan Film"])
+        self.assertEqual(texts[2], ["🧹 Bersihkan Memory Setelah Nonton"])
 
-        # Native Bot API styles (Success Green, Danger Red)
+        # Native Bot API styles (Success Green, Danger Red, Primary Blue)
         bot_api_kb = _build_bot_api_reply_markup(kb)["inline_keyboard"]
         self.assertEqual(bot_api_kb[0][0]["style"], "success")   # Gabung: Green
         self.assertEqual(bot_api_kb[0][1]["style"], "danger")    # Trailer: Red
         self.assertEqual(bot_api_kb[1][0]["style"], "danger")    # Request: Red
         self.assertEqual(bot_api_kb[1][1]["style"], "success")   # Bagikan: Green
+        self.assertEqual(bot_api_kb[2][0]["style"], "primary")   # Bersihkan: Blue
+        self.assertEqual(bot_api_kb[2][0]["url"], "tg://settings/data/storage/clear-cache")
 
     # 6. PINNED CATALOG STYLED BUTTONS
     def test_pinned_catalog_styled_buttons(self):

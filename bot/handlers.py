@@ -637,7 +637,7 @@ def _build_bot_api_reply_markup(reply_markup):
             style = getattr(btn, "style", None)
             if not style:
                 text_lower = (btn.text or "").lower()
-                if "brosur" in text_lower or "sinopsis" in text_lower or "katalog" in text_lower or "eps" in text_lower:
+                if "brosur" in text_lower or "sinopsis" in text_lower or "katalog" in text_lower or "eps" in text_lower or "memory" in text_lower or "cache" in text_lower or "bersihkan" in text_lower:
                     style = "primary"
                 elif "trailer" in text_lower or "gabung" in text_lower or "join" in text_lower or "bagikan" in text_lower or "share" in text_lower or "cari" in text_lower or "list" in text_lower:
                     style = "success"
@@ -866,10 +866,18 @@ def build_channel_post_keyboard(
     btn_share = InlineKeyboardButton("🔄 Bagikan Film", url=share_url)
     btn_share.style = "success"
 
-    return InlineKeyboardMarkup([
-        [btn_join, btn_trailer],
-        [btn_req, btn_share]
-    ])
+    # Row 3: 🧹 Bersihkan Memory Setelah Nonton (Blue / Primary)
+    btn_clear_cache = InlineKeyboardButton("🧹 Bersihkan Memory Setelah Nonton", url="tg://settings/data/storage/clear-cache")
+    btn_clear_cache.style = "primary"
+
+    rows = []
+    if series_nav_row:
+        rows.append(series_nav_row)
+    rows.append([btn_join, btn_trailer])
+    rows.append([btn_req, btn_share])
+    rows.append([btn_clear_cache])
+
+    return InlineKeyboardMarkup(rows)
 
 
 def get_caption_kb(message_id: int, watermark: str):
