@@ -1597,9 +1597,24 @@ class MetadataCache:
                 username TEXT,
                 first_name TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_blocked INTEGER DEFAULT 0,
+                banned_until TIMESTAMP,
+                ban_reason TEXT
             )
         """)
+        try:
+            conn.execute("ALTER TABLE bot_users ADD COLUMN is_blocked INTEGER DEFAULT 0")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE bot_users ADD COLUMN banned_until TIMESTAMP")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE bot_users ADD COLUMN ban_reason TEXT")
+        except Exception:
+            pass
         conn.execute("CREATE INDEX IF NOT EXISTS idx_users_active ON bot_users (last_active)")
 
     def register_bot_user(self, user_id: int, username: str = "", first_name: str = ""):
@@ -1671,6 +1686,151 @@ class MetadataCache:
         except Exception as e:
             logger.error(f"Get user_id error: {e}")
         return None
+
+    def block_user(self, user_id: int, reason: str = "") -> bool:
+        if not user_id or not isinstance(user_id, int) or user_id <= 0:
+            return False
+        try:
+            conn = self._conn()
+            self._ensure_users_table(conn)
+            clean_reason = (reason or "").strip()
+            conn.execute("""
+                UPDATE bot_users
+                SET is_blocked = 1, ban_reason = ?, banned_until = NULL
+                WHERE user_id = ?
+            """, (clean_reason, user_id))
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Block user error: {e}")
+            return False
+
+    def unblock_user(self, user_id: int) -> bool:
+        if not user_id or not isinstance(user_id, int) or user_id <= 0:
+            return False
+        try:
+            conn = self._conn()
+            self._ensure_users_table(conn)
+            conn.execute("""
+                UPDATE bot_users
+                SET is_blocked = 0, banned_until = NULL, ban_reason = NULL
+                WHERE user_id = ?
+            """, (user_id,))
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Unblock user error: {e}")
+            return False
+
+    def ban_user(self, user_id: int, duration_seconds: int = 86400, reason: str = "Spam chat terus-menerus") -> bool:
+        if not user_id or not isinstance(user_id, int) or user_id <= 0:
+            return False
+        try:
+            conn = self._conn()
+            self._ensure_users_table(conn)
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            expiry_dt = now_utc + datetime.timedelta(seconds=duration_seconds)
+            expiry_str = expiry_dt.strftime("%Y-%m-%d %H:%M:%S")
+            clean_reason = (reason or "").strip()
+
+            conn.execute("""
+                UPDATE bot_users
+                SET banned_until = ?, ban_reason = ?
+                WHERE user_id = ?
+            """, (expiry_str, clean_reason, user_id))
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ban user error: {e}")
+            return False
+
+    def is_user_banned(self, user_id: int) -> Tuple[bool, str, Optional[str]]:
+        """Checks if a user is currently blocked or banned.
+        Returns: (is_banned: bool, reason: str, banned_until: Optional[str])
+        """
+        if not user_id or not isinstance(user_id, int) or user_id <= 0:
+            return False, "", None
+        try:
+            conn = self._conn()
+            self._ensure_users_table(conn)
+            cur = conn.execute("""
+                SELECT is_blocked, banned_until, ban_reason
+                FROM bot_users
+                WHERE user_id = ?
+                LIMIT 1
+            """, (user_id,))
+            row = cur.fetchone()
+            if not row:
+                return False, "", None
+
+            is_blocked, banned_until, ban_reason = row[0], row[1], row[2]
+            if is_blocked:
+                return True, ban_reason or "Diblokir oleh Admin", None
+
+            if banned_until:
+                now_utc = datetime.datetime.now(datetime.timezone.utc)
+                try:
+                    exp_dt = datetime.datetime.strptime(str(banned_until).strip(), "%Y-%m-%d %H:%M:%S")
+                    exp_dt = exp_dt.replace(tzinfo=datetime.timezone.utc)
+                except Exception:
+                    try:
+                        exp_dt = datetime.datetime.fromisoformat(str(banned_until).strip())
+                        if exp_dt.tzinfo is None:
+                            exp_dt = exp_dt.replace(tzinfo=datetime.timezone.utc)
+                    except Exception:
+                        exp_dt = now_utc
+
+                if now_utc < exp_dt:
+                    return True, ban_reason or "Spam chat terus-menerus", str(banned_until)
+                else:
+                    conn.execute("""
+                        UPDATE bot_users
+                        SET banned_until = NULL, ban_reason = NULL
+                        WHERE user_id = ?
+                    """, (user_id,))
+                    conn.commit()
+                    return False, "", None
+
+            return False, "", None
+        except Exception as e:
+            logger.error(f"Check is_user_banned error: {e}")
+            return False, "", None
+
+    def get_bot_users(self, page: int = 1, page_size: int = 10) -> Tuple[List[Dict[str, Any]], int]:
+        """Returns paginated list of bot users with ban status."""
+        users = []
+        total_pages = 1
+        try:
+            conn = self._conn()
+            self._ensure_users_table(conn)
+            cur = conn.execute("SELECT COUNT(*) FROM bot_users WHERE user_id > 0")
+            total_count = cur.fetchone()[0] or 0
+            if total_count > 0:
+                total_pages = max(1, (total_count + page_size - 1) // page_size)
+            page = max(1, min(page, total_pages))
+            offset = (page - 1) * page_size
+
+            cur = conn.execute("""
+                SELECT user_id, username, first_name, created_at, last_active, is_blocked, banned_until, ban_reason
+                FROM bot_users
+                WHERE user_id > 0
+                ORDER BY last_active DESC
+                LIMIT ? OFFSET ?
+            """, (page_size, offset))
+            for row in cur.fetchall():
+                users.append({
+                    "user_id": int(row[0]),
+                    "username": row[1] or "",
+                    "first_name": row[2] or "",
+                    "created_at": str(row[3] or ""),
+                    "last_active": str(row[4] or ""),
+                    "is_blocked": int(row[5] or 0),
+                    "banned_until": str(row[6]) if row[6] else None,
+                    "ban_reason": row[7] or ""
+                })
+        except Exception as e:
+            logger.error(f"Get bot users error: {e}")
+        return users, total_pages
 
     # ------------------ CONTENT PROTECTION ------------------
     def get_protect_content(self, chat_id: int) -> bool:
