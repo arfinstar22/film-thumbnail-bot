@@ -307,44 +307,149 @@ class CaptionGenerator:
 
         return self._clamp_caption(lines, synopsis, synopsis_idx)
 
+    @staticmethod
+    def _close_unclosed_tags(text: str) -> str:
+        open_tags = re.findall(r'<([a-zA-Z0-9]+)(?:\s+[^>]*)?>', text)
+        close_tags = re.findall(r'</([a-zA-Z0-9]+)>', text)
+        void_tags = {'img', 'br', 'hr', 'input', 'meta', 'link'}
+        stack = [t for t in open_tags if t not in void_tags]
+        for c in close_tags:
+            if c in stack:
+                stack.remove(c)
+        for tag in reversed(stack):
+            text += f"</{tag}>"
+        return text
+
     def _clamp_caption(self, lines: List[str], synopsis: str, synopsis_idx: Optional[int]) -> str:
-        """Guarantees caption length never exceeds Telegram's 1024 char limit while preserving valid HTML."""
-        result_text = "\n".join(lines)
+        """Guarantees caption length strictly never exceeds Telegram's 1024 char limit while preserving valid HTML."""
+        def _get_text(cur_lines: List[str]) -> str:
+            cleaned = []
+            prev_blank = False
+            for l in cur_lines:
+                is_blank = (l.strip() == "")
+                if is_blank and prev_blank:
+                    continue
+                cleaned.append(l)
+                prev_blank = is_blank
+            return "\n".join(cleaned).strip()
+
+        result_text = _get_text(lines)
         if len(result_text) <= 1024:
             return result_text
 
-        # 1. First attempt: trim synopsis cleanly
-        if synopsis and synopsis_idx is not None and synopsis_idx < len(lines):
-            excess = len(result_text) - 1000
-            trimmed_len = max(30, len(synopsis) - excess - 20)
-            trimmed = synopsis[:trimmed_len].rstrip() + "..."
-            lines[synopsis_idx] = f"<blockquote expandable>\n📖 <b>SINOPSIS LENGKAP:</b>\n{html.escape(trimmed)}\n</blockquote>"
-            result_text = "\n".join(lines)
+        def _remove_block(cur_lines: List[str], marker: str) -> List[str]:
+            out = []
+            in_block = False
+            for l in cur_lines:
+                if marker in l:
+                    in_block = True
+                    if out and "<blockquote expandable>" in out[-1]:
+                        out.pop()
+                    if out and out[-1] == "":
+                        out.pop()
+                    continue
+                if in_block:
+                    if "</blockquote>" in l:
+                        in_block = False
+                    continue
+                out.append(l)
+            return out
 
-        # 2. Second attempt: if still > 1024, drop optional 'Tonton Juga Film Lain' block
-        if len(result_text) > 1024:
+        # 1. Drop optional 'TONTON JUGA FILM LAIN'
+        lines = _remove_block(lines, "TONTON JUGA FILM LAIN")
+        result_text = _get_text(lines)
+        if len(result_text) <= 1024:
+            return result_text
+
+        # 2. Drop secondary spec keys from DETAIL SPESIFIKASI & PEMAIN
+        secondary_keys = [
+            "🏷️ <b>Judul Asli :</b>",
+            "📅 <b>Rilis :</b>",
+            "✍️ <b>Penulis :</b>",
+            "🏢 <b>Studio :</b>",
+            "🌍 <b>Negara :</b>",
+            "🔞 <b>Rating Usia :</b>",
+            "🏷️ <b>Release :</b>",
+            "💿 <b>Video :</b>",
+        ]
+        lines = [l for l in lines if not any(k in l for k in secondary_keys)]
+        result_text = _get_text(lines)
+        if len(result_text) <= 1024:
+            return result_text
+
+        # 3. Trim URUTAN NONTON (keep current film + 1 sibling before and after)
+        if any("URUTAN NONTON:" in l for l in lines):
             new_lines = []
-            skip = False
-            for line in lines:
-                if "TONTON JUGA FILM LAIN" in line:
-                    skip = True
-                    if new_lines and "<blockquote expandable>" in new_lines[-1]:
-                        new_lines.pop()
+            in_col = False
+            col_parts = []
+            for l in lines:
+                if "URUTAN NONTON:" in l:
+                    in_col = True
+                    new_lines.append(l)
                     continue
-                if skip:
-                    if "</blockquote>" in line:
-                        skip = False
+                if in_col:
+                    if "</blockquote>" in l:
+                        in_col = False
+                        curr_idx = next((i for i, p in enumerate(col_parts) if "(Film Ini)" in p), 0)
+                        keep_indices = {curr_idx}
+                        if curr_idx > 0:
+                            keep_indices.add(curr_idx - 1)
+                        if curr_idx + 1 < len(col_parts):
+                            keep_indices.add(curr_idx + 1)
+                        for i, p in enumerate(col_parts):
+                            if i in keep_indices:
+                                new_lines.append(p)
+                        hidden_count = len(col_parts) - len(keep_indices)
+                        if hidden_count > 0:
+                            new_lines.append(f"• <i>...dan {hidden_count} film lainnya</i>")
+                        new_lines.append(l)
+                        continue
+                    col_parts.append(l)
                     continue
-                new_lines.append(line)
+                new_lines.append(l)
             lines = new_lines
-            result_text = "\n".join(lines)
+            result_text = _get_text(lines)
+            if len(result_text) <= 1024:
+                return result_text
 
-        # 3. Third attempt: aggressively shorten synopsis if still over 1024
-        if len(result_text) > 1024 and synopsis and synopsis_idx is not None and synopsis_idx < len(lines):
-            excess = len(result_text) - 1010
-            short_len = max(20, len(synopsis) - excess - 30)
-            short_syn = synopsis[:short_len].rstrip() + "..."
-            lines[synopsis_idx] = f"<blockquote expandable>\n📖 <b>SINOPSIS LENGKAP:</b>\n{html.escape(short_syn)}\n</blockquote>"
-            result_text = "\n".join(lines)
+        # 4. Drop POSTER & BANNER HD block (video already includes thumbnail/media)
+        lines = _remove_block(lines, "POSTER & BANNER HD")
+        result_text = _get_text(lines)
+        if len(result_text) <= 1024:
+            return result_text
+
+        # 5. Trim synopsis cleanly
+        s_idx = next((i for i, l in enumerate(lines) if "SINOPSIS" in l), None)
+        if synopsis and s_idx is not None and s_idx < len(lines):
+            excess = len(result_text) - 1000
+            avail = max(40, len(synopsis) - excess)
+            trimmed = synopsis[:avail].rstrip() + "..."
+            lines[s_idx] = f"<blockquote expandable>\n📖 <b>SINOPSIS LENGKAP:</b>\n{html.escape(trimmed)}\n</blockquote>"
+            result_text = _get_text(lines)
+            if len(result_text) <= 1024:
+                return result_text
+
+        # 6. Drop URUTAN NONTON completely if still too long
+        lines = _remove_block(lines, "URUTAN NONTON:")
+        result_text = _get_text(lines)
+        if len(result_text) <= 1024:
+            return result_text
+
+        # 7. Drop hashtags
+        lines = [l for l in lines if not l.strip().startswith("#")]
+        result_text = _get_text(lines)
+        if len(result_text) <= 1024:
+            return result_text
+
+        # 8. Drop synopsis completely
+        lines = _remove_block(lines, "SINOPSIS")
+        result_text = _get_text(lines)
+        if len(result_text) <= 1024:
+            return result_text
+
+        # 9. Ultimate fallback: hard cut at 1000 characters and close HTML tags
+        if len(result_text) > 1024:
+            cut = result_text[:1000].rstrip() + "..."
+            result_text = self._close_unclosed_tags(cut)
 
         return result_text

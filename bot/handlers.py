@@ -6638,15 +6638,34 @@ async def _process_video_task(client: Client, msg: Message):
             logger.debug(f"Thumbnail generator fallback: {gte}")
             thumb_path = None
 
-        sent = await client.send_video(
-            chat_id=chat_id,
-            video=media.file_id,
-            caption=caption,
-            parse_mode=ParseMode.HTML,
-            thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,
-            supports_streaming=True,
-            reply_markup=get_caption_kb(msg.id, wm)
-        )
+        try:
+            sent = await client.send_video(
+                chat_id=chat_id,
+                video=media.file_id,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,
+                supports_streaming=True,
+                reply_markup=get_caption_kb(msg.id, wm)
+            )
+        except Exception as sve:
+            if "MEDIA_CAPTION_TOO_LONG" in str(sve) or "MESSAGE_TOO_LONG" in str(sve):
+                logger.warning(f"send_video caption too long ({len(caption)} chars), falling back to safe caption: {sve}")
+                t_str = html.escape((meta.get("title") or filename).upper())
+                y_str = f" ({meta.get('year')})" if meta.get("year") else ""
+                g_str = f"\n🎭 <i>{html.escape(str(meta.get('genre')))}</i>" if meta.get("genre") else ""
+                caption = f"🎬 <b>{t_str}{y_str}</b>{g_str}\n🍿 <b>Channel:</b> {wm}"
+                sent = await client.send_video(
+                    chat_id=chat_id,
+                    video=media.file_id,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,
+                    supports_streaming=True,
+                    reply_markup=get_caption_kb(msg.id, wm)
+                )
+            else:
+                raise sve
         if sent:
             await _apply_expandable_caption(chat_id, sent.id, caption, get_caption_kb(msg.id, wm))
 
