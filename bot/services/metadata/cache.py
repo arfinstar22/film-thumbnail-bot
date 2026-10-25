@@ -88,11 +88,10 @@ def is_invalid_movie_title(title: str, caption: str = "") -> bool:
         "katalog koleksi film",
         "katalog & daftar isi",
         "pembaruan tampilan",
-        "stay tuned",
         "pengumuman",
         "update tampilan",
         "aturan",
-        "rules",
+        "rules channel",
         "donasi",
         "buka katalog",
         "request film",
@@ -105,20 +104,19 @@ def is_invalid_movie_title(title: str, caption: str = "") -> bool:
     if any(k in t_lower for k in BAD_PATTERNS):
         return True
 
-    # 2. Conversational sentence markers
-    CONV_WORDS = ("nih", "yuk", "dong", "tunggu update", "selanjutnya", "stay tuned")
-    if any(w in t_lower for w in CONV_WORDS):
+    # 2. Conversational sentence markers (must use word boundaries, never substring match)
+    has_year = bool(re.search(r"\b(19\d\d|20\d\d)\b", t_clean))
+    if not has_year:
+        if re.search(r"\b(stay tuned|tunggu update|tunggu update selanjutnya)\b", t_lower):
+            return True
+        if re.search(r"\b(nih|yuk|dong)\b", t_lower) and re.search(r"\b(guys|kawan|min|admin|halo|tonton|nonton)\b", t_lower):
+            return True
+
+    # 3. Very long non-movie paragraphs without a release year
+    if len(t_clean) > 85 and not has_year:
         return True
 
-    # 3. Exclamations in sentences (e.g. "Nih Stay Tuned Terus!")
-    if "!" in t_clean and len(t_clean.split()) > 3:
-        return True
-
-    # 4. Long title without a release year
-    if len(t_clean) > 55 and not re.search(r"\b(19\d\d|20\d\d)\b", t_clean):
-        return True
-
-    # 5. Caption contains catalog marker
+    # 4. Caption contains explicit catalog marker
     cap_lower = (caption or "").lower()
     if any(k in cap_lower for k in ("katalog resmi", "katalog koleksi film", "katalog & daftar isi", "pusat streaming & download")):
         return True
