@@ -777,7 +777,7 @@ async def _apply_expandable_caption(chat_id: Union[int, str], message_id: int, c
 
 
 CHANNEL_REACTION_EMOJIS: List[str] = [
-    "🔥", "🍿", "👍", "❤️", "🎉", "👏", "⚡", "😍", "🤩", "💯", "🎬", "✨"
+    "🔥", "👍", "❤️", "🎉", "👏", "⚡", "😍", "🤩", "💯", "🥰", "👌", "😎"
 ]
 
 
@@ -788,52 +788,76 @@ async def _send_random_channel_reaction(
     emoji: Optional[str] = None
 ) -> bool:
     """Sends a random reaction emoji to a newly published channel post."""
-    chosen_emoji = emoji or random.choice(CHANNEL_REACTION_EMOJIS)
     clean_chat_id = (
         chat_id
         if (isinstance(chat_id, int) or str(chat_id).startswith("-100"))
         else ("@" + str(chat_id).lstrip("@"))
     )
 
+    # Allow brief propagation buffer for newly sent message to settle on Telegram DCs
+    await asyncio.sleep(0.8)
+
+    # Prioritize requested emoji if specified, otherwise shuffle candidates
+    if emoji:
+        candidates = [emoji] + [e for e in CHANNEL_REACTION_EMOJIS if e != emoji]
+    else:
+        candidates = random.sample(CHANNEL_REACTION_EMOJIS, len(CHANNEL_REACTION_EMOJIS))
+
     # 1. Try native Telegram Bot API setMessageReaction
     if BOT_TOKEN:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/setMessageReaction"
-        payload = {
-            "chat_id": clean_chat_id,
-            "message_id": int(message_id),
-            "reaction": [{"type": "emoji", "emoji": chosen_emoji}]
-        }
 
-        def _sync_react():
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"}
-            )
-            with urllib.request.urlopen(req, timeout=3.5) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                return bool(data.get("ok"))
+        for cand_emoji in candidates:
+            payload = {
+                "chat_id": clean_chat_id,
+                "message_id": int(message_id),
+                "reaction": [{"type": "emoji", "emoji": cand_emoji}]
+            }
 
-        try:
-            ok = await asyncio.to_thread(_sync_react)
-            if ok:
-                logger.info(f"Bot API reaction {chosen_emoji} set on {clean_chat_id}:{message_id}")
-                return True
-        except Exception as e:
-            logger.debug(f"Bot API reaction failed ({e}), attempting Pyrogram fallback...")
+            def _sync_react(curr_payload=payload):
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps(curr_payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"}
+                )
+                with urllib.request.urlopen(req, timeout=5.0) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    return bool(data.get("ok"))
+
+            try:
+                ok = await asyncio.to_thread(_sync_react)
+                if ok:
+                    logger.info(f"Bot API reaction {cand_emoji} set on {clean_chat_id}:{message_id}")
+                    return True
+            except urllib.error.HTTPError as he:
+                body = he.read().decode("utf-8", errors="ignore")
+                if "REACTION_INVALID" in body:
+                    logger.warning(f"Bot API reaction {cand_emoji} invalid for {clean_chat_id}, trying next...")
+                    continue
+                logger.warning(f"Bot API setMessageReaction HTTP {he.code} on {clean_chat_id}:{message_id}: {body}")
+                break
+            except Exception as e:
+                logger.warning(f"Bot API reaction error ({e}), trying Pyrogram fallback...")
+                break
 
     # 2. Fallback to Pyrogram client.send_reaction
     if client and hasattr(client, "send_reaction"):
-        try:
-            await client.send_reaction(
-                chat_id=clean_chat_id,
-                message_id=int(message_id),
-                emoji=chosen_emoji
-            )
-            logger.info(f"Pyrogram reaction {chosen_emoji} set on {clean_chat_id}:{message_id}")
-            return True
-        except Exception as pe:
-            logger.debug(f"Pyrogram reaction fallback failed: {pe}")
+        for cand_emoji in candidates:
+            try:
+                await client.send_reaction(
+                    chat_id=clean_chat_id,
+                    message_id=int(message_id),
+                    emoji=cand_emoji
+                )
+                logger.info(f"Pyrogram reaction {cand_emoji} set on {clean_chat_id}:{message_id}")
+                return True
+            except Exception as pe:
+                err_text = str(pe)
+                if "REACTION_INVALID" in err_text or "ReactionInvalid" in err_text:
+                    logger.warning(f"Pyrogram reaction {cand_emoji} invalid for {clean_chat_id}, trying next...")
+                    continue
+                logger.warning(f"Pyrogram send_reaction failed: {pe}")
+                break
 
     return False
 
@@ -5869,9 +5893,11 @@ async def publish_video_to_channel(
             if result and result.get("message_id"):
                 # Create a minimal Message-like object for downstream compatibility
                 class _RichMsg:
-                    def __init__(self, mid):
+                    def __init__(self, mid, cid=None):
                         self.id = mid
-                sent_channel = _RichMsg(result["message_id"])
+                        self.chat_id = cid
+                chat_id_res = result.get("chat", {}).get("id") if isinstance(result.get("chat"), dict) else None
+                sent_channel = _RichMsg(result["message_id"], chat_id_res)
                 rich_post_success = True
                 logger.info(f"Rich article post published: {title_display} (msg_id={sent_channel.id})")
         except Exception as rich_err:
@@ -5982,9 +6008,10 @@ async def publish_video_to_channel(
     # Reaksi acak otomatis ke postingan baru di channel
     if sent_channel and hasattr(sent_channel, "id") and sent_channel.id:
         try:
-            await _send_random_channel_reaction(client, watermark, sent_channel.id)
+            target_chat = getattr(sent_channel, "chat_id", None) or getattr(getattr(sent_channel, "chat", None), "id", None) or watermark
+            await _send_random_channel_reaction(client, target_chat, sent_channel.id)
         except Exception as rx_err:
-            logger.debug(f"Failed to send random channel reaction: {rx_err}")
+            logger.warning(f"Failed to send random channel reaction: {rx_err}")
 
     # Kirim stiker pemisah otomatis di bawah film
     await _send_channel_divider(client, chat_id, watermark)
