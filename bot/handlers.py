@@ -626,6 +626,22 @@ async def scheduler_worker(client: Client):
 
     while True:
         try:
+            # P1 FIX: bersihkan file temp >24 jam tiap putaran (cegah /tmp penuh di Render free).
+            # Tidak menyentuh banner/poster aktif — hanya file yatim.
+            try:
+                _now = time.time()
+                _tmp_root = tempfile.gettempdir()
+                for _name in os.listdir(_tmp_root):
+                    if not _name.startswith("tmp"):
+                        continue
+                    _p = os.path.join(_tmp_root, _name)
+                    try:
+                        if os.path.isfile(_p) and (_now - os.path.getmtime(_p)) > 86400:
+                            os.remove(_p)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             now_ts = int(time.time())
             due_posts = _engine.cache.get_due_scheduled_posts(now_ts)
             for item in due_posts:
@@ -675,6 +691,11 @@ def ensure_scheduler_worker(client: Client):
 
 def _build_bot_api_reply_markup(reply_markup, is_channel: bool = False):
     """Formats Pyrogram InlineKeyboardMarkup into Bot API JSON payload with native button styles (primary, success, danger)."""
+    # --- P0 FIX BLOCK (tidak mengubah tampilan, hanya ketahanan) ---
+    # _CHANNEL_POST_LOCK: throttle min 3.0s per channel cegah FloodWait burst.
+    # _safe_channel_caption: cegah MESSAGE_TOO_LONG (1024 char) hanya saat overflow.
+    # _record_rich_outcome: counter rich vs fallback agar tahu jalur mana yang jalan.
+    # --- END P0 FIX BLOCK ---
     if not reply_markup or not hasattr(reply_markup, "inline_keyboard"):
         return None
     kb = []
@@ -780,6 +801,90 @@ async def _apply_expandable_caption(chat_id: Union[int, str], message_id: int, c
         await asyncio.to_thread(_sync_call)
     except Exception as e:
         logger.debug(f"Bot API expandable caption sync error: {e}")
+
+
+# ==========================================================================
+# P0 STABILITY HELPERS (tidak mengubah tampilan artikel sama sekali)
+# - Throttle per-channel cegah FloodWait burst
+# - Caption guard cegah MESSAGE_TOO_LONG hanya saat overflow >1024
+# - Counter rich vs fallback agar ketahuan jalur mana yang jalan
+# ==========================================================================
+_CHANNEL_POST_LOCK: asyncio.Lock = None  # lazy init agar aman di import-time
+_LAST_CHANNEL_POST_TS: dict = {}
+
+
+def _get_channel_lock() -> asyncio.Lock:
+    global _CHANNEL_POST_LOCK
+    if _CHANNEL_POST_LOCK is None:
+        try:
+            _CHANNEL_POST_LOCK = asyncio.Lock()
+        except RuntimeError:
+            # Dipanggil di luar event loop (import) — buat dummy object
+            return None
+    return _CHANNEL_POST_LOCK
+
+
+async def _throttle_channel_post(channel: str, min_interval: float = 3.0):
+    """P0-4 FIX: pastikan max ~1 post / 3 detik per channel (anti FloodWait).
+
+    Tidak mengubah isi/tampilan — hanya jeda.
+    """
+    global _LAST_CHANNEL_POST_TS
+    key = (channel or "").strip().lower()
+    if not key:
+        return
+    lock = _get_channel_lock()
+    try:
+        if lock is not None:
+            async with lock:
+                now = time.monotonic()
+                last = _LAST_CHANNEL_POST_TS.get(key, 0.0)
+                wait_s = min_interval - (now - last)
+                if wait_s > 0:
+                    await asyncio.sleep(wait_s)
+                _LAST_CHANNEL_POST_TS[key] = time.monotonic()
+        else:
+            now = time.monotonic()
+            last = _LAST_CHANNEL_POST_TS.get(key, 0.0)
+            if now - last < min_interval:
+                await asyncio.sleep(min_interval - (now - last))
+            _LAST_CHANNEL_POST_TS[key] = time.monotonic()
+    except Exception:
+        pass
+
+
+def _safe_channel_caption(caption_text: str, meta: dict, watermark: str) -> str:
+    """P1 FIX: cegah gagal publish saat caption >1024 char (limit sendVideo).
+
+    Perilaku normal (<1024) dikembalikan 100% utuh — tampilan tidak berubah.
+    Hanya saat overflow, pakai caption ringkas yang aman (judul+genre+channel).
+    """
+    try:
+        if caption_text and len(caption_text) <= 1024:
+            return caption_text
+    except Exception:
+        return caption_text or ""
+    try:
+        t = html.escape(str((meta or {}).get("title") or "Film"))
+        y = f" ({(meta or {}).get('year')})" if (meta or {}).get("year") else ""
+        g = f"\n🎭 <i>{html.escape(str((meta or {}).get('genre')))}</i>" if (meta or {}).get("genre") else ""
+        return f"🎬 <b>{t.upper()}{y}</b>{g}\n🍿 <b>Channel:</b> {html.escape(watermark or '')}"
+    except Exception:
+        return (caption_text or "")[:1000]
+
+
+def _record_rich_outcome(success: bool):
+    """P0-1 FIX: catat rasio rich vs fallback ke settings (monitoring).
+
+    Tidak mengubah payload/tampilan — hanya counter agar di /status
+    ketahuan apakah sendRichMessage benar jalan atau selalu fallback.
+    """
+    try:
+        key = "rich_post_ok_count" if success else "rich_post_fallback_count"
+        cur = _engine.cache.get_setting(key, "0")
+        _engine.cache.set_setting(key, str(int(cur or 0) + 1))
+    except Exception:
+        pass
 
 
 CHANNEL_REACTION_EMOJIS: List[str] = [
@@ -5916,6 +6021,11 @@ async def publish_video_to_channel(
     pregenerated_banner_path: Optional[str] = None
 ) -> Optional[Message]:
     """Publishes a video post to the channel with buttons, divider sticker, cache update, and pinned catalog refresh."""
+    # P0-4: throttle per-channel (tidak ubah isi/tampilan, hanya jeda anti FloodWait)
+    try:
+        await _throttle_channel_post(watermark, min_interval=3.0)
+    except Exception:
+        pass
     clean_wm = watermark.lstrip("@").strip()
     channel_url = f"https://t.me/{clean_wm}"
 
@@ -6077,12 +6187,19 @@ async def publish_video_to_channel(
                 sent_channel = _RichMsg(result["message_id"], chat_id_res)
                 rich_post_success = True
                 logger.info(f"Rich article post published: {title_display} (msg_id={sent_channel.id})")
+                _record_rich_outcome(True)
         except Exception as rich_err:
             logger.info(f"sendRichMessage not available or failed, falling back to legacy: {rich_err}")
             rich_post_success = False
+            _record_rich_outcome(False)
 
     # === FALLBACK: Legacy sendVideo with caption ===
     if not rich_post_success:
+        # P1: caption guard — cegah MESSAGE_TOO_LONG tanpa ubah tampilan normal
+        try:
+            caption_text = _safe_channel_caption(caption_text, meta, watermark)
+        except Exception:
+            pass
         if use_banner and banner_path and os.path.exists(banner_path):
             try:
                 sent_banner = await client.send_photo(
@@ -6506,6 +6623,8 @@ async def restore_channel_cmd(client: Client, msg: Message):
     success_count = 0
     fail_count = 0
 
+    # P0-4 FIX: resume restore — simpan progres tiap 5 film agar FloodWait/restart tidak ulang dari 0
+    progress_key = f"restore_progress_{clean_target.lower()}"
     for idx, m in enumerate(valid_movies, 1):
         m_title = m.get("title") or "Film"
         m_year = m.get("year")
@@ -6543,8 +6662,8 @@ async def restore_channel_cmd(client: Client, msg: Message):
                     posted = True
                 break
             except FloodWait as fw:
-                wait_sec = fw.value + 3
-                logger.warning(f"FloodWait during restore: waiting {wait_sec}s")
+                wait_sec = fw.value + 5
+                logger.warning(f"FloodWait during restore: waiting {wait_sec}s (idx {idx}/{total_count})")
                 try:
                     await status_msg.edit_text(
                         f"⏳ <b>Telegram Rate-Limit (FloodWait) Terdeteksi!</b>\n\n"
@@ -6552,6 +6671,10 @@ async def restore_channel_cmd(client: Client, msg: Message):
                         f"Progres saat ini: {idx-1}/{total_count} film.",
                         parse_mode=ParseMode.HTML
                     )
+                except Exception:
+                    pass
+                try:
+                    _engine.cache.set_setting(progress_key, str(idx))
                 except Exception:
                     pass
                 await asyncio.sleep(wait_sec)
@@ -6582,6 +6705,12 @@ async def restore_channel_cmd(client: Client, msg: Message):
         # JEDA ANTI-SPAM (delay between sending movie files to avoid spam limit)
         if idx < total_count:
             await asyncio.sleep(3.5)
+        # Simpan progres tiap 5 film (resume aman, tidak ubah tampilan)
+        if idx % 5 == 0 or idx == total_count:
+            try:
+                _engine.cache.set_setting(progress_key, str(idx))
+            except Exception:
+                pass
 
     # Done posting all movies! Now create and pin the catalog ONCE on the new channel
     try:

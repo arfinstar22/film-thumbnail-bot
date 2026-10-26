@@ -92,28 +92,42 @@ class TMDbService:
             return False
 
     def _http_get(self, endpoint: str, params: Dict[str, Any], timeout: float = 3.5) -> Optional[Dict[str, Any]]:
+        # P1 FIX: retry + backoff untuk 429/timeout sementara.
+        # Tidak mengubah parsing/selection — hanya ketahanan jaringan.
+        import time as _t
         api_key = self.get_api_key()
         if not api_key:
             return None
-        
+
         query_params = dict(params)
         query_params["api_key"] = api_key
         encoded_query = urllib.parse.urlencode(query_params)
         full_url = f"{self.BASE_URL}/{endpoint}?{encoded_query}"
 
-        try:
-            req = urllib.request.Request(full_url, headers=self.headers)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            if e.code == 401:
-                logger.warning("TMDb API Error: 401 Unauthorized. Invalid API key.")
-            elif e.code == 429:
-                logger.warning("TMDb API Error: 429 Rate Limit exceeded.")
-            else:
-                logger.debug(f"TMDb HTTP error {e.code} on {endpoint}: {e}")
-        except Exception as e:
-            logger.debug(f"TMDb request failed on {endpoint}: {e}")
+        for attempt in range(3):
+            try:
+                req = urllib.request.Request(full_url, headers=self.headers)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                if e.code == 401:
+                    logger.warning("TMDb API Error: 401 Unauthorized. Invalid API key.")
+                    return None
+                elif e.code == 429:
+                    wait_s = 1.0 * (attempt + 1)
+                    logger.warning(f"TMDb API Error: 429 Rate Limit exceeded. Retry in {wait_s}s (attempt {attempt + 1}/3).")
+                    _t.sleep(wait_s)
+                    continue
+                else:
+                    logger.debug(f"TMDb HTTP error {e.code} on {endpoint}: {e}")
+                    return None
+            except Exception as e:
+                # Timeout / DNS sementara → retry 1x, selebihnya serahkan ke fallback
+                if attempt < 2 and ("timed out" in str(e).lower() or "temporary" in str(e).lower() or "urlopen" in str(type(e).__name__).lower()):
+                    _t.sleep(0.5 * (attempt + 1))
+                    continue
+                logger.debug(f"TMDb request failed on {endpoint}: {e}")
+                return None
         return None
 
     def search_movie(

@@ -1,6 +1,8 @@
-pyrogram
-python-dotenv
-aiofiles
-groq
-Pillow
-psycopg2-binary
+# Pinned versions (P0-3 FIX): deploy 6 bulan lagi tidak tiba-tiba breaking.
+# Jangan pakai package tanpa versi — major baru Pyrogram/Groq bisa mematikan bot.
+pyrogram>=2.0.106,<3.0.0
+python-dotenv>=1.0.0,<2.0.0
+aiofiles>=23.2.1,<24.0.0
+groq>=0.11.0,<1.0.0
+Pillow>=10.0.0,<11.0.0
+psycopg2-binary>=2.9.9,<3.0.0

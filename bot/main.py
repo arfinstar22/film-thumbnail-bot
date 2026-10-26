@@ -37,6 +37,17 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(res).encode("utf-8"))
         if self.path == "/restart":
             import json
+            # P0-2 FIX: /restart tanpa auth = siapa pun bisa matikan bot (DoS).
+            # Sekarang wajib header X-Restart-Token == env RESTART_TOKEN.
+            # Kalau RESTART_TOKEN kosong di env, endpoint dinonaktifkan total.
+            expected = os.getenv("RESTART_TOKEN", "").strip()
+            provided = self.headers.get("X-Restart-Token", "").strip()
+            if not expected or provided != expected:
+                self.send_response(403)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "forbidden", "message": "Restart endpoint disabled or invalid token"}).encode("utf-8"))
+                return
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -63,6 +74,13 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 "supabase_enabled": supabase_on,
                 "has_engine": has_cache
             }
+            # P0-1 monitoring: rasio rich vs fallback (tanpa ubah tampilan)
+            try:
+                if has_cache:
+                    info["rich_ok"] = _engine.cache.get_setting("rich_post_ok_count", "0")
+                    info["rich_fallback"] = _engine.cache.get_setting("rich_post_fallback_count", "0")
+            except Exception:
+                pass
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -113,12 +131,22 @@ def run_self_ping():
 async def start_with_hydration():
     await app.start()
     logging.info("Bot thumbnail film berjalan & siap melayani!")
+    # P1 FIX: jangan overwrite session tiap start (cegah revoke-loop 2 instance).
+    # Hanya simpan jika settings masih kosong.
     try:
-        s_str = await app.export_session_string()
-        if s_str:
-            from .handlers import _engine
-            _engine.cache.set_setting("pyrogram_bot_session", s_str)
-            logging.info("✅ Sesi Pyrogram berhasil disimpan ke settings database.")
+        from .handlers import _engine
+        existing = ""
+        try:
+            existing = _engine.cache.get_setting("pyrogram_bot_session", "").strip()
+        except Exception:
+            existing = ""
+        if not existing:
+            s_str = await app.export_session_string()
+            if s_str:
+                _engine.cache.set_setting("pyrogram_bot_session", s_str)
+                logging.info("✅ Sesi Pyrogram berhasil disimpan ke settings database.")
+        else:
+            logging.info("Sesi Pyrogram sudah ada di database — skip export (anti revoke-loop).")
     except Exception as e:
         logging.warning("Gagal mengekspor session string: %s", e)
     asyncio.create_task(on_bot_startup(app))

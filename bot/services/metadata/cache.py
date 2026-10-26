@@ -371,12 +371,28 @@ class MetadataCache:
         return default
 
     def set_setting(self, key: str, value: str):
-        try:
-            self._conn().execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
-            self._conn().execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (str(key), str(value)))
-            self._conn().commit()
-        except Exception as e:
-            logger.error(f"Set setting error: {e}")
+        # P0-3 FIX: retry anti "database is locked" (WAL + multi-thread).
+        # Tidak mengubah key/value apapun — hanya tahan 3x percobaan.
+        # video_fid_*/banner_fid_* logic di bawah TIDAK diubah (area terlarang).
+        import time as _t
+        last_err = None
+        for attempt in range(3):
+            try:
+                self._conn().execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+                self._conn().execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (str(key), str(value)))
+                self._conn().commit()
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                msg = str(e).lower()
+                if "locked" in msg or "busy" in msg:
+                    _t.sleep(0.05 * (attempt + 1))
+                    continue
+                logger.error(f"Set setting error: {e}")
+                break
+        if last_err is not None:
+            logger.error(f"Set setting error after retry: {last_err}")
         else:
             if self.cloud.is_enabled:
                 try:
