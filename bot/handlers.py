@@ -5479,10 +5479,11 @@ async def send_or_update_backup_document(
         )
 
         sent_doc = None
-        # BACKUP FIX: retry 3x dengan backoff + timeout paksa 120s per percobaan.
-        # Pyrogram internal retry SaveFilePart bisa gantung 5+ menit — kita potong via wait_for
-        # agar status "Mengekspor..." tidak nyangkut selamanya. Tampilan channel tidak diubah.
-        for _attempt in range(3):
+        # BACKUP FIX: retry 2x via MTProto (max 120s) lalu fallback HTTP Bot API.
+        # MTProto Render->DC5 media lagi timeout terus malam ini; HTTP sendDocument
+        # lewat api.telegram.org sering tetap tembus. Tampilan channel tidak diubah.
+        last_err = None
+        for _attempt in range(2):
             try:
                 sent_doc = await asyncio.wait_for(
                     client.send_document(
@@ -5497,14 +5498,64 @@ async def send_or_update_backup_document(
                 break
             except FloodWait as _fw:
                 _wait = int(getattr(_fw, "value", 10) or 10) + 5
-                logger.warning(f"Backup upload FloodWait {_wait}s (attempt {_attempt + 1}/3)")
+                logger.warning(f"Backup upload FloodWait {_wait}s (attempt {_attempt + 1}/2)")
                 await asyncio.sleep(_wait)
             except Exception as _se:
-                logger.warning(f"Backup upload attempt {_attempt + 1}/3 failed: {_se}")
-                if _attempt < 2:
-                    await asyncio.sleep(5 * (_attempt + 1))
-                else:
-                    raise
+                last_err = _se
+                logger.warning(f"Backup MTProto attempt {_attempt + 1}/2 failed: {_se}")
+                if _attempt < 1:
+                    await asyncio.sleep(5)
+
+        # Fallback: HTTP Bot API sendDocument (bypass session MTProto yang macet)
+        if not sent_doc and BOT_TOKEN and temp_path and os.path.exists(temp_path):
+            try:
+                import uuid as _uuid
+
+                def _http_send():
+                    boundary = f"----WebKitFormBoundary{_uuid.uuid4().hex}"
+                    body = bytearray()
+
+                    def _field(name, value):
+                        body.extend(f"--{boundary}\r\n".encode())
+                        body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+                        body.extend(str(value).encode())
+                        body.extend(b"\r\n")
+
+                    _field("chat_id", chat_id)
+                    _field("caption", caption)
+                    _field("parse_mode", "HTML")
+                    body.extend(f"--{boundary}\r\n".encode())
+                    body.extend(f'Content-Disposition: form-data; name="document"; filename="{doc_name}"\r\n'.encode())
+                    body.extend(b"Content-Type: application/octet-stream\r\n\r\n")
+                    with open(temp_path, "rb") as _f:
+                        body.extend(_f.read())
+                    body.extend(b"\r\n")
+                    body.extend(f"--{boundary}--\r\n".encode())
+                    req = urllib.request.Request(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                        data=bytes(body),
+                        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+                    )
+                    with urllib.request.urlopen(req, timeout=120) as resp:
+                        return json.loads(resp.read().decode("utf-8"))
+
+                res = await asyncio.to_thread(_http_send)
+                if res and res.get("ok") and res.get("result"):
+                    _mid = res["result"].get("message_id")
+
+                    class _HttpDoc:
+                        def __init__(self, mid):
+                            self.id = mid
+
+                    sent_doc = _HttpDoc(_mid)
+                    logger.info(f"Backup terkirim via HTTP fallback (msg {_mid})")
+            except Exception as _he:
+                logger.warning(f"Backup HTTP fallback failed: {_he}")
+                if last_err is None:
+                    last_err = _he
+
+        if not sent_doc and last_err is not None:
+            raise last_err
 
         if sent_doc:
             _engine.cache.set_setting(f"last_backup_msg_{chat_id}_{clean_wm}", str(sent_doc.id))
