@@ -171,7 +171,11 @@ class SupabaseSyncService:
                     user_id INTEGER PRIMARY KEY,
                     username TEXT,
                     first_name TEXT,
-                    registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_blocked INTEGER DEFAULT 0,
+                    banned_until TIMESTAMP,
+                    ban_reason TEXT
                 );
                 CREATE TABLE IF NOT EXISTS scheduled_posts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,

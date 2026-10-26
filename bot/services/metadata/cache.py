@@ -1762,6 +1762,19 @@ class MetadataCache:
             conn.execute("ALTER TABLE bot_users ADD COLUMN ban_reason TEXT")
         except Exception:
             pass
+        # FIX: kolom inti yang hilang bila tabel dibuat oleh bootstrap hydrate
+        # (supabase_sync membuat bot_users minimalis tanpa kolom ini).
+        # Tanpa ALTER ini -> "no such column: last_active" di semua request.
+        for _col in (
+            "ALTER TABLE bot_users ADD COLUMN username TEXT",
+            "ALTER TABLE bot_users ADD COLUMN first_name TEXT",
+            "ALTER TABLE bot_users ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            "ALTER TABLE bot_users ADD COLUMN last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        ):
+            try:
+                conn.execute(_col)
+            except Exception:
+                pass
         conn.execute("CREATE INDEX IF NOT EXISTS idx_users_active ON bot_users (last_active)")
 
     def register_bot_user(self, user_id: int, username: str = "", first_name: str = ""):
