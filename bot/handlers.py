@@ -5069,17 +5069,26 @@ async def auto_hydrate_channel_catalog(
     if not clean_channel:
         return 0
 
-    max_id = 0
+    chat = None
     try:
         chat = await client.get_chat(channel_username)
-        if chat and getattr(chat, "pinned_message", None):
-            max_id = max(max_id, chat.pinned_message.id + 50)
     except Exception:
         pass
 
-    if not max_id:
+    db_max = 0
+    try:
+        m_list = _engine.cache.get_deduplicated_catalog(clean_channel)
+        if m_list:
+            db_max = max((m.get("message_id") or 0) for m in m_list)
+    except Exception:
+        db_max = 0
+
+    pin_id = chat.pinned_message.id if (chat and getattr(chat, "pinned_message", None)) else 0
+    if not pin_id:
         stored_pin = _engine.cache.get_setting(f"pinned_catalog_{clean_channel}", "")
-        max_id = int(stored_pin) + 50 if stored_pin and stored_pin.isdigit() else 2000
+        pin_id = int(stored_pin) if stored_pin and stored_pin.isdigit() else 2000
+
+    max_id = max(db_max + 150, pin_id + 500, 3000)
 
     start_id = max(1, max_id - scan_limit)
     batch_size = 50
@@ -5143,6 +5152,13 @@ async def update_pinned_catalog(
     clean_channel = (channel_username or "").lstrip("@").strip()
     if not clean_channel:
         return 0
+
+    # Ensure local database has latest cloud sync before building catalog
+    if _engine.cache.cloud.is_enabled:
+        try:
+            _engine.cache.hydrate_from_cloud()
+        except Exception as che:
+            logger.debug(f"Cloud hydration check: {che}")
 
     movies = _engine.cache.get_deduplicated_catalog(clean_channel)
 
