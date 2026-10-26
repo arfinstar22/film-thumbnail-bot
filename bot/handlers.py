@@ -5442,9 +5442,20 @@ async def send_or_update_backup_document(
             return None
 
         json_str = _engine.cache.export_catalog_json(clean_wm)
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as tf:
-            tf.write(json_str)
-            temp_path = tf.name
+        # BACKUP FIX: gzip jika >1MB agar upload.SaveFilePart tidak timeout di Render free.
+        # Isi tetap lengkap (caption+file_id), hanya dikompres. Restore tetap baca .json maupun .json.gz.
+        import gzip as _gzip
+        raw_bytes = json_str.encode("utf-8")
+        use_gzip = len(raw_bytes) > 1024 * 1024
+        if use_gzip:
+            with tempfile.NamedTemporaryFile(suffix=".json.gz", delete=False) as tf:
+                temp_path = tf.name
+            with _gzip.open(temp_path, "wb") as gz:
+                gz.write(raw_bytes)
+        else:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as tf:
+                tf.write(json_str)
+                temp_path = tf.name
 
         # Delete previously sent backup JSON message in this user's PM
         old_msg_id = _engine.cache.get_setting(f"last_backup_msg_{chat_id}_{clean_wm}", "")
@@ -5454,7 +5465,7 @@ async def send_or_update_backup_document(
             except Exception as de:
                 logger.debug(f"Could not delete old backup message {old_msg_id}: {de}")
 
-        doc_name = f"katalog_backup_{clean_wm}.json"
+        doc_name = f"katalog_backup_{clean_wm}.json.gz" if use_gzip else f"katalog_backup_{clean_wm}.json"
         status_label = "🔄 <b>AUTO-UPDATE BACKUP FILM (HARIAN 03:00 WIB)</b>" if is_auto else "💾 <b>BACKUP KATALOG KOLEKSI FILM</b>"
         caption = (
             f"{status_label}\n"
@@ -5467,13 +5478,28 @@ async def send_or_update_backup_document(
             f"Reply file ini dengan: <code>/restorechannel @channel_baru</code>"
         )
 
-        sent_doc = await client.send_document(
-            chat_id=chat_id,
-            document=temp_path,
-            file_name=doc_name,
-            caption=caption,
-            parse_mode=ParseMode.HTML
-        )
+        sent_doc = None
+        # BACKUP FIX: retry 3x dengan backoff, jangan reconnect loop tanpa henti.
+        for _attempt in range(3):
+            try:
+                sent_doc = await client.send_document(
+                    chat_id=chat_id,
+                    document=temp_path,
+                    file_name=doc_name,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML
+                )
+                break
+            except FloodWait as _fw:
+                _wait = int(getattr(_fw, "value", 10) or 10) + 5
+                logger.warning(f"Backup upload FloodWait {_wait}s (attempt {_attempt + 1}/3)")
+                await asyncio.sleep(_wait)
+            except Exception as _se:
+                logger.warning(f"Backup upload attempt {_attempt + 1}/3 failed: {_se}")
+                if _attempt < 2:
+                    await asyncio.sleep(5 * (_attempt + 1))
+                else:
+                    raise
 
         if sent_doc:
             _engine.cache.set_setting(f"last_backup_msg_{chat_id}_{clean_wm}", str(sent_doc.id))
@@ -6518,7 +6544,7 @@ async def restore_channel_cmd(client: Client, msg: Message):
     target_channel = ""
 
     # Mode 1: User replies to a backup JSON file
-    if reply and reply.document and (reply.document.file_name or "").endswith(".json"):
+    if reply and reply.document and (reply.document.file_name or "").endswith((".json", ".json.gz")):
         if not args:
             await msg.reply_text(
                 "⚠️ <b>Tentukan Channel Tujuan!</b>\n\n"
@@ -6532,8 +6558,14 @@ async def restore_channel_cmd(client: Client, msg: Message):
         downloaded = None
         try:
             downloaded = await client.download_media(reply.document)
-            with open(downloaded, "r", encoding="utf-8") as f:
-                content = f.read()
+            # BACKUP FIX: baca .json maupun .json.gz (hasil kompresi otomatis)
+            if str(downloaded or "").endswith(".gz") or str((reply.document.file_name or "")).endswith(".gz"):
+                import gzip as _rgzip
+                with _rgzip.open(downloaded, "rt", encoding="utf-8") as f:
+                    content = f.read()
+            else:
+                with open(downloaded, "r", encoding="utf-8") as f:
+                    content = f.read()
 
             data = json.loads(content)
             movies = data.get("movies", [])
