@@ -275,6 +275,25 @@ class MetadataCache:
             return self.cloud.hydrate_to_sqlite(self._conn())
         return {}
 
+    async def async_push_catalog_to_cloud(self, channel_username: str) -> int:
+        """Dorong seluruh katalog lokal ke Supabase agar tidak hilang saat restart.
+
+        Sebelumnya katalog hanya tersimpan di disk ephemeral Render sehingga
+        setiap restart hydrate selalu '0 films' dan bot harus scan ulang channel.
+        """
+        if not self.cloud.is_enabled:
+            return 0
+        try:
+            movies = self.get_deduplicated_catalog(channel_username)
+            if not movies:
+                return 0
+            for m in movies:
+                m.setdefault("channel_username", (channel_username or "").lstrip("@").strip().lower())
+            return await self.cloud.async_sync_catalog_bulk(movies)
+        except Exception as e:
+            logger.warning(f"Push catalog to cloud gagal: {e}")
+            return 0
+
     def ping_supabase_keepalive(self) -> Dict[str, Any]:
         """Triggers keepalive ping to Supabase and updates local cache setting."""
         if not self.cloud.is_enabled:

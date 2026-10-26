@@ -6015,6 +6015,14 @@ async def sync_catalog_cmd(client: Client, msg: Message):
 
         unique_count = await update_pinned_catalog(client, wm, chat_id=chat_id, old_catalog_ids=found_catalog_msg_ids)
 
+        # CLOUD FIX: simpan katalog hasil scan ke Supabase (anti 'catalog: 0' saat restart)
+        try:
+            pushed = await _engine.cache.async_push_catalog_to_cloud(clean_wm)
+            if pushed:
+                logger.info(f"Katalog @{clean_wm} tersimpan ke cloud: {pushed} film")
+        except Exception as _ce:
+            logger.warning(f"Gagal push katalog ke cloud: {_ce}")
+
         await status_msg.edit_text(
             f"✅ <b>Sinkronisasi & Pinned Catalog Selesai!</b>\n\n"
             f"📢 <b>Channel:</b> @{clean_wm}\n"
@@ -6890,6 +6898,15 @@ async def backup_catalog_cmd(client: Client, msg: Message):
                 parse_mode=ParseMode.HTML
             )
             return
+
+        # CLOUD FIX: dorong katalog ke Supabase agar restart berikutnya
+        # tidak lagi 'catalog: 0' dan tidak perlu scan ulang channel.
+        try:
+            pushed = await _engine.cache.async_push_catalog_to_cloud(clean_wm)
+            if pushed:
+                logger.info(f"Katalog @{clean_wm} tersimpan ke cloud: {pushed} film")
+        except Exception as _ce:
+            logger.warning(f"Gagal push katalog ke cloud: {_ce}")
 
         sent_doc = await send_or_update_backup_document(client, chat_id, clean_wm, is_auto=False)
         if sent_doc:
