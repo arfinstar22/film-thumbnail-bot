@@ -67,6 +67,8 @@ def _publish_page(token: str, title: str, nodes: list, channel: str,
         })
         if result:
             return result.get("url") or f"https://telegra.ph/{cached_path}"
+        # Even if editPage API call failed (rate limit/network), page still exists at cached path
+        return f"https://telegra.ph/{cached_path}"
 
     result = _telegraph_api("createPage", {
         "access_token": token,
@@ -138,10 +140,16 @@ def publish_or_update_telegraph_catalog(
         return None
 
     try:
-        return _build_and_publish(movies, clean_channel, cache, token, bot_username)
+        url = _build_and_publish(movies, clean_channel, cache, token, bot_username)
+        if url:
+            return url
     except Exception as e:
         logger.error(f"Telegraph catalog error: {e}")
-        return None
+
+    cached_master = cache.get_setting(f"telegraph_path_{clean_channel}", "")
+    if cached_master:
+        return f"https://telegra.ph/{cached_master}"
+    return None
 
 
 def _build_and_publish(
@@ -249,9 +257,17 @@ def _publish_letter_pages(
         ]},
         {"tag": "hr"},
     ]
-    footer_nodes = [{"tag": "p", "children": [
+    master_path = cache.get_setting(f"telegraph_path_{channel}", "")
+    footer_nodes = []
+    if master_path:
+        footer_nodes.append({"tag": "p", "children": [
+            {"tag": "b", "children": [
+                {"tag": "a", "attrs": {"href": f"https://telegra.ph/{master_path}"}, "children": ["⬅️ Kembali ke Indeks Utama (A - Z)"]}
+            ]}
+        ]})
+    footer_nodes.append({"tag": "p", "children": [
         f"🔍 Cari Instan via Bot: {bot_mention}"
-    ]}]
+    ]})
 
     test_nodes = header_nodes + [{"tag": "ul", "children": items}] + footer_nodes
     if _content_size(test_nodes) <= _MAX_PAGE_BYTES:
@@ -330,9 +346,10 @@ def _build_index_page_nodes(
 
     li_items = []
     for char, count, url in letter_urls:
+        full_url = url if str(url).startswith("http") else f"https://telegra.ph/{str(url).lstrip('/')}"
         li_items.append({"tag": "li", "children": [
             {"tag": "b", "children": [
-                {"tag": "a", "attrs": {"href": url}, "children": [f"📁 [ {char} ] — {count} Film"]},
+                {"tag": "a", "attrs": {"href": full_url}, "children": [f"📁 [ {char} ] — {count} Film"]},
             ]},
         ]})
     nodes.append({"tag": "ul", "children": li_items})

@@ -673,7 +673,7 @@ def ensure_scheduler_worker(client: Client):
 
 
 
-def _build_bot_api_reply_markup(reply_markup):
+def _build_bot_api_reply_markup(reply_markup, is_channel: bool = False):
     """Formats Pyrogram InlineKeyboardMarkup into Bot API JSON payload with native button styles (primary, success, danger)."""
     if not reply_markup or not hasattr(reply_markup, "inline_keyboard"):
         return None
@@ -687,7 +687,11 @@ def _build_bot_api_reply_markup(reply_markup):
             elif getattr(btn, "callback_data", None):
                 b["callback_data"] = btn.callback_data
             elif getattr(btn, "switch_inline_query_current_chat", None) is not None:
-                b["switch_inline_query_current_chat"] = btn.switch_inline_query_current_chat
+                if is_channel:
+                    bot_uname = _engine.cache.get_setting("bot_username", "filmindbot")
+                    b["url"] = f"https://t.me/{bot_uname}?start=cari"
+                else:
+                    b["switch_inline_query_current_chat"] = btn.switch_inline_query_current_chat
             elif getattr(btn, "switch_inline_query", None) is not None:
                 b["switch_inline_query"] = btn.switch_inline_query
             elif getattr(btn, "web_app", None):
@@ -717,7 +721,8 @@ async def _apply_channel_post_styling(chat_id: Union[int, str], message_id: int,
     if not BOT_TOKEN or not reply_markup:
         return
 
-    formatted_kb = _build_bot_api_reply_markup(reply_markup)
+    is_channel = str(chat_id).startswith("@") or (isinstance(chat_id, int) and chat_id < -1000000000000) or (isinstance(chat_id, str) and chat_id.startswith("-100"))
+    formatted_kb = _build_bot_api_reply_markup(reply_markup, is_channel=is_channel)
     if not formatted_kb:
         return
 
@@ -757,7 +762,8 @@ async def _apply_expandable_caption(chat_id: Union[int, str], message_id: int, c
     }
 
     if reply_markup:
-        formatted_kb = _build_bot_api_reply_markup(reply_markup)
+        is_channel = str(chat_id).startswith("@") or (isinstance(chat_id, int) and chat_id < -1000000000000) or (isinstance(chat_id, str) and chat_id.startswith("-100"))
+        formatted_kb = _build_bot_api_reply_markup(reply_markup, is_channel=is_channel)
         if formatted_kb:
             payload["reply_markup"] = formatted_kb
 
@@ -4725,7 +4731,9 @@ async def send_channel_recommendation(client: Client, channel_username: str, cha
 
     btn_watch = InlineKeyboardButton("🎬 Tonton Film Ini Sekarang", url=watch_url)
     btn_watch.style = "primary"
-    btn_search = InlineKeyboardButton("🔍 Cari Koleksi Film Lainnya", switch_inline_query_current_chat="")
+    bot_uname = (client.me.username if getattr(client, "me", None) else "") or _engine.cache.get_setting("bot_username", "")
+    search_url = f"https://t.me/{bot_uname}?start=cari" if bot_uname else f"https://t.me/{clean_wm}"
+    btn_search = InlineKeyboardButton("🔍 Cari Koleksi Film Lainnya", url=search_url)
     btn_search.style = "success"
     hl_kb = InlineKeyboardMarkup([
         [btn_watch],
@@ -5161,6 +5169,10 @@ async def update_pinned_catalog(
 
     # Publish / update Telegra.ph Instant View page
     telegraph_url = publish_or_update_telegraph_catalog(movies, clean_channel, _engine.cache, bot_username)
+    if not telegraph_url:
+        cached_path = _engine.cache.get_setting(f"telegraph_path_{clean_channel}", "")
+        if cached_path:
+            telegraph_url = f"https://telegra.ph/{cached_path}"
 
     catalog_text = format_pinned_catalog(movies, clean_channel, bot_username, telegraph_url)
 
@@ -5170,13 +5182,14 @@ async def update_pinned_catalog(
         btn_cat.style = "primary"
         buttons.append([btn_cat])
 
-    btn_search = InlineKeyboardButton("🔍 Cari Koleksi Film", switch_inline_query_current_chat="")
+    search_url = f"https://t.me/{bot_username}?start=cari" if bot_username else f"https://t.me/{clean_channel}"
+    btn_search = InlineKeyboardButton("🔍 Cari Koleksi Film", url=search_url)
     btn_search.style = "success"
 
     req_link = _get_user_request_link(chat_id or 0, bot_username=bot_username)
     if req_link and req_link != "off":
         btn_req = InlineKeyboardButton("💬 Request Film", url=req_link)
-        btn_req.style = "success"
+        btn_req.style = "danger"
         buttons.append([btn_search, btn_req])
     else:
         buttons.append([btn_search])

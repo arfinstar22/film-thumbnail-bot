@@ -472,5 +472,31 @@ class TestTMDbService(unittest.TestCase):
             self.assertNotEqual(meta.get("director"), "Ubay Fox")
 
 
+class TestCatalogAndChannelKeyboard(unittest.TestCase):
+    def test_channel_keyboard_converts_switch_inline_current_chat(self):
+        from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        from bot.handlers import _build_bot_api_reply_markup
+
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚡ BUKA KATALOG", url="https://telegra.ph/katalog")],
+            [InlineKeyboardButton("🔍 Cari Koleksi", switch_inline_query_current_chat="")]
+        ])
+
+        # When rendered for channel, switch_inline_query_current_chat must convert to safe url
+        payload = _build_bot_api_reply_markup(kb, is_channel=True)
+        row2_btn = payload["inline_keyboard"][1][0]
+        self.assertNotIn("switch_inline_query_current_chat", row2_btn)
+        self.assertTrue(row2_btn["url"].startswith("https://t.me/"))
+
+    def test_catalog_fallback_to_cached_master_path(self):
+        from bot.services.metadata.catalog import publish_or_update_telegraph_catalog
+        mock_cache = MagicMock()
+        mock_cache.get_setting.side_effect = lambda k, d="": "KATALOG-CACHED-123" if "telegraph_path" in k else "token123"
+
+        with patch("bot.services.metadata.catalog._build_and_publish", side_effect=Exception("API Error")):
+            res = publish_or_update_telegraph_catalog([{"title": "Test"}], "test_chan", mock_cache)
+            self.assertEqual(res, "https://telegra.ph/KATALOG-CACHED-123")
+
+
 if __name__ == "__main__":
     unittest.main()
