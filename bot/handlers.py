@@ -5479,35 +5479,14 @@ async def send_or_update_backup_document(
         )
 
         sent_doc = None
-        # BACKUP FIX: retry 2x via MTProto (max 120s) lalu fallback HTTP Bot API.
-        # MTProto Render->DC5 media lagi timeout terus malam ini; HTTP sendDocument
-        # lewat api.telegram.org sering tetap tembus. Tampilan channel tidak diubah.
+        # BACKUP FIX v2: HTTP Bot API DULUAN (60s), MTProto baru cadangan (45s).
+        # Alasan: jalur MTProto upload.SaveFilePart dari Render ke DC5 media
+        # timeout berulang + reconnect loop, sedangkan HTTP api.telegram.org
+        # tetap tembus. Tampilan channel tidak diubah sama sekali.
         last_err = None
-        for _attempt in range(2):
-            try:
-                sent_doc = await asyncio.wait_for(
-                    client.send_document(
-                        chat_id=chat_id,
-                        document=temp_path,
-                        file_name=doc_name,
-                        caption=caption,
-                        parse_mode=ParseMode.HTML
-                    ),
-                    timeout=120.0
-                )
-                break
-            except FloodWait as _fw:
-                _wait = int(getattr(_fw, "value", 10) or 10) + 5
-                logger.warning(f"Backup upload FloodWait {_wait}s (attempt {_attempt + 1}/2)")
-                await asyncio.sleep(_wait)
-            except Exception as _se:
-                last_err = _se
-                logger.warning(f"Backup MTProto attempt {_attempt + 1}/2 failed: {_se}")
-                if _attempt < 1:
-                    await asyncio.sleep(5)
 
-        # Fallback: HTTP Bot API sendDocument (bypass session MTProto yang macet)
-        if not sent_doc and BOT_TOKEN and temp_path and os.path.exists(temp_path):
+        # --- 1. HTTP Bot API sendDocument (jalur utama backup) ---
+        if BOT_TOKEN and temp_path and os.path.exists(temp_path):
             try:
                 import uuid as _uuid
 
@@ -5536,10 +5515,10 @@ async def send_or_update_backup_document(
                         data=bytes(body),
                         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
                     )
-                    with urllib.request.urlopen(req, timeout=120) as resp:
+                    with urllib.request.urlopen(req, timeout=60) as resp:
                         return json.loads(resp.read().decode("utf-8"))
 
-                res = await asyncio.to_thread(_http_send)
+                res = await asyncio.wait_for(asyncio.to_thread(_http_send), timeout=75.0)
                 if res and res.get("ok") and res.get("result"):
                     _mid = res["result"].get("message_id")
 
@@ -5548,11 +5527,36 @@ async def send_or_update_backup_document(
                             self.id = mid
 
                     sent_doc = _HttpDoc(_mid)
-                    logger.info(f"Backup terkirim via HTTP fallback (msg {_mid})")
+                    logger.info(f"Backup terkirim via HTTP Bot API (msg {_mid})")
+                else:
+                    last_err = RuntimeError(str(res)[:200])
+                    logger.warning(f"Backup HTTP Bot API rejected: {last_err}")
             except Exception as _he:
-                logger.warning(f"Backup HTTP fallback failed: {_he}")
-                if last_err is None:
-                    last_err = _he
+                last_err = _he
+                logger.warning(f"Backup HTTP Bot API failed: {_he}")
+
+        # --- 2. Cadangan: MTProto (kalau HTTP diblokir) ---
+        if not sent_doc:
+            try:
+                sent_doc = await asyncio.wait_for(
+                    client.send_document(
+                        chat_id=chat_id,
+                        document=temp_path,
+                        file_name=doc_name,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML
+                    ),
+                    timeout=45.0
+                )
+                logger.info("Backup terkirim via MTProto fallback")
+            except FloodWait as _fw:
+                _wait = int(getattr(_fw, "value", 10) or 10) + 5
+                logger.warning(f"Backup MTProto FloodWait {_wait}s")
+                await asyncio.sleep(_wait)
+                last_err = _fw
+            except Exception as _se:
+                last_err = _se
+                logger.warning(f"Backup MTProto fallback failed: {_se}")
 
         if not sent_doc and last_err is not None:
             raise last_err
@@ -6541,6 +6545,10 @@ async def publish_video_to_channel(
     return sent_channel
 
 
+# Guard anti-tumpuk untuk /backup (channel yang sedang diproses).
+_backup_inflight: set = set()
+
+
 @app.on_message(filters.command(["backup", "backupkatalog"]))
 async def backup_catalog_cmd(client: Client, msg: Message):
     if not check_admin(msg):
@@ -6559,8 +6567,20 @@ async def backup_catalog_cmd(client: Client, msg: Message):
         await msg.reply_text("❌ Channel belum diatur. Gunakan <code>/backup @namachannel</code>.", parse_mode=ParseMode.HTML)
         return
 
+    # BACKUP GUARD: cegah /backup ditekan berulang -> antrean upload menumpuk.
+    if clean_wm in _backup_inflight:
+        await msg.reply_text(
+            "⏳ <b>Backup sedang berjalan.</b>\n\n"
+            "<i>Tekan berulang justru membuat antrean upload menumpuk dan makin lambat. "
+            "Tunggu pesan hasilnya muncul.</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    _backup_inflight.add(clean_wm)
+
     status_msg = await msg.reply_text(
-        f"⏳ <b>Mengekspor data katalog channel @{clean_wm}...</b>",
+        f"⏳ <b>Mengekspor data katalog channel @{clean_wm}...</b>\n"
+        f"<i>Mengirim via jalur HTTP (cepat, ±1 menit).</i>",
         parse_mode=ParseMode.HTML
     )
 
@@ -6593,7 +6613,12 @@ async def backup_catalog_cmd(client: Client, msg: Message):
             )
     except Exception as e:
         logger.exception("Backup export error")
-        await status_msg.edit_text(f"❌ <b>Gagal membuat backup:</b> <code>{e}</code>", parse_mode=ParseMode.HTML)
+        try:
+            await status_msg.edit_text(f"❌ <b>Gagal membuat backup:</b> <code>{e}</code>", parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+    finally:
+        _backup_inflight.discard(clean_wm)
 
 
 @app.on_message(filters.command(["restorechannel", "migrasichannel", "restore"]))
