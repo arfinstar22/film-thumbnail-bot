@@ -6549,6 +6549,28 @@ async def publish_video_to_channel(
 _backup_inflight: set = set()
 
 
+@app.on_message(filters.command(["myid", "idku", "whoami"]))
+async def myid_cmd(client: Client, msg: Message):
+    """Diagnostik: tampilkan ID Telegram + status admin (tidak mengubah channel)."""
+    uid = msg.from_user.id if msg.from_user else msg.chat.id
+    uname = (msg.from_user.username if msg.from_user else "") or "-"
+    adm = is_admin(uid, "" if uname == "-" else uname)
+    owner_saved = ""
+    try:
+        owner_saved = _engine.cache.get_setting("owner_user_id", "")
+    except Exception:
+        pass
+    await msg.reply_text(
+        f"🪪 <b>Identitas Anda</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>User ID:</b> <code>{uid}</code>\n"
+        f"🔗 <b>Username:</b> @{html.escape(uname) if uname != '-' else '-'}\n"
+        f"🛡️ <b>Status Admin:</b> {'✅ Ya' if adm else '❌ Tidak'}\n"
+        f"👑 <b>Owner tersimpan:</b> <code>{owner_saved or '-'}</code>",
+        parse_mode=ParseMode.HTML
+    )
+
+
 @app.on_message(filters.command(["backup", "backupkatalog"]))
 async def backup_catalog_cmd(client: Client, msg: Message):
     if not check_admin(msg):
@@ -7342,10 +7364,18 @@ async def receive_video(client: Client, msg: Message):
     user_id = msg.from_user.id if msg.from_user else msg.chat.id
     username = msg.from_user.username if msg.from_user else ""
     if not is_admin(user_id, username):
+        # DIAGNOSTIK: catat siapa yang ditolak agar mudah diperbaiki (tidak mengubah tampilan channel).
+        logger.warning(
+            f"Media ditolak (bukan admin): user_id={user_id} username={username or '-'} "
+            f"has_from_user={bool(msg.from_user)} chat_id={msg.chat.id} "
+            f"file={(msg.document.file_name if msg.document else 'video')}"
+        )
         await msg.reply_text(
             "⛔ <b>Akses Ditolak:</b>\n"
             "Hanya Administrator yang dapat memproses dan mengunggah film ke channel.\n"
-            "Tekan tombol di bawah jika Anda ingin me-request film favorit Anda!",
+            "Tekan tombol di bawah jika Anda ingin me-request film favorit Anda!\n\n"
+            f"<i>ID Telegram Anda: <code>{user_id}</code>\n"
+            f"Kalau Anda pemilik bot, minta ID ini ditambahkan ke ADMIN_USER_IDS.</i>",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("💬 Request Film", callback_data="btn_start_request")]
