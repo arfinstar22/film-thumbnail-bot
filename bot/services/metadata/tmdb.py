@@ -366,8 +366,10 @@ class TMDbService:
         poster_path = main.get("poster_path") or fallback.get("poster_path")
         backdrop_path = main.get("backdrop_path") or fallback.get("backdrop_path")
 
-        poster_url = f"{self.IMAGE_BASE_URL}/original{poster_path}" if poster_path else None
-        backdrop_url = f"{self.IMAGE_BASE_URL}/original{backdrop_path}" if backdrop_path else None
+        # AKURASI+SPEED: poster w500 (cukup tajam di HP, 5x lebih ringan dari /original).
+        # Backdrop w780 (tetap HD untuk banner, 3x lebih ringan). Tampilan tidak berubah, load lebih cepat.
+        poster_url = f"{self.IMAGE_BASE_URL}/w500{poster_path}" if poster_path else None
+        backdrop_url = f"{self.IMAGE_BASE_URL}/w780{backdrop_path}" if backdrop_path else None
 
         # Videos: Official YouTube Trailer
         videos = main.get("videos", {}).get("results", []) or fallback.get("videos", {}).get("results", [])

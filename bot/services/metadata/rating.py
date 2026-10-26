@@ -108,12 +108,13 @@ class MovieRatingService:
             logger.debug(f"IMDb suggest error: {e}")
 
         # Step 2: OMDB Endpoint
+        # AKURASI FIX: https (bukan http) agar tidak di-block / di-downgrade operator.
         omdb_urls = []
         if imdb_id:
-            omdb_urls.append(f"http://www.omdbapi.com/?i={imdb_id}&apikey=trilogy")
+            omdb_urls.append(f"https://www.omdbapi.com/?i={imdb_id}&apikey=trilogy")
         if year:
-            omdb_urls.append(f"http://www.omdbapi.com/?t={urllib.parse.quote(title)}&y={year}&apikey=trilogy")
-        omdb_urls.append(f"http://www.omdbapi.com/?t={urllib.parse.quote(title)}&apikey=trilogy")
+            omdb_urls.append(f"https://www.omdbapi.com/?t={urllib.parse.quote(title)}&y={year}&apikey=trilogy")
+        omdb_urls.append(f"https://www.omdbapi.com/?t={urllib.parse.quote(title)}&apikey=trilogy")
 
         for u in omdb_urls:
             try:

@@ -431,6 +431,16 @@ class MetadataCache:
             conn.execute("ALTER TABLE movie_catalog ADD COLUMN episode INTEGER")
         except Exception:
             pass
+        # AKURASI FIX: kunci identitas TMDB agar judul tidak tertukar (Dilan 1990 vs 1991, 1917 vs 2019).
+        # Kolom baru, migrasi aman via ALTER TABLE. Tidak ubah logika duplikat/sync yang terlarang.
+        try:
+            conn.execute("ALTER TABLE movie_catalog ADD COLUMN tmdb_id INTEGER")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE movie_catalog ADD COLUMN original_title TEXT")
+        except Exception:
+            pass
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cat_chan_msg ON movie_catalog (channel_username, message_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cat_series ON movie_catalog (channel_username, title, season, episode)")
 
@@ -446,7 +456,9 @@ class MetadataCache:
         caption: str = "",
         file_id: Optional[str] = None,
         season: Optional[int] = None,
-        episode: Optional[int] = None
+        episode: Optional[int] = None,
+        tmdb_id: Optional[int] = None,
+        original_title: Optional[str] = None
     ):
         clean_channel = (channel_username or "").lstrip("@").strip().lower()
         clean_title, year, _ = normalize_movie_title_and_year(title, year)
@@ -470,15 +482,17 @@ class MetadataCache:
                     SET title = ?, year = ?, rating = ?, genre = ?, quality = ?, caption = ?,
                         file_id = COALESCE(?, file_id),
                         season = COALESCE(?, season),
-                        episode = COALESCE(?, episode)
+                        episode = COALESCE(?, episode),
+                        tmdb_id = COALESCE(?, tmdb_id),
+                        original_title = COALESCE(?, original_title)
                     WHERE id = ?
-                """, (clean_title, year, rating, genre, quality, caption, file_id, season, episode, row[0]))
+                """, (clean_title, year, rating, genre, quality, caption, file_id, season, episode, tmdb_id, original_title, row[0]))
                 conn.commit()
             else:
                 conn.execute("""
-                    INSERT INTO movie_catalog (title, year, rating, genre, quality, channel_username, message_id, caption, file_id, season, episode)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (clean_title, year, rating, genre, quality, clean_channel, message_id, caption, file_id, season, episode))
+                    INSERT INTO movie_catalog (title, year, rating, genre, quality, channel_username, message_id, caption, file_id, season, episode, tmdb_id, original_title)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (clean_title, year, rating, genre, quality, clean_channel, message_id, caption, file_id, season, episode, tmdb_id, original_title))
                 conn.commit()
         except Exception as e:
             logger.error(f"Save movie catalog error: {e}")
@@ -490,7 +504,8 @@ class MetadataCache:
                         "title": clean_title, "year": year, "rating": rating,
                         "genre": genre, "quality": quality, "channel_username": clean_channel,
                         "message_id": message_id, "caption": caption, "file_id": file_id,
-                        "season": season, "episode": episode
+                        "season": season, "episode": episode,
+                        "tmdb_id": tmdb_id, "original_title": original_title
                     }))
                 except RuntimeError:
                     pass
@@ -628,7 +643,7 @@ class MetadataCache:
             conn = self._conn()
             self._ensure_catalog_table(conn)
             cur = conn.execute("""
-                SELECT title, year, rating, genre, quality, channel_username, message_id, caption, file_id
+                SELECT title, year, rating, genre, quality, channel_username, message_id, caption, file_id, tmdb_id, original_title
                 FROM movie_catalog
                 WHERE LOWER(channel_username) = ?
                 ORDER BY message_id DESC
@@ -646,7 +661,9 @@ class MetadataCache:
                     "channel_username": row[5],
                     "message_id": row[6],
                     "caption": row[7],
-                    "file_id": row[8]
+                    "file_id": row[8],
+                    "tmdb_id": row[9] if len(row) > 9 else None,
+                    "original_title": row[10] if len(row) > 10 else None
                 })
         except Exception as e:
             logger.error(f"Get deduplicated catalog error: {e}")

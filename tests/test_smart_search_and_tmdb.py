@@ -399,8 +399,8 @@ class TestTMDbService(unittest.TestCase):
             self.assertIn("Misteri", res["genre"])
             self.assertEqual(res["director"], "Joko Anwar")
             self.assertIn("Tara Basro", res["actors"])
-            self.assertEqual(res["poster_url"], "https://image.tmdb.org/t/p/original/abc_poster.jpg")
-            self.assertEqual(res["backdrop_url"], "https://image.tmdb.org/t/p/original/xyz_backdrop.jpg")
+            self.assertEqual(res["poster_url"], "https://image.tmdb.org/t/p/w500/abc_poster.jpg")
+            self.assertEqual(res["backdrop_url"], "https://image.tmdb.org/t/p/w780/xyz_backdrop.jpg")
             self.assertEqual(res["trailer_url"], "https://www.youtube.com/watch?v=trailer123")
             self.assertEqual(res["source"], "tmdb")
 

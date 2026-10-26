@@ -6431,6 +6431,7 @@ async def publish_video_to_channel(
                 logger.debug(f"Failed to update prev episode navigation: {pe}")
 
     # Simpan ke katalog pencarian film beserta file_id cloud Telegram
+    # AKURASI: sertakan tmdb_id + original_title (kolom baru, tampilan tidak berubah)
     try:
         _engine.cache.save_movie_post(
             title=title_meta,
@@ -6443,7 +6444,9 @@ async def publish_video_to_channel(
             caption=caption_text,
             file_id=video_file_id,
             season=season_meta,
-            episode=episode_meta
+            episode=episode_meta,
+            tmdb_id=meta.get("tmdb_id"),
+            original_title=meta.get("original_title")
         )
         clean_t = re.sub(r"[^\w\s]", "", title_meta).strip()
         if video_file_id:
