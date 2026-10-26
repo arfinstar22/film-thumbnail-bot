@@ -4839,6 +4839,70 @@ async def digest_cmd(client: Client, msg: Message):
     )
 
 
+@app.on_message(filters.command(["resetcloud", "pulihkandata", "fixcloud"]))
+async def reset_cloud_cmd(client: Client, msg: Message):
+    """Bersihkan tabel katalog di Supabase lalu isi ulang dari katalog lokal.
+
+    Aman: butuh konfirmasi `ya`, dan menolak jika katalog lokal terlalu sedikit.
+    """
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
+    chat_id = msg.chat.id
+    args = [a.lower() for a in (msg.text.split()[1:] if msg.text else [])]
+    clean_wm = _get_user_watermark(chat_id).lstrip("@").strip().lower()
+    if not clean_wm:
+        await msg.reply_text("❌ Channel belum diatur.", parse_mode=ParseMode.HTML)
+        return
+
+    if "ya" not in args:
+        local_count = 0
+        try:
+            local_count = len(_engine.cache.get_deduplicated_catalog(clean_wm))
+        except Exception:
+            pass
+        cloud_count = -1
+        try:
+            cloud_count = await _engine.cache.cloud.async_count_cloud_catalog()
+        except Exception:
+            pass
+        await msg.reply_text(
+            f"🧹 <b>BERSIHKAN KATALOG CLOUD</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📢 <b>Channel:</b> @{clean_wm}\n"
+            f"💾 <b>Film di database lokal:</b> {local_count}\n"
+            f"☁️ <b>Film di Supabase:</b> {cloud_count if cloud_count >= 0 else 'tidak tersedia'}\n\n"
+            f"<b>Apa yang akan dilakukan:</b>\n"
+            f"1. Menghapus semua baris katalog di Supabase\n"
+            f"2. Mengisi ulang dari katalog lokal\n"
+            f"3. Membuat index unik baru yang bersih\n\n"
+            f"⚠️ <i>Pastikan jumlah lokal sudah benar (jalankan /synckatalog dulu).</i>\n\n"
+            f"Ketik <code>/resetcloud ya</code> untuk melanjutkan.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    status = await msg.reply_text("🧹 <i>Membersihkan & mengisi ulang katalog cloud...</i>", parse_mode=ParseMode.HTML)
+    res = await _engine.cache.async_rebuild_cloud_catalog(clean_wm, min_movies=10)
+    if res.get("ok"):
+        await status.edit_text(
+            f"✅ <b>KATALOG CLOUD BERHASIL DIBERSIHKAN</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🗑️ <b>Baris lama dihapus:</b> {res.get('deleted')}\n"
+            f"☁️ <b>Film diunggah ulang:</b> {res.get('pushed')}/{res.get('local')}\n\n"
+            f"<i>Sekarang restart bot — log harus menampilkan jumlah film yang sama, bukan 0.</i>",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        await status.edit_text(
+            f"⚠️ <b>Gagal / dibatalkan:</b>\n"
+            f"<code>{html.escape(str(res.get('reason') or 'tidak diketahui')[:300])}</code>\n\n"
+            f"💾 Lokal: {res.get('local')} film • ☁️ Terhapus: {res.get('deleted')} • ⬆️ Terkirim: {res.get('pushed')}",
+            parse_mode=ParseMode.HTML
+        )
+
+
 @app.on_message(filters.command(["healthcheck", "auditkatalog", "audit"]))
 async def healthcheck_cmd(client: Client, msg: Message):
     if not check_admin(msg):

@@ -518,6 +518,69 @@ class SupabaseSyncService:
     async def async_sync_catalog_bulk(self, movies: List[Dict[str, Any]]) -> int:
         return await asyncio.to_thread(self.sync_catalog_bulk, movies)
 
+    def count_cloud_catalog(self) -> int:
+        """Hitung jumlah baris katalog di cloud (-1 jika tidak tersedia)."""
+        if not self._enabled:
+            return -1
+        conn = None
+        try:
+            conn = self._get_connection()
+            if not conn:
+                return -1
+            self._ensure_pg_tables(conn)
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM movie_catalog")
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+        except Exception as e:
+            logger.warning(f"Hitung katalog cloud gagal: {e}")
+            return -1
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def reset_catalog(self) -> int:
+        """Kosongkan tabel katalog cloud. Return jumlah baris yang dihapus (-1 = gagal)."""
+        if not self._enabled:
+            return -1
+        conn = None
+        try:
+            conn = self._get_connection()
+            if not conn:
+                return -1
+            self._ensure_pg_tables(conn)
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM movie_catalog")
+                row = cur.fetchone()
+                before = int(row[0]) if row else 0
+                cur.execute("DELETE FROM movie_catalog")
+            conn.commit()
+            logger.warning(f"🧹 Katalog cloud dikosongkan: {before} baris dihapus")
+            return before
+        except Exception as e:
+            logger.warning(f"Reset katalog cloud gagal: {e}")
+            try:
+                if conn:
+                    conn.rollback()
+            except Exception:
+                pass
+            return -1
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    async def async_reset_catalog(self) -> int:
+        return await asyncio.to_thread(self.reset_catalog)
+
+    async def async_count_cloud_catalog(self) -> int:
+        return await asyncio.to_thread(self.count_cloud_catalog)
+
     async def async_save_scheduled_post(self, post: Dict[str, Any]):
         """Asynchronously syncs a scheduled prime-time post to Supabase."""
         if not self._enabled:

@@ -294,6 +294,44 @@ class MetadataCache:
             logger.warning(f"Push catalog to cloud gagal: {e}")
             return 0
 
+    async def async_rebuild_cloud_catalog(self, channel_username: str, min_movies: int = 10) -> Dict[str, Any]:
+        """BERSIHKAN TOTAL: kosongkan katalog cloud lalu isi ulang dari katalog lokal.
+
+        Aman karena lokal (yang sudah discan dari channel) jadi sumber kebenaran.
+        Ditolak jika katalog lokal terlalu sedikit — mencegah cloud kosong permanen.
+        """
+        result = {"ok": False, "local": 0, "deleted": -1, "pushed": 0, "reason": ""}
+        try:
+            movies = self.get_deduplicated_catalog(channel_username)
+            result["local"] = len(movies)
+            if not self.cloud.is_enabled:
+                result["reason"] = "Supabase tidak aktif"
+                return result
+            if len(movies) < min_movies:
+                result["reason"] = (
+                    f"Katalog lokal hanya {len(movies)} film (minimum {min_movies}). "
+                    "Jalankan /synckatalog dulu agar data lokal lengkap sebelum cloud dibersihkan."
+                )
+                return result
+
+            for m in movies:
+                m.setdefault("channel_username", (channel_username or "").lstrip("@").strip().lower())
+
+            result["deleted"] = await self.cloud.async_reset_catalog()
+            if result["deleted"] == -1:
+                result["reason"] = "Gagal mengosongkan tabel cloud (cek koneksi/izin Supabase)"
+                return result
+
+            result["pushed"] = await self.cloud.async_sync_catalog_bulk(movies)
+            result["ok"] = result["pushed"] > 0
+            if not result["ok"]:
+                result["reason"] = "Cloud berhasil dikosongkan tetapi pengisian ulang gagal"
+            return result
+        except Exception as e:
+            result["reason"] = str(e)
+            logger.warning(f"Rebuild cloud catalog gagal: {e}")
+            return result
+
     def ping_supabase_keepalive(self) -> Dict[str, Any]:
         """Triggers keepalive ping to Supabase and updates local cache setting."""
         if not self.cloud.is_enabled:
