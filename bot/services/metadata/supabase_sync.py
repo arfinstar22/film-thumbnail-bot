@@ -220,7 +220,9 @@ class SupabaseSyncService:
                 p_cur.execute(
                     "SELECT title, year, rating, genre, quality, channel_username, message_id, caption, file_id, season, episode FROM movie_catalog"
                 )
-                for row in p_cur.fetchall():
+                cloud_rows = p_cur.fetchall()
+                counts["cloud_total"] = len(cloud_rows)
+                for row in cloud_rows:
                     # Check if already exists in sqlite
                     s_cur.execute(
                         "SELECT id FROM movie_catalog WHERE LOWER(channel_username) = ? AND message_id = ?",
@@ -305,9 +307,13 @@ class SupabaseSyncService:
 
             sqlite_conn.commit()
             dur = (time.time() - start_t) * 1000
+            # LOG FIX: dulu hanya melaporkan baris BARU masuk SQLite (bisa 0 walau
+            # cloud penuh). Sekarang laporkan juga TOTAL film yang ada di cloud.
+            cloud_total = counts.get("cloud_total", 0)
             logger.info(
                 f"🎉 Supabase Cloud -> SQLite Hydration Complete in {dur:.1f}ms! "
-                f"({counts['catalog']} films, {counts['settings']} settings, {counts['scheduled']} antrean, {counts['requests']} request restored)"
+                f"(cloud: {cloud_total} film | baru masuk lokal: {counts['catalog']} | "
+                f"{counts['settings']} settings, {counts['scheduled']} antrean, {counts['requests']} request)"
             )
             return counts
         except Exception as e:
