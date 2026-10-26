@@ -1119,6 +1119,56 @@ class MetadataCache:
             "top_rated": top_rated
         }
 
+    # ------------------ DIGEST / EDITORIAL HELPERS ------------------
+    @staticmethod
+    def _rating_value(rating_str: Any) -> float:
+        """Ambil angka rating dari string seperti '7.8 / 10 • TMDb'."""
+        m = re.search(r"([\d]+(?:\.\d+)?)", str(rating_str or ""))
+        if not m:
+            return 0.0
+        try:
+            val = float(m.group(1))
+            return val if 1.0 <= val <= 10.0 else 0.0
+        except ValueError:
+            return 0.0
+
+    def get_top_picks(self, channel_username: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Film rating tertinggi di katalog (dipakai untuk digest mingguan / Top 10)."""
+        movies = self.get_deduplicated_catalog(channel_username)
+        scored = []
+        for m in movies:
+            val = self._rating_value(m.get("rating"))
+            if val <= 0:
+                continue
+            scored.append((val, m))
+        # Rating tertinggi; tie-breaker tahun terbaru lalu message_id terbaru
+        scored.sort(key=lambda x: (x[0], x[1].get("year") or 0, x[1].get("message_id") or 0), reverse=True)
+        out = []
+        for val, m in scored[:max(1, limit)]:
+            item = dict(m)
+            item["rating_value"] = val
+            out.append(item)
+        return out
+
+    def get_newest_movies(self, channel_username: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """Film yang paling baru ditambahkan ke katalog channel."""
+        movies = self.get_deduplicated_catalog(channel_username)
+        movies.sort(key=lambda m: (m.get("message_id") or 0), reverse=True)
+        return [dict(m) for m in movies[:max(1, limit)]]
+
+    def pick_random_movie(self, channel_username: str, genre_hint: str = "") -> Optional[Dict[str, Any]]:
+        """Pilih 1 film acak (untuk fitur 'Pilih Film Malam Ini' / shuffle)."""
+        import random as _random
+        movies = self.get_deduplicated_catalog(channel_username)
+        if not movies:
+            return None
+        hint = (genre_hint or "").strip().lower()
+        if hint and hint not in ("acak", "random", "shuffle"):
+            pool = [m for m in movies if hint in (m.get("genre") or "").lower()]
+            if pool:
+                movies = pool
+        return _random.choice(movies)
+
     # ------------------ MOVIE REQUEST SYSTEM ------------------
     def _ensure_requests_table(self, conn):
         conn.execute("""

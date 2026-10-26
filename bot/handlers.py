@@ -643,6 +643,22 @@ async def scheduler_worker(client: Client):
             except Exception:
                 pass
             now_ts = int(time.time())
+            # DIGEST MINGGUAN: Senin 19:00-19:59 WIB, sekali per minggu per channel.
+            try:
+                now_wib = datetime.datetime.now(WIB)
+                if now_wib.weekday() == 0 and now_wib.hour == 19:
+                    owner_chat = _engine.cache.get_setting("owner_user_id", "")
+                    wm_set = _engine.cache.get_setting(f"watermark_{owner_chat}", CHANNEL_WATERMARK) if owner_chat else CHANNEL_WATERMARK
+                    digest_wm = (wm_set or "").lstrip("@").strip().lower()
+                    if digest_wm and _engine.cache.get_setting(f"digest_enabled_{digest_wm}", "on") == "on":
+                        this_week = now_wib.strftime("%G-W%V")
+                        last_key = f"digest_last_{digest_wm}"
+                        if _engine.cache.get_setting(last_key, "") != this_week:
+                            if await publish_weekly_digest(client, int(owner_chat or 0), digest_wm):
+                                _engine.cache.set_setting(last_key, this_week)
+                                logger.info(f"Digest mingguan terkirim ke @{digest_wm} ({this_week})")
+            except Exception as dge:
+                logger.debug(f"Weekly digest check skipped: {dge}")
             due_posts = _engine.cache.get_due_scheduled_posts(now_ts)
             for item in due_posts:
                 try:
@@ -1178,6 +1194,9 @@ BOT_COMMANDS_LIST = [
     BotCommand("start", "Panduan lengkap & status bot"),
     BotCommand("request", "Kirim permintaan judul film"),
     BotCommand("mood", "Rekomendasi film sesuai mood / genre"),
+    BotCommand("acak", "Pilih film acak (bingung mau nonton apa)"),
+    BotCommand("top10", "Posting Top 10 film rating tertinggi"),
+    BotCommand("digest", "Atur digest Top 10 mingguan otomatis"),
     BotCommand("cari", "Cari film di database channel"),
     BotCommand("queue", "Antrean & jadwal tayang prime-time"),
     BotCommand("postjadwal", "Posting jadwal film hari ini ke channel"),
@@ -4566,6 +4585,258 @@ async def stats_cmd(client: Client, msg: Message):
     )
 
     await msg.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+
+# ==========================================================================
+# EDITORIAL FEATURES (Top 10 / Film Acak / Digest Mingguan)
+# Semua fitur ini HANYA menambah pesan baru — format rich article channel
+# tidak diubah sama sekali.
+# ==========================================================================
+_MEDALS = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+
+
+def build_top10_payload(clean_wm: str, picks: List[Dict[str, Any]], heading: str = "🏆 TOP 10 FILM RATING TERTINGGI") -> Tuple[str, Optional[InlineKeyboardMarkup]]:
+    """Bentuk teks + tombol untuk post Top 10 (dipakai /top10 dan digest otomatis)."""
+    lines = [
+        f"{heading}",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"📢 <b>@{clean_wm}</b> • <i>Pilihan terbaik dari koleksi kami</i>",
+        ""
+    ]
+    for idx, m in enumerate(picks[:10]):
+        medal = _MEDALS[idx] if idx < len(_MEDALS) else f"{idx + 1}."
+        title = html.escape(m.get("title") or "Film")
+        year = f" ({m['year']})" if m.get("year") else ""
+        rating = m.get("rating_value") or 0
+        r_txt = f"⭐ {rating:.1f}" if rating else "⭐ -"
+        mid = m.get("message_id")
+        if mid:
+            lines.append(f"{medal} <a href=\"https://t.me/{clean_wm}/{mid}\"><b>{title}</b>{year}</a> — {r_txt}")
+        else:
+            lines.append(f"{medal} <b>{title}</b>{year} — {r_txt}")
+
+    lines.append("")
+    lines.append("🍿 <i>Ketuk judul untuk langsung menonton.</i>")
+
+    buttons = []
+    row = []
+    for m in picks[:6]:
+        mid = m.get("message_id")
+        if not mid:
+            continue
+        label = (m.get("title") or "Film")[:22]
+        row.append(InlineKeyboardButton(f"🎬 {label}", url=f"https://t.me/{clean_wm}/{mid}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton(f"📢 Buka Semua Film @{clean_wm}", url=f"https://t.me/{clean_wm}")])
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+@app.on_message(filters.command(["top10", "top", "terbaik"]))
+async def top10_cmd(client: Client, msg: Message):
+    """Posting daftar Top 10 film rating tertinggi ke channel."""
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
+    chat_id = msg.chat.id
+    args = msg.text.split()[1:] if msg.text else []
+    target_wm = args[0] if args else _get_user_watermark(chat_id)
+    clean_wm = (target_wm or "").lstrip("@").strip().lower()
+    if not clean_wm:
+        await msg.reply_text("❌ Channel belum diatur. Gunakan <code>/top10 @namachannel</code>.", parse_mode=ParseMode.HTML)
+        return
+
+    picks = _engine.cache.get_top_picks(clean_wm, limit=10)
+    if not picks:
+        await msg.reply_text(
+            f"ℹ️ <b>Belum ada film dengan rating</b> di @{clean_wm}.\n"
+            f"<i>Rating terisi otomatis saat film diposting ulang / tersedia di TMDb.</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    text, kb = build_top10_payload(clean_wm, picks)
+    status = await msg.reply_text("📤 <i>Mempublikasikan Top 10 ke channel...</i>", parse_mode=ParseMode.HTML)
+    try:
+        sent = await client.send_message(
+            chat_id=f"@{clean_wm}",
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb,
+            disable_web_page_preview=True
+        )
+        await status.edit_text(
+            f"✅ <b>Top 10 berhasil dipublikasikan ke @{clean_wm}!</b>\n\n"
+            f"👉 <a href=\"https://t.me/{clean_wm}/{sent.id}\">Lihat postingan</a>",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        logger.warning(f"Gagal posting Top 10: {e}")
+        await status.edit_text(
+            f"❌ <b>Gagal posting ke @{clean_wm}:</b> <code>{html.escape(str(e)[:150])}</code>",
+            parse_mode=ParseMode.HTML
+        )
+
+
+@app.on_message(filters.command(["acak", "random", "shuffle", "pilihkan"]))
+async def random_movie_cmd(client: Client, msg: Message):
+    """Pilih 1 film acak dari katalog — buat bingung mau nonton apa."""
+    chat_id = msg.chat.id
+    args = msg.text.split()[1:] if msg.text else []
+    clean_wm = _get_user_watermark(chat_id).lstrip("@").strip().lower()
+    genre_hint = " ".join(args) if args else ""
+
+    movie = _engine.cache.pick_random_movie(clean_wm, genre_hint=genre_hint) if clean_wm else None
+    if not movie:
+        await msg.reply_text(
+            "🎲 <b>Belum bisa memilih film.</b>\n"
+            "<i>Katalog channel masih kosong atau genre yang diminta tidak ada. "
+            "Coba <code>/acak</code> tanpa genre.</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    title = html.escape(movie.get("title") or "Film")
+    year = f" ({movie['year']})" if movie.get("year") else ""
+    mid = movie.get("message_id")
+    link = f"https://t.me/{clean_wm}/{mid}" if mid else f"https://t.me/{clean_wm}"
+
+    await msg.reply_text(
+        f"🎲 <b>PILIHAN FILM MALAM INI</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎬 <b>{title}</b>{year}\n"
+        f"⭐ <b>{html.escape(str(movie.get('rating') or '-'))}</b> • 🎭 {html.escape(str(movie.get('genre') or '-'))}\n\n"
+        f"👉 <a href=\"{link}\">Klik untuk menonton</a>\n\n"
+        f"<i>Bingung mau nonton apa? Biar bot yang pilihkan 🍿</i>",
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🍿 Tonton Sekarang", url=link)],
+            [InlineKeyboardButton("🎲 Acak Lagi", callback_data="random_again")],
+        ])
+    )
+
+
+@app.on_callback_query(filters.regex(r"^random_again$"))
+async def cb_random_again(client: Client, call: CallbackQuery):
+    """Tombol 'Acak Lagi' — pilih ulang film acak tanpa perlu ketik ulang."""
+    chat_id = call.message.chat.id
+    clean_wm = _get_user_watermark(chat_id).lstrip("@").strip().lower()
+    movie = _engine.cache.pick_random_movie(clean_wm) if clean_wm else None
+    if not movie:
+        await call.answer("Katalog masih kosong.", show_alert=True)
+        return
+    title = html.escape(movie.get("title") or "Film")
+    year = f" ({movie['year']})" if movie.get("year") else ""
+    mid = movie.get("message_id")
+    link = f"https://t.me/{clean_wm}/{mid}" if mid else f"https://t.me/{clean_wm}"
+    await call.answer("🎲 Pilihan baru!")
+    try:
+        await call.message.edit_text(
+            f"🎲 <b>PILIHAN FILM MALAM INI</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎬 <b>{title}</b>{year}\n"
+            f"⭐ <b>{html.escape(str(movie.get('rating') or '-'))}</b> • 🎭 {html.escape(str(movie.get('genre') or '-'))}\n\n"
+            f"👉 <a href=\"{link}\">Klik untuk menonton</a>\n\n"
+            f"<i>Bingung mau nonton apa? Biar bot yang pilihkan 🍿</i>",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🍿 Tonton Sekarang", url=link)],
+                [InlineKeyboardButton("🎲 Acak Lagi", callback_data="random_again")],
+            ])
+        )
+    except Exception:
+        pass
+
+
+async def publish_weekly_digest(client: Client, chat_id: int, clean_wm: str) -> bool:
+    """Kirim digest mingguan (Top 10) ke channel. Dipanggil manual via /digest atau scheduler."""
+    picks = _engine.cache.get_top_picks(clean_wm, limit=10)
+    if not picks:
+        return False
+    stats = _engine.cache.get_catalog_stats(clean_wm) or {}
+    total = stats.get("total", 0)
+    avg = stats.get("avg_rating", 0)
+
+    heading = "🏆 TOP 10 FILM PILIHAN MINGGU INI"
+    text, kb = build_top10_payload(clean_wm, picks, heading=heading)
+    if total:
+        text += f"\n\n📊 <i>Total koleksi: {total} film • Rata-rata rating {avg}/10</i>"
+
+    try:
+        await client.send_message(
+            chat_id=f"@{clean_wm}",
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb,
+            disable_web_page_preview=True
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"Weekly digest gagal dikirim ke @{clean_wm}: {e}")
+        return False
+
+
+@app.on_message(filters.command(["digest", "weekly", "topminggu"]))
+async def digest_cmd(client: Client, msg: Message):
+    """Atur / kirim digest Top 10 mingguan."""
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
+    chat_id = msg.chat.id
+    args = [a.lower() for a in (msg.text.split()[1:] if msg.text else [])]
+    clean_wm = _get_user_watermark(chat_id).lstrip("@").strip().lower()
+    if not clean_wm:
+        await msg.reply_text("❌ Channel belum diatur. Gunakan <code>/setwatermark @namachannel</code>.", parse_mode=ParseMode.HTML)
+        return
+
+    key = f"digest_enabled_{clean_wm}"
+    mode = args[0] if args else ""
+
+    if mode in ("on", "off"):
+        _engine.cache.set_setting(key, mode)
+        state = "✅ <b>Aktif</b> — dikirim otomatis tiap Senin 19:00 WIB" if mode == "on" else "⏸️ <b>Nonaktif</b>"
+        await msg.reply_text(
+            f"📅 <b>Digest Mingguan Top 10</b>\n"
+            f"📢 Channel: @{clean_wm}\n"
+            f"Status: {state}",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    if mode in ("now", "kirim", "send"):
+        ok = await publish_weekly_digest(client, chat_id, clean_wm)
+        await msg.reply_text(
+            "✅ <b>Digest mingguan berhasil dikirim ke channel!</b>" if ok
+            else "⚠️ <b>Gagal mengirim digest.</b> Pastikan katalog punya film dengan rating.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    enabled = _engine.cache.get_setting(key, "on")
+    last_sent = _engine.cache.get_setting(f"digest_last_{clean_wm}", "-")
+    await msg.reply_text(
+        f"📅 <b>DIGEST MINGGUAN TOP 10</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📢 <b>Channel:</b> @{clean_wm}\n"
+        f"⚙️ <b>Status:</b> {'✅ Aktif' if enabled == 'on' else '⏸️ Nonaktif'}\n"
+        f"🕖 <b>Jadwal:</b> Setiap <b>Senin 19:00 WIB</b>\n"
+        f"📤 <b>Terakhir dikirim:</b> <code>{html.escape(last_sent)}</code>\n\n"
+        f"<b>Perintah:</b>\n"
+        f"• <code>/digest on</code> — nyalakan otomatis\n"
+        f"• <code>/digest off</code> — matikan otomatis\n"
+        f"• <code>/digest now</code> — kirim sekarang\n"
+        f"• <code>/top10</code> — posting Top 10 seketika",
+        parse_mode=ParseMode.HTML
+    )
 
 
 @app.on_message(filters.command(["healthcheck", "auditkatalog", "audit"]))
