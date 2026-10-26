@@ -14,5 +14,7 @@ films.db
 *.db-wal
 *.sqlite
 *.db
-!bot/services/films.db
+# Database lokal TIDAK lagi di-commit: data asli ada di Supabase (sumber tunggal).
+# Sebelumnya bot/services/films.db (562 baris basi) ikut ke Docker image dan
+# membuat hitungan lokal vs cloud tidak sinkron.
 

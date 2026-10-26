@@ -109,7 +109,9 @@ class SupabaseSyncService:
                        USING movie_catalog b
                        WHERE a.id < b.id
                          AND LOWER(COALESCE(a.channel_username,'')) = LOWER(COALESCE(b.channel_username,''))
-                         AND a.message_id = b.message_id"""
+                         AND a.message_id = b.message_id
+                         AND a.message_id IS NOT NULL
+                         AND a.message_id > 0"""
                 )
             pg_conn.commit()
         except Exception as e:
