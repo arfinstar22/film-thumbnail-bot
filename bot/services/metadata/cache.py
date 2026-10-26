@@ -31,29 +31,32 @@ def normalize_movie_title_and_year(title: str, year: Optional[int] = None) -> Tu
     # Strip common video/audio/release tags
     t = re.sub(r"\b(1080p|720p|480p|2160p|4k|uhd|fhd|hd|web[-_. ]?dl|bluray|bdrip|hdrip|dvdrip|x264|x265|hevc|aac|dts)\b", " ", t, flags=re.I)
 
-    # Extract 4-digit year (1900-2099)
-    if not year:
-        ym = re.search(r"[\(\[]\s*(19\d\d|20\d\d)\s*[\)\]]", t)
-        if ym:
-            try:
-                year = int(ym.group(1))
-            except ValueError:
-                pass
-        else:
-            ym2 = re.search(r"(?:^|[\s._\-])(19\d\d|20\d\d)(?:$|[\s._\-])", t)
-            if ym2:
-                try:
-                    year = int(ym2.group(1))
-                except ValueError:
-                    pass
+    # 1. Check for release year in brackets/parentheses e.g. (2018) or [2019]
+    ym_bracket = re.search(r"[\(\[]\s*(19\d\d|20\d\d)\s*[\)\]]", t)
+    if ym_bracket:
+        bracket_y = int(ym_bracket.group(1))
+        if not year:
+            year = bracket_y
+        t = re.sub(r"[\(\[]\s*(?:19\d\d|20\d\d)\s*[\)\]]", " ", t)
 
-    # Remove the year from title string
-    t_noyear = re.sub(r"[\(\[]\s*(?:19\d\d|20\d\d)\s*[\)\]]", " ", t)
-    t_noyear = re.sub(r"(?:^|[\s._\-])(?:19\d\d|20\d\d)(?:$|[\s._\-])", " ", t_noyear)
+    # 2. Extract 4-digit release year (1900-2099) if still not known
+    year_matches = list(re.finditer(r"(?<!\d)(19\d\d|20\d\d)(?!\d)", t))
+    if not year and year_matches:
+        # In filenames like Dilan.1991.2019.720p, the release year is the LAST 4-digit token
+        year = int(year_matches[-1].group(1))
 
-    # If title has dot separators (filename style e.g. Para.Perasuk), convert dots to spaces
-    if "." in t_noyear and not re.search(r"\.\s", t_noyear):
-        t_noyear = t_noyear.replace(".", " ")
+    t_noyear = t
+    # 3. Only remove the release year from the title if:
+    #    - The specific release year is found
+    #    - Removing it does NOT leave the title empty (e.g. movie titled '1917' or '1984')
+    #    CRITICAL: Never strip numbers that are part of the title (e.g. '1990' in 'Dilan 1990' when release year is 2018)
+    if year:
+        cand = re.sub(rf"(?<!\d){year}(?!\d)", " ", t_noyear, count=1)
+        if cand.strip():
+            t_noyear = cand
+
+    # Convert dot/underscore separators in filenames to spaces
+    t_noyear = re.sub(r"[\._]+", " ", t_noyear)
 
     clean_disp = re.sub(r"\s+", " ", t_noyear).strip()
     # clean_key: alphanumeric lowercase without spaces or punctuation
@@ -62,7 +65,8 @@ def normalize_movie_title_and_year(title: str, year: Optional[int] = None) -> Tu
 
 
 def extract_movie_sequel_tag(title: str) -> Optional[str]:
-    """Extracts sequel/part indicators such as 2, 3, II, III, part 2, chapter 2."""
+    """Extracts sequel/part indicators such as 2, 3, II, III, part 2, chapter 2,
+    or 4-digit distinct title numbers (e.g. 1990, 1991, 1983, 1995, 2049)."""
     t = (title or "").lower().strip()
     m = re.search(r"\b(?:part|chapter|vol|volume|season)\s*(\d+|[ivx]+)\b", t, re.I)
     if m:
@@ -70,6 +74,9 @@ def extract_movie_sequel_tag(title: str) -> Optional[str]:
     m2 = re.search(r"\b(2|3|4|5|6|7|8|9|ii|iii|iv|v|vi|vii|viii)\b", t, re.I)
     if m2:
         return m2.group(1).lower()
+    m3 = re.search(r"(?<!\d)(19\d\d|20\d\d)(?!\d)", t)
+    if m3:
+        return m3.group(1).lower()
     return None
 
 
@@ -236,7 +243,9 @@ def calculate_search_relevance(
 
     # Year boost / penalty
     if q_year and year:
-        if q_year == year:
+        if str(q_year) in t_clean:
+            pass  # Year is part of the title (e.g. 'Dilan 1990'), do not penalize
+        elif q_year == year:
             base_score += 15.0
         elif abs(q_year - year) > 1:
             base_score -= 35.0

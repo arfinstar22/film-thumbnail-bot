@@ -168,6 +168,29 @@ class TestSmartSearchAndFuzzyMatching(unittest.TestCase):
         self.assertIsNotNone(found_exact)
         self.assertEqual(found_exact["title"], "Rasuk")
 
+    def test_dilan_franchise_sequels_not_duplicates(self):
+        # Catalog already has Dilan 1990 (2018) in setUp (message_id 104)
+        # 1. Dilan 1991 (2019) must NOT match Dilan 1990 (2018)
+        found1 = self.cache.find_existing_movie("DILAN 1991", 2019, "film_indonesia1")
+        self.assertIsNone(found1)
+
+        # 2. Filename style for Dilan 1991 must NOT match
+        found2 = self.cache.find_existing_movie("Dilan.1991.2019.720p.NF.WEB.DL.AAC2.0.x264.SEIKEL.mkv", 2019, "film_indonesia1")
+        self.assertIsNone(found2)
+
+        # 3. Dilan 1983 (2024) must NOT match
+        found3 = self.cache.find_existing_movie("Dilan 1983: Wo Ai Ni", 2024, "film_indonesia1")
+        self.assertIsNone(found3)
+
+        # 4. Ancika 1995 (2024) must NOT match
+        found4 = self.cache.find_existing_movie("Ancika: Dia yang Bersamaku 1995", 2024, "film_indonesia1")
+        self.assertIsNone(found4)
+
+        # 5. True duplicate of Dilan 1990 (2018) MUST be found
+        found_exact = self.cache.find_existing_movie("Dilan 1990", 2018, "film_indonesia1")
+        self.assertIsNotNone(found_exact)
+        self.assertEqual(found_exact["message_id"], 104)
+
     def test_delete_movie_posts_removes_from_search(self):
         # Movie 103 is Agak Laen
         results_before = self.cache.search_catalog("agak laen")

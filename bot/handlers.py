@@ -6693,10 +6693,10 @@ async def _process_video_task(client: Client, msg: Message):
         meta_title = meta.get("title") or filename
         meta_year = meta.get("year")
         if not meta_year and filename:
-            ym = re.search(r"\b(19\d\d|20\d\d)\b", filename)
-            if ym:
+            ym_all = re.findall(r"(?<!\d)(19\d\d|20\d\d)(?!\d)", filename)
+            if ym_all:
                 try:
-                    meta_year = int(ym.group(1))
+                    meta_year = int(ym_all[-1])
                 except ValueError:
                     pass
 
