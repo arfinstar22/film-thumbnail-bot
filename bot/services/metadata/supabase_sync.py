@@ -32,6 +32,7 @@ class SupabaseSyncService:
         self.supabase_url = os.getenv("SUPABASE_URL", "").strip()
         self.supabase_key = os.getenv("SUPABASE_KEY", "").strip()
         self._enabled = bool((self.db_url and HAS_PSYCOPG2) or (self.supabase_url and self.supabase_key))
+        self._pg_ready = False
         if not HAS_PSYCOPG2 and self.db_url:
             logger.warning("psycopg2 is not installed. Supabase direct DB sync disabled.")
 
@@ -45,13 +46,38 @@ class SupabaseSyncService:
         return psycopg2.connect(self.db_url, connect_timeout=6)
 
     def _ensure_pg_tables(self, pg_conn) -> None:
-        """CLOUD FIX: pastikan tabel ada di Postgres/Supabase.
+        """CLOUD FIX v2: siapkan tabel cloud dengan aman.
 
-        Sebelumnya hanya sisi SQLite yang membuat tabel; di cloud tabel
-        movie_catalog bisa tidak ada sehingga semua baca/tulis katalog GAGAL
-        diam-diam (error cuma logger.debug) -> hydrate selalu '0 films'.
+        Bug v1: semua DDL dijalankan dalam SATU transaksi. Saat CREATE UNIQUE
+        INDEX gagal (karena data lama duplikat), rollback membatalkan juga
+        ALTER TABLE tmdb_id -> kolom tidak pernah ada -> semua UPDATE gagal.
+
+        v2: setiap statement punya transaksi sendiri, duplikat dibersihkan
+        dulu, dan kegagalan index TIDAK menggagalkan kolom/tabel.
         """
-        ddl = [
+        # Cache per-proses agar tidak DDL berulang tiap simpan film
+        if getattr(self, "_pg_ready", False):
+            return
+
+        def _run(stmt: str, fatal: bool = False) -> bool:
+            try:
+                with pg_conn.cursor() as cur:
+                    cur.execute(stmt)
+                pg_conn.commit()
+                return True
+            except Exception as e:
+                try:
+                    pg_conn.rollback()
+                except Exception:
+                    pass
+                if fatal:
+                    logger.warning(f"Cloud DDL gagal: {e}")
+                else:
+                    logger.debug(f"Cloud DDL dilewati: {e}")
+                return False
+
+        # 1. Tabel dasar
+        _run(
             """CREATE TABLE IF NOT EXISTS movie_catalog (
                 id SERIAL PRIMARY KEY,
                 title TEXT,
@@ -65,33 +91,41 @@ class SupabaseSyncService:
                 file_id TEXT,
                 season INTEGER,
                 episode INTEGER,
-                tmdb_id INTEGER,
-                original_title TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )""",
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_cat_chan_msg ON movie_catalog (LOWER(channel_username), message_id)",
-            """CREATE TABLE IF NOT EXISTS ai_cache (
-                query TEXT PRIMARY KEY,
-                caption TEXT
-            )""",
-        ]
+            fatal=True,
+        )
+        _run("CREATE TABLE IF NOT EXISTS ai_cache (query TEXT PRIMARY KEY, caption TEXT)")
+
+        # 2. Kolom baru (masing-masing transaksi sendiri)
+        _run("ALTER TABLE movie_catalog ADD COLUMN IF NOT EXISTS tmdb_id INTEGER")
+        _run("ALTER TABLE movie_catalog ADD COLUMN IF NOT EXISTS original_title TEXT")
+
+        # 3. Bersihkan duplikat lama SEBELUM bikin index unik
         try:
             with pg_conn.cursor() as cur:
-                for stmt in ddl:
-                    cur.execute(stmt)
-                # kolom baru (abaikan jika sudah ada)
-                for col in ("tmdb_id INTEGER", "original_title TEXT"):
-                    try:
-                        cur.execute(f"ALTER TABLE movie_catalog ADD COLUMN IF NOT EXISTS {col}")
-                    except Exception:
-                        pass
+                cur.execute(
+                    """DELETE FROM movie_catalog a
+                       USING movie_catalog b
+                       WHERE a.id < b.id
+                         AND LOWER(COALESCE(a.channel_username,'')) = LOWER(COALESCE(b.channel_username,''))
+                         AND a.message_id = b.message_id"""
+                )
             pg_conn.commit()
         except Exception as e:
-            logger.warning(f"Gagal menyiapkan tabel cloud: {e}")
+            logger.debug(f"Dedup katalog cloud dilewati: {e}")
             try:
                 pg_conn.rollback()
             except Exception:
                 pass
+
+        # 4. Index unik (kalau masih gagal, tidak fatal)
+        _run(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_cat_chan_msg "
+            "ON movie_catalog (LOWER(channel_username), message_id)"
+        )
+
+        self._pg_ready = True
 
     def hydrate_to_sqlite(self, sqlite_conn) -> Dict[str, int]:
         """Downloads all cloud data from Supabase to local SQLite on bot startup.
@@ -319,48 +353,92 @@ class SupabaseSyncService:
         await asyncio.to_thread(self._sync_write_catalog, movie)
 
     def _sync_write_catalog(self, m: Dict[str, Any]):
-        """CLOUD FIX: UPSERT katalog (insert atau update) + error terlihat di log."""
+        """CLOUD FIX v2: UPSERT katalog yang tahan walau kolom baru belum ada."""
         conn = None
         try:
             conn = self._get_connection()
             if conn:
                 self._ensure_pg_tables(conn)
-                with conn.cursor() as cur:
-                    # Cek dulu: update kalau sudah ada (hindari duplikat)
-                    cur.execute(
-                        "SELECT id FROM movie_catalog WHERE LOWER(channel_username) = LOWER(%s) AND message_id = %s LIMIT 1",
-                        (m.get("channel_username") or "", m.get("message_id"))
-                    )
-                    existing = cur.fetchone()
-                    if existing:
+
+                def _write(include_new_cols: bool):
+                    with conn.cursor() as cur:
                         cur.execute(
-                            """UPDATE movie_catalog
-                               SET title=%s, year=%s, rating=%s, genre=%s, quality=%s,
-                                   caption=%s, file_id=COALESCE(%s, file_id),
-                                   season=COALESCE(%s, season), episode=COALESCE(%s, episode),
-                                   tmdb_id=COALESCE(%s, tmdb_id), original_title=COALESCE(%s, original_title)
-                               WHERE id=%s""",
-                            (
-                                m.get("title"), m.get("year"), m.get("rating"),
-                                m.get("genre"), m.get("quality"), m.get("caption"),
-                                m.get("file_id"), m.get("season"), m.get("episode"),
-                                m.get("tmdb_id"), m.get("original_title"), existing[0]
-                            )
+                            "SELECT id FROM movie_catalog WHERE LOWER(channel_username) = LOWER(%s) AND message_id = %s LIMIT 1",
+                            (m.get("channel_username") or "", m.get("message_id"))
                         )
+                        existing = cur.fetchone()
+                        if existing:
+                            if include_new_cols:
+                                cur.execute(
+                                    """UPDATE movie_catalog
+                                       SET title=%s, year=%s, rating=%s, genre=%s, quality=%s,
+                                           caption=%s, file_id=COALESCE(%s, file_id),
+                                           season=COALESCE(%s, season), episode=COALESCE(%s, episode),
+                                           tmdb_id=COALESCE(%s, tmdb_id), original_title=COALESCE(%s, original_title)
+                                       WHERE id=%s""",
+                                    (
+                                        m.get("title"), m.get("year"), m.get("rating"),
+                                        m.get("genre"), m.get("quality"), m.get("caption"),
+                                        m.get("file_id"), m.get("season"), m.get("episode"),
+                                        m.get("tmdb_id"), m.get("original_title"), existing[0]
+                                    )
+                                )
+                            else:
+                                cur.execute(
+                                    """UPDATE movie_catalog
+                                       SET title=%s, year=%s, rating=%s, genre=%s, quality=%s,
+                                           caption=%s, file_id=COALESCE(%s, file_id),
+                                           season=COALESCE(%s, season), episode=COALESCE(%s, episode)
+                                       WHERE id=%s""",
+                                    (
+                                        m.get("title"), m.get("year"), m.get("rating"),
+                                        m.get("genre"), m.get("quality"), m.get("caption"),
+                                        m.get("file_id"), m.get("season"), m.get("episode"),
+                                        existing[0]
+                                    )
+                                )
+                        else:
+                            if include_new_cols:
+                                cur.execute(
+                                    """INSERT INTO movie_catalog
+                                       (title, year, rating, genre, quality, channel_username, message_id, caption, file_id, season, episode, tmdb_id, original_title)
+                                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                                    (
+                                        m.get("title"), m.get("year"), m.get("rating"),
+                                        m.get("genre"), m.get("quality"), m.get("channel_username"),
+                                        m.get("message_id"), m.get("caption"), m.get("file_id"),
+                                        m.get("season"), m.get("episode"), m.get("tmdb_id"),
+                                        m.get("original_title")
+                                    )
+                                )
+                            else:
+                                cur.execute(
+                                    """INSERT INTO movie_catalog
+                                       (title, year, rating, genre, quality, channel_username, message_id, caption, file_id, season, episode)
+                                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                                    (
+                                        m.get("title"), m.get("year"), m.get("rating"),
+                                        m.get("genre"), m.get("quality"), m.get("channel_username"),
+                                        m.get("message_id"), m.get("caption"), m.get("file_id"),
+                                        m.get("season"), m.get("episode")
+                                    )
+                                )
+                    conn.commit()
+
+                try:
+                    _write(include_new_cols=True)
+                except Exception as e1:
+                    # Kolom baru belum ada di cloud -> ulangi tanpa kolom itu
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    if "tmdb_id" in str(e1) or "original_title" in str(e1) or "does not exist" in str(e1):
+                        logger.info("Kolom tmdb_id belum ada di cloud — menulis versi dasar.")
+                        self._pg_ready = False  # paksa setup ulang lain waktu
+                        _write(include_new_cols=False)
                     else:
-                        cur.execute(
-                            """INSERT INTO movie_catalog
-                               (title, year, rating, genre, quality, channel_username, message_id, caption, file_id, season, episode, tmdb_id, original_title)
-                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                            (
-                                m.get("title"), m.get("year"), m.get("rating"),
-                                m.get("genre"), m.get("quality"), m.get("channel_username"),
-                                m.get("message_id"), m.get("caption"), m.get("file_id"),
-                                m.get("season"), m.get("episode"), m.get("tmdb_id"),
-                                m.get("original_title")
-                            )
-                        )
-                conn.commit()
+                        raise
         except Exception as e:
             logger.warning(f"Supabase save_catalog gagal: {e}")
             try:
