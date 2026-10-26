@@ -5479,15 +5479,20 @@ async def send_or_update_backup_document(
         )
 
         sent_doc = None
-        # BACKUP FIX: retry 3x dengan backoff, jangan reconnect loop tanpa henti.
+        # BACKUP FIX: retry 3x dengan backoff + timeout paksa 120s per percobaan.
+        # Pyrogram internal retry SaveFilePart bisa gantung 5+ menit — kita potong via wait_for
+        # agar status "Mengekspor..." tidak nyangkut selamanya. Tampilan channel tidak diubah.
         for _attempt in range(3):
             try:
-                sent_doc = await client.send_document(
-                    chat_id=chat_id,
-                    document=temp_path,
-                    file_name=doc_name,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML
+                sent_doc = await asyncio.wait_for(
+                    client.send_document(
+                        chat_id=chat_id,
+                        document=temp_path,
+                        file_name=doc_name,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML
+                    ),
+                    timeout=120.0
                 )
                 break
             except FloodWait as _fw:
@@ -6523,7 +6528,15 @@ async def backup_catalog_cmd(client: Client, msg: Message):
         if sent_doc:
             await status_msg.delete()
         else:
-            await status_msg.edit_text("❌ Gagal membuat file backup.", parse_mode=ParseMode.HTML)
+            # BACKUP FIX: pesan gagal yang jelas — data tetap aman di DB/Supabase.
+            await status_msg.edit_text(
+                "⚠️ <b>Upload file backup timeout (jaringan Render → Telegram media sibuk).</b>\n\n"
+                f"📢 Channel: @{clean_wm}\n"
+                f"🎬 Data: <b>{len(movies)} film tetap aman</b> di database bot.\n\n"
+                "<i>Jangan tekan /backup berulang — tiap tekan bikin antrean baru. "
+                "Tunggu 10 menit lalu coba 1x lagi, atau biarkan auto-backup 03:00 WIB yang kirim.</i>",
+                parse_mode=ParseMode.HTML
+            )
     except Exception as e:
         logger.exception("Backup export error")
         await status_msg.edit_text(f"❌ <b>Gagal membuat backup:</b> <code>{e}</code>", parse_mode=ParseMode.HTML)
