@@ -34,34 +34,39 @@ def ping_postgres(db_url: str) -> bool:
     if raw_url.startswith("postgres://"):
         raw_url = "postgresql://" + raw_url[11:]
 
-    conn = None
-    try:
-        conn = psycopg2.connect(raw_url, connect_timeout=8)
-        now_iso = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT
-                );
-            """)
-            cur.execute("""
-                INSERT INTO settings (key, value)
-                VALUES ('supabase_last_keepalive', %s)
-                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
-            """, (now_iso,))
-        conn.commit()
-        print(f"✅ PostgreSQL keepalive ping SUCCESS! (Updated supabase_last_keepalive to {now_iso})")
-        return True
-    except Exception as e:
-        print(f"❌ PostgreSQL keepalive ping FAILED: {e}")
-        return False
-    finally:
-        if conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
+    last_err = None
+    for attempt in (1, 2):
+        conn = None
+        try:
+            conn = psycopg2.connect(raw_url, connect_timeout=8)
+            now_iso = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT
+                    );
+                """)
+                cur.execute("""
+                    INSERT INTO settings (key, value)
+                    VALUES ('supabase_last_keepalive', %s)
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+                """, (now_iso,))
+            conn.commit()
+            print(f"✅ PostgreSQL keepalive ping SUCCESS! (attempt {attempt}, updated supabase_last_keepalive to {now_iso})")
+            return True
+        except Exception as e:
+            last_err = e
+            print(f"⚠️ PostgreSQL attempt {attempt}/2 failed: {e}")
+            time.sleep(3)
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    print(f"❌ PostgreSQL keepalive ping FAILED after 2 attempts: {last_err}")
+    return False
 
 
 def ping_rest(sb_url: str, sb_key: str) -> bool:
@@ -114,6 +119,15 @@ def main():
     sb_key = os.getenv("SUPABASE_KEY", "").strip()
     render_url = os.getenv("RENDER_EXTERNAL_URL", "").strip() or os.getenv("RENDER_WEB_URL", "").strip()
 
+    # FIX: laporkan status tiap target TANPA bocorkan isi secret.
+    # Run #16 gagal 11 detik = kemungkinan besar semua kosong (secrets GitHub belum di-set).
+    print("--- Keepalive target check ---")
+    print(f"DATABASE_URL: {'CONFIGURED' if db_url else 'MISSING (set di GitHub Settings → Secrets → Actions)'}")
+    print(f"SUPABASE_URL: {'CONFIGURED' if sb_url else 'MISSING (set di GitHub Settings → Secrets → Actions)'}")
+    print(f"SUPABASE_KEY: {'CONFIGURED' if sb_key else 'MISSING (set di GitHub Settings → Secrets → Actions)'}")
+    print(f"RENDER_EXTERNAL_URL: {'CONFIGURED' if render_url else 'MISSING (opsional, hanya untuk wake-up Render)'}")
+    print("----------------------------")
+
     successes = 0
 
     if db_url:
@@ -131,7 +145,10 @@ def main():
         print(f"🎉 Supabase Keepalive complete! Total successful pings: {successes}")
         sys.exit(0)
     else:
-        print("❌ Supabase Keepalive could not ping any targets. Check environment variables.")
+        print("❌ Supabase Keepalive could not ping any targets.")
+        print("   1) Buka GitHub repo → Settings → Secrets and variables → Actions")
+        print("   2) Pastikan ada: DATABASE_URL, SUPABASE_URL, SUPABASE_KEY")
+        print("   3) Klik 'Re-run jobs' setelah secrets diisi.")
         sys.exit(1)
 
 
