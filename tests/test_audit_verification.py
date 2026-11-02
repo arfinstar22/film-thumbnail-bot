@@ -440,6 +440,29 @@ def test_poster_regeneration():
     print("✅ Poster Regeneration & Fix Menu: Keyboards, callbacks, sessions & banner sync verified!")
 
 
+def test_post_callback_inflight_and_catalog_check():
+    from bot.handlers import _posting_inflight
+    from bot.services.metadata.cache import MetadataCache
+    import tempfile
+
+    assert isinstance(_posting_inflight, set), "_posting_inflight must be a set"
+
+    with tempfile.NamedTemporaryFile(suffix=".db") as tf:
+        cache = MetadataCache(db_path=tf.name)
+        assert not cache.is_message_in_catalog("film_test", 12345)
+
+        cache.save_movie_post(
+            title="Laskar Pelangi",
+            year=2008,
+            channel_username="film_test",
+            message_id=12345
+        )
+        assert cache.is_message_in_catalog("film_test", 12345)
+        assert not cache.is_message_in_catalog("film_test", 99999)
+
+    print("✅ Post Concurrency Lock & Catalog Check verified!")
+
+
 if __name__ == "__main__":
     test_caption_generator()
     test_rating_service_non_ascii()
@@ -455,6 +478,7 @@ if __name__ == "__main__":
     test_supabase_cloud_sync()
     test_audiosub_and_request_match()
     test_website_prefix_cleaner()
+    test_post_callback_inflight_and_catalog_check()
     print("\n🎉 ALL AUDIT VERIFICATION CHECKS PASSED!")
 
 

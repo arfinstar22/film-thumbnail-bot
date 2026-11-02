@@ -567,6 +567,23 @@ class MetadataCache:
                 except RuntimeError:
                     pass
 
+    def is_message_in_catalog(self, channel_username: str, message_id: int) -> bool:
+        """Returns True if a specific message_id is already stored in the catalog for the channel."""
+        clean_channel = (channel_username or "").lstrip("@").strip().lower()
+        if not clean_channel or not message_id:
+            return False
+        try:
+            conn = self._conn()
+            self._ensure_catalog_table(conn)
+            cur = conn.execute(
+                "SELECT 1 FROM movie_catalog WHERE LOWER(channel_username) = ? AND message_id = ? LIMIT 1",
+                (clean_channel, message_id)
+            )
+            return cur.fetchone() is not None
+        except Exception as e:
+            logger.debug(f"is_message_in_catalog check error: {e}")
+            return False
+
     def delete_movie_posts(self, message_ids: List[int], channel_username: Optional[str] = None) -> List[str]:
         """Delete records from movie_catalog by message_ids and return affected channel usernames."""
         if not message_ids:

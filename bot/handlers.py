@@ -85,6 +85,7 @@ CallbackQuery.answer = _safe_callback_answer
 _jobs = {}
 _jobs_by_msg: Dict[int, Dict[str, Any]] = {}
 _banner_sessions: Dict[int, Dict[str, Any]] = {}
+_posting_inflight: set = set()
 _user_states: Dict[int, str] = {}
 _pending_smart_requests: Dict[str, Dict[str, Any]] = {}
 _video_queue: asyncio.Queue = asyncio.Queue()
@@ -5593,13 +5594,6 @@ async def update_pinned_catalog(
     if not clean_channel:
         return 0
 
-    # Ensure local database has latest cloud sync before building catalog
-    if _engine.cache.cloud.is_enabled:
-        try:
-            _engine.cache.hydrate_from_cloud()
-        except Exception as che:
-            logger.debug(f"Cloud hydration check: {che}")
-
     movies = _engine.cache.get_deduplicated_catalog(clean_channel)
 
     # AUTO-HYDRATION SAFEGUARD:
@@ -8180,6 +8174,14 @@ async def handle_setaudiosub_choice(client: Client, call: CallbackQuery):
     await call.answer(alert_text, show_alert=True)
 
 
+@app.on_callback_query(filters.regex(r"^noop$"))
+async def handle_noop_callback(client: Client, call: CallbackQuery):
+    try:
+        await call.answer()
+    except Exception:
+        pass
+
+
 @app.on_callback_query(filters.regex(r"^post(_banner|_video)?:(\d+)$"))
 async def handle_post_callback(client: Client, call: CallbackQuery):
     if not check_admin(call):
@@ -8205,13 +8207,48 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
             await call.answer("Job kadaluarsa.", show_alert=True)
             return
 
+    # In-flight lock & debounce: cegah eksekusi ganda jika tombol diklik berkali-kali atau MTProto reconnect
+    if chat_id in _posting_inflight or job.get("is_posting"):
+        try:
+            await call.answer("⏳ Postingan sedang diproses ke channel, mohon tunggu sebentar...", show_alert=True)
+        except Exception:
+            pass
+        return
+
+    if job.get("posted"):
+        try:
+            await call.answer("✅ Film ini sudah berhasil diposting ke channel!", show_alert=True)
+        except Exception:
+            pass
+        return
+
     wm = _get_user_watermark(chat_id)
     if not wm.startswith("@") or len(wm) <= 1:
         await call.answer("Channel belum diatur. Gunakan /setwatermark @namachannel", show_alert=True)
         return
 
     progress_text = "🚀 Mengirim ke channel + Banner HD..." if with_banner else "🚀 Mengirim video ke channel..."
-    await call.answer(progress_text)
+    try:
+        await call.answer(progress_text)
+    except Exception as ce:
+        logger.debug(f"Failed to answer callback query: {ce}")
+
+    _posting_inflight.add(chat_id)
+    job["is_posting"] = True
+
+    # Segera ganti tombol di pesan admin jadi disabled agar tidak bisa diklik berulang kali di UI
+    try:
+        meta_tmp = job.get("metadata", {})
+        title_tmp = meta_tmp.get("title") or job.get("filename") or "Film"
+        if call.message:
+            await call.message.edit_reply_markup(
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"⏳ Sedang Mengunggah ({title_tmp})...", callback_data="noop")]
+                ])
+            )
+    except Exception:
+        pass
+
     try:
         meta = job.get("metadata", {})
         title_meta = meta.get("title") or job.get("filename") or "Film Ini"
@@ -8293,6 +8330,19 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
             pregenerated_banner_path=banner_file
         )
 
+        job["posted"] = True
+        _jobs.pop(chat_id, None)
+
+        if call.message:
+            try:
+                await call.message.edit_reply_markup(
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"✅ Sudah Diposting ke {wm}", callback_data="noop")]
+                    ])
+                )
+            except Exception:
+                pass
+
         clean_wm = wm.lstrip("@").strip()
         post_link = f"https://t.me/{clean_wm}/{sent_channel.id}" if sent_channel else f"https://t.me/{clean_wm}"
         mode_label = "Format Artikel Interaktif (Rich Article Post)"
@@ -8311,6 +8361,14 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
     except Exception as e:
         logger.exception("Post to channel error")
         err_msg = str(e)
+        if call.message:
+            try:
+                message_id = call.matches[0].group(2)
+                await call.message.edit_reply_markup(
+                    reply_markup=get_caption_kb(int(message_id), wm)
+                )
+            except Exception:
+                pass
         await call.message.reply_text(
             f"❌ <b>Gagal Posting ke {wm}:</b>\n\n"
             f"<code>{err_msg[:120]}</code>\n\n"
@@ -8320,6 +8378,10 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
             f"3. Tekan lagi tombol <b>🚀 Posting ke Channel</b>!",
             parse_mode=ParseMode.HTML
         )
+    finally:
+        _posting_inflight.discard(chat_id)
+        if job:
+            job.pop("is_posting", None)
 
 
 @app.on_callback_query(filters.regex(r"^banner:"))
@@ -9112,6 +9174,11 @@ async def auto_sync_new_channel_post(client: Client, msg: Message):
         if is_invalid_movie_title(msg_text[:60], msg_text):
             return
         if any(h in msg_text for h in ("KATALOG KOLEKSI FILM", "KATALOG & DAFTAR ISI", "PUSAT FILM INDONESIA")):
+            return
+
+        # Cegah proses ulang bila postingan ini baru saja diterbitkan & disimpan oleh bot sendiri
+        if _engine.cache.is_message_in_catalog(clean_channel, msg.id):
+            logger.debug(f"Pesan channel #{msg.id} di @{clean_channel} sudah tercatat di katalog, lewati auto-sync duplikat.")
             return
 
         info = parse_movie_from_channel_message(msg)
