@@ -31,7 +31,8 @@ from .services.video import (
     photo_thumbnail,
     inspect_media_streams
 )
-from .services.metadata.engine import MetadataEngine
+from .services.metadata.engine import MetadataEngine, rescue_poster_metadata
+from .services.metadata.banner import _download_image_bytes
 from .services.metadata.catalog import format_pinned_catalog, publish_or_update_telegraph_catalog, publish_movie_instant_view
 from .services.metadata.rich_post import (
     async_send_rich_article_post, build_rich_article_payload, async_delete_channel_post
@@ -7276,7 +7277,13 @@ async def _process_video_task(client: Client, msg: Message):
 
         thumb_path = os.path.join(tmp, "thumb.jpg")
         # Priority: 1. Official movie poster, 2. Original video thumb, 3. Branded gradient slate
-        active_thumb_src = poster_src if poster_src else raw_thumb_path
+        poster_bytes = _download_image_bytes(poster_src) if poster_src else None
+        if poster_bytes:
+            active_thumb_src = poster_bytes
+        elif raw_thumb_path and os.path.exists(raw_thumb_path):
+            active_thumb_src = raw_thumb_path
+        else:
+            active_thumb_src = poster_src
         try:
             _engine.thumb_gen.create_thumbnail(
                 source=active_thumb_src,
@@ -8416,12 +8423,21 @@ async def handle_banner_callback(client: Client, call: CallbackQuery):
     try:
         wm = _get_user_watermark(chat_id)
         poster_src = meta.get("poster_url") or meta.get("poster_path") or meta.get("thumb_path")
+        poster_bytes = _download_image_bytes(poster_src) if poster_src else None
+
+        # Poster kosong / gagal diunduh -> ambil langsung dari TMDb, jangan tampilkan banner hampa.
+        if not poster_bytes:
+            meta = await rescue_poster_metadata(meta, title, meta.get("year"), _engine.tmdb_service)
+            job["metadata"] = meta
+            poster_src = meta.get("poster_url") or meta.get("poster_path") or poster_src
+            poster_bytes = _download_image_bytes(poster_src) if poster_src else None
+
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
             banner_path = tf.name
 
         _engine.banner_gen.create_banner(
             metadata=meta,
-            poster_source=poster_src,
+            poster_source=poster_bytes or poster_src,
             watermark=wm,
             output_path=banner_path
         )
@@ -8487,7 +8503,7 @@ async def handle_fixbanner_callback(client: Client, call: CallbackQuery):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🎬 Film: <b>{html.escape(title)}</b>\n\n"
         f"Pilih metode perbaikan:\n"
-        f"• <b>🔍 Cari Ulang Judul:</b> Masukkan judul atau tahun baru untuk mengambil poster resmi baru secara otomatis dari database IMDb/OMDB.\n"
+        f"• <b>🔍 Cari Ulang Judul:</b> Masukkan judul atau tahun baru untuk mengambil poster resmi baru secara otomatis dari database TMDb (fallback IMDb/OMDB).\n"
         f"• <b>🖼️ Upload Foto Sendiri:</b> Kirimkan gambar poster pilihan Anda sendiri langsung ke bot.\n\n"
         f"<i>Setelah diperbaiki, banner HD dan cover film akan otomatis diracik ulang!</i>",
         parse_mode=ParseMode.HTML,
@@ -8514,7 +8530,7 @@ async def handle_fixb_search_callback(client: Client, call: CallbackQuery):
         "• <code>Avatar: The Way of Water (2022)</code>\n"
         "• <code>Pengabdi Setan 2 (2022)</code>\n"
         "• <code>Interstellar (2014)</code>\n\n"
-        "👉 <i>Bot akan mencari ulang poster resmi & metadata di IMDb/OMDB.</i>\n"
+        "👉 <i>Bot akan mencari ulang poster resmi & metadata di TMDb (fallback IMDb/OMDB).</i>\n"
         "<i>(Ketik <code>/cancel</code> untuk membatalkan)</i>",
         parse_mode=ParseMode.HTML
     )

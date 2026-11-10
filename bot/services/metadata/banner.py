@@ -38,6 +38,26 @@ def _get_font(size: int, bold: bool = True) -> ImageFont.ImageFont:
         return None
 
 
+def _download_image_bytes(source: str) -> Optional[bytes]:
+    """Download gambar URL (bytes). Fallback ke ukuran 'original' TMDb bila gagal."""
+    if not source or not source.startswith(("http://", "https://")):
+        return None
+    urls = [source]
+    alt = re.sub(r"/t/p/(?:w\d+|original)/", "/t/p/original/", source)
+    if alt != source:
+        urls.append(alt)
+    for u in urls:
+        try:
+            req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=6.0) as resp:
+                data = resp.read()
+            if data:
+                return data
+        except Exception as e:
+            logger.debug(f"Image download failed for {u}: {e}")
+    return None
+
+
 def _load_image(source: Union[str, bytes, Image.Image]) -> Optional[Image.Image]:
     """Safely loads an image from a filepath, URL, bytes, or returns the Image directly."""
     if not source:
@@ -49,10 +69,10 @@ def _load_image(source: Union[str, bytes, Image.Image]) -> Optional[Image.Image]
             return Image.open(io.BytesIO(source)).convert("RGBA")
         if isinstance(source, str):
             if source.startswith("http://") or source.startswith("https://"):
-                req = urllib.request.Request(source, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=4.0) as resp:
-                    data = resp.read()
-                    return Image.open(io.BytesIO(data)).convert("RGBA")
+                data = _download_image_bytes(source)
+                if not data:
+                    return None
+                return Image.open(io.BytesIO(data)).convert("RGBA")
             elif os.path.exists(source):
                 return Image.open(source).convert("RGBA")
     except Exception as e:

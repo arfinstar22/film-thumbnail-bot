@@ -67,6 +67,40 @@ def resolve_verified_identity(
     return True, new_title, new_year
 
 
+RESCUE_FIELDS = (
+    "poster_url", "backdrop_url", "trailer_url", "rating", "genre", "director",
+    "actors", "original_title", "tmdb_id", "year", "plot", "tagline",
+    "production_countries", "country_codes", "certification", "runtime_minutes",
+)
+
+
+async def rescue_poster_metadata(
+    metadata: Dict[str, Any],
+    title: str,
+    year: Optional[int],
+    tmdb_service
+) -> Dict[str, Any]:
+    """Poster kosong = banner/thumbnail tanpa gambar. Coba TMDb sekali lagi
+    (tanpa tahun, lalu dengan tahun) sebelum menyerah."""
+    if not title or metadata.get("poster_url"):
+        return metadata
+    for probe_year in (None, year):
+        if probe_year is None and year is None:
+            pass
+        try:
+            res = await tmdb_service.async_search_movie(title, probe_year)
+        except Exception:
+            res = {}
+        if res and res.get("poster_url"):
+            for field in RESCUE_FIELDS:
+                if res.get(field) and not metadata.get(field):
+                    metadata[field] = res[field]
+            if res.get("plot") and not metadata.get("synopsis"):
+                metadata["synopsis"] = res["plot"]
+            break
+    return metadata
+
+
 
 class MetadataEngine:
     """Smart Offline Filename Metadata Engine.
@@ -184,6 +218,11 @@ class MetadataEngine:
 
             if metadata.get("synopsis"):
                 metadata["synopsis"] = ensure_indonesian_text(metadata["synopsis"])
+
+            # Poster kosong bikin banner & thumbnail hampa. Coba TMDb sekali lagi.
+            metadata = await rescue_poster_metadata(
+                metadata, title or "", year, self.tmdb_service
+            )
 
         caption = self.caption_gen.generate(metadata, custom_watermark=watermark)
         self.cache.save_caption(filename, caption)
@@ -314,5 +353,7 @@ class MetadataEngine:
 
         if meta.get("synopsis"):
             meta["synopsis"] = ensure_indonesian_text(meta["synopsis"])
+
+        meta = await rescue_poster_metadata(meta, title or "", year, self.tmdb_service)
 
         return meta

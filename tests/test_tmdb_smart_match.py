@@ -160,5 +160,45 @@ class TestEngineYearCorrection(unittest.TestCase):
             tmp.cleanup()
 
 
+class TestPosterRescue(unittest.TestCase):
+    def test_rescue_fills_missing_poster(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from bot.services.metadata.engine import rescue_poster_metadata
+
+        tmdb = MagicMock()
+        tmdb.async_search_movie = AsyncMock(return_value={
+            "poster_url": "https://image.tmdb.org/t/p/w500/x.jpg",
+            "backdrop_url": "https://image.tmdb.org/t/p/w780/y.jpg",
+            "rating": "7.0 / 10 • TMDb",
+        })
+
+        meta = {"title": "Sokola Rimba", "year": 2013}
+        try:
+            out = asyncio.run(rescue_poster_metadata(meta, "Sokola Rimba", 2013, tmdb))
+        finally:
+            asyncio.set_event_loop(asyncio.new_event_loop())
+
+        self.assertEqual(out.get("poster_url"), "https://image.tmdb.org/t/p/w500/x.jpg")
+        self.assertEqual(out.get("rating"), "7.0 / 10 • TMDb")
+        tmdb.async_search_movie.assert_awaited()
+
+    def test_rescue_skips_when_poster_exists(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from bot.services.metadata.engine import rescue_poster_metadata
+
+        tmdb = MagicMock()
+        tmdb.async_search_movie = AsyncMock(return_value={})
+        meta = {"title": "Ada", "poster_url": "https://image.tmdb.org/t/p/w500/ok.jpg"}
+        try:
+            out = asyncio.run(rescue_poster_metadata(meta, "Ada", 2020, tmdb))
+        finally:
+            asyncio.set_event_loop(asyncio.new_event_loop())
+
+        self.assertEqual(out.get("poster_url"), "https://image.tmdb.org/t/p/w500/ok.jpg")
+        tmdb.async_search_movie.assert_not_awaited()
+
+
 if __name__ == "__main__":
     unittest.main()
