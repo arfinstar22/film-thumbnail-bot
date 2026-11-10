@@ -449,7 +449,7 @@ class WikipediaSynopsisService:
         if not title:
             return ""
 
-        cache_key = f"synopsis_v4_{title.lower()}_{year}_{is_series}" if year else f"synopsis_v4_{title.lower()}_{is_series}"
+        cache_key = f"synopsis_v5_{title.lower()}_{year}_{is_series}" if year else f"synopsis_v5_{title.lower()}_{is_series}"
         cached = self.cache.get_setting(cache_key, "")
         if cached:
             return "" if cached == "none" else cached
@@ -484,10 +484,11 @@ class WikipediaSynopsisService:
         except Exception as e:
             logger.debug(f"OMDb plot fetch error for '{title}': {e}")
 
-        # Tier 4: Smart Contextual Fallback (Never leave caption empty)
-        fallback = generate_smart_fallback(title, year, genre)
-        self.cache.set_setting(cache_key, fallback)
-        return fallback
+        # Tier 4: tidak ada sinopsis asli. Jangan karang sinopsis palsu di sini:
+        # MetadataEngine akan memakai plot resmi TMDb lebih dulu, lalu fallback kontekstual.
+        # Sentinel "none" tetap disimpan agar Wikipedia/OMDb tidak dihubungi berulang.
+        self.cache.set_setting(cache_key, "none")
+        return ""
 
     def translate_if_needed(self, text: str) -> str:
         """Translates text to Indonesian if it is in English."""

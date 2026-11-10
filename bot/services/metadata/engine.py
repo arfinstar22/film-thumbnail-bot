@@ -11,8 +11,61 @@ from .synopsis import WikipediaSynopsisService, ensure_indonesian_text
 from .rating import MovieRatingService
 from .banner import BannerGenerator
 from .thumbnail import ThumbnailGenerator
+from .tmdb import normalize_title_for_match
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_verified_identity(
+    parsed_title: str,
+    parsed_year: Optional[int],
+    rate_res: Dict[str, Any],
+    title_confidence: float = 1.0
+):
+    """Tentukan apakah hasil TMDb layak dipakai, dan judul/tahun mana yang benar.
+
+    Mengembalikan (accepted, title, year). Tahun yang tertanam di judul
+    (Dilan 1990, 1917) atau typo judul tidak dianggap mismatch.
+    """
+    verified = str(rate_res.get("verified_title") or "").strip()
+    rate_year = rate_res.get("year")
+    o = normalize_title_for_match(parsed_title)
+    v = normalize_title_for_match(verified) if verified else o
+
+    close = bool(o and v) and (
+        o == v or difflib.SequenceMatcher(None, o, v).ratio() >= 0.85
+    )
+    numeric_extension = False
+    if o and v.startswith(o + " "):
+        extra = v[len(o) + 1:].strip()
+        numeric_extension = bool(re.fullmatch(r"[\d ivx]+", extra))
+    whole_word = bool(o and v) and f" {o} " in f" {v} "
+    year_in_verified = bool(parsed_year) and bool(
+        re.search(rf"(?<!\d){int(parsed_year)}(?!\d)", verified)
+    )
+
+    if parsed_year and rate_year and abs(int(parsed_year) - int(rate_year)) > 1:
+        # Tahun beda jauh: hanya boleh kalau judul PERSIS sama (modulo tanda baca),
+        # tahunnya bagian dari judul, atau judul hasilnya memperpanjang angka tahun.
+        identical = bool(o and v) and o == v
+        if not (identical or numeric_extension or year_in_verified):
+            return False, parsed_title, parsed_year
+
+    new_title = parsed_title
+    if verified and (close or numeric_extension or (title_confidence < 0.6 and whole_word)):
+        new_title = verified
+
+    # Tahun hasil TMDb hanya menimpa tahun file kalau file tidak punya tahun,
+    # atau tahun itu jelas bagian judul (Dilan 1990: "1990" bukan tahun rilis).
+    # Selisih 1 tahun (festival vs rilis luas) tidak perlu menimpa tahun file.
+    if not parsed_year:
+        new_year = int(rate_year) if rate_year else parsed_year
+    elif year_in_verified or numeric_extension:
+        new_year = int(rate_year) if rate_year else parsed_year
+    else:
+        new_year = parsed_year
+    return True, new_title, new_year
+
 
 
 class MetadataEngine:
@@ -61,28 +114,32 @@ class MetadataEngine:
             syn_res, rate_res = await asyncio.gather(*tasks)
 
             if rate_res:
-                rate_year = rate_res.get("year")
-                if year and rate_year and abs(int(year) - int(rate_year)) > 1:
-                    logger.warning(f"Year mismatch between parsed year ({year}) and rating service year ({rate_year}). Ignoring rate_res.")
+                conf = metadata.get("confidence", {}).get("title", 1.0)
+                accepted, new_title, new_year = resolve_verified_identity(
+                    title, year, rate_res, conf
+                )
+                if not accepted:
+                    logger.warning(
+                        f"Year/title mismatch: parsed '{title}' ({year}) vs TMDb "
+                        f"'{rate_res.get('verified_title')}' ({rate_res.get('year')}). Ignoring rate_res."
+                    )
                     rate_res = {}
                 else:
-                    verified_t = rate_res.get("verified_title")
-                    if verified_t and verified_t.lower() != title.lower():
-                        clean_orig = re.sub(r"[^\w\s]", " ", title).lower().strip()
-                        clean_ver = re.sub(r"[^\w\s]", " ", verified_t).lower().strip()
-                        ratio = difflib.SequenceMatcher(None, clean_orig, clean_ver).ratio()
-                        conf = metadata.get("confidence", {}).get("title", 1.0)
-                        is_whole_word = bool(re.search(r"\b" + re.escape(clean_ver) + r"\b", clean_orig))
-                        # Only adopt if high ratio (typo fix) or low confidence with whole-word match
-                        if ratio >= 0.85 or (conf < 0.6 and is_whole_word):
-                            logger.info(f"Verified movie title corrected: '{title}' -> '{verified_t}'")
-                            title = verified_t
-                            metadata["title"] = title
-                            if not syn_res and enable_synopsis:
-                                try:
-                                    syn_res = await self.synopsis_service.get_synopsis(title, year, is_series=is_series, genre=metadata.get("genre"))
-                                except Exception:
-                                    pass
+                    if new_title and new_title.lower() != (title or "").lower():
+                        logger.info(f"Verified movie title corrected: '{title}' -> '{new_title}'")
+                        title = new_title
+                        metadata["title"] = title
+                        if not syn_res and enable_synopsis:
+                            try:
+                                syn_res = await self.synopsis_service.get_synopsis(
+                                    title, new_year, is_series=is_series, genre=metadata.get("genre")
+                                )
+                            except Exception:
+                                pass
+                    if new_year and new_year != year:
+                        logger.info(f"Release year corrected: {year} -> {new_year}")
+                        year = int(new_year)
+                        metadata["year"] = year
 
                 if rate_res.get("rating") and not metadata.get("rating"):
                     metadata["rating"] = rate_res["rating"]
@@ -106,7 +163,8 @@ class MetadataEngine:
                     "spoken_languages", "original_language", "runtime_minutes",
                     "budget", "revenue", "popularity", "release_date",
                     "certification", "writer", "studio",
-                    "awards", "rotten_tomatoes", "metascore",
+                    "awards", "rotten_tomatoes", "metascore", "imdb_rating",
+                    "imdb_id", "vote_count", "tmdb_rating",
                     "watch_providers", "gallery_images", "still_url"
                 ):
                     if rate_res.get(field) and not metadata.get(field):
@@ -206,10 +264,31 @@ class MetadataEngine:
         syn_res, rate_res = await asyncio.gather(*tasks)
 
         if rate_res:
-            rate_year = rate_res.get("year")
-            if year and rate_year and abs(int(year) - int(rate_year)) > 1:
-                logger.warning(f"Enrich metadata: year mismatch ({year} vs {rate_year}). Ignoring rate_res.")
+            conf = meta.get("confidence", {}).get("title", 1.0)
+            accepted, new_title, new_year = resolve_verified_identity(
+                title or "", year, rate_res, conf
+            )
+            if not accepted:
+                logger.warning(
+                    f"Enrich metadata: year/title mismatch ({title} {year} vs "
+                    f"{rate_res.get('verified_title')} {rate_res.get('year')}). Ignoring rate_res."
+                )
                 rate_res = {}
+            elif new_title and new_title.lower() != (title or "").lower():
+                logger.info(f"Enrich verified title corrected: '{title}' -> '{new_title}'")
+                title = new_title
+                meta["title"] = title
+                if not syn_res:
+                    try:
+                        syn_res = await self.synopsis_service.get_synopsis(
+                            title, new_year or year, is_series=is_series, genre=meta.get("genre")
+                        )
+                    except Exception:
+                        pass
+            if rate_res and new_year and new_year != year:
+                year = int(new_year)
+                meta["year"] = year
+
             if rate_res.get("rating") and not meta.get("rating"):
                 meta["rating"] = rate_res["rating"]
             if rate_res.get("genre") and not meta.get("genre"):

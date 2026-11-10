@@ -1,8 +1,10 @@
 import asyncio
+import difflib
 import json
 import logging
 import os
 import re
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -12,6 +14,18 @@ from .cache import MetadataCache
 from .synopsis import ensure_indonesian_text
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_title_for_match(text: str) -> str:
+    """Normalisasi judul untuk pencocokan: huruf kecil, tanpa aksen/tanda baca,
+    '&'/'dan' diseragamkan jadi 'and', apostrof dibuang (Satan's == Satans)."""
+    t = unicodedata.normalize("NFKD", str(text or ""))
+    t = "".join(c for c in t if not unicodedata.combining(c)).lower()
+    t = t.replace("&", " and ")
+    t = re.sub(r"['\u2019`\u00b4]", "", t)
+    t = re.sub(r"[^a-z0-9]+", " ", t)
+    t = re.sub(r"\b(?:and|dan)\b", " and ", t)
+    return re.sub(r"\s+", " ", t).strip()
 
 
 class TMDbService:
@@ -136,15 +150,24 @@ class TMDbService:
         year: Optional[int] = None,
         is_series: bool = False
     ) -> Dict[str, Any]:
-        """Search TMDb for a movie or TV series and return rich metadata."""
+        """Search TMDb for a movie or TV series and return rich metadata.
+
+        Pencocokan bertahap (id-ID -> tanpa tahun -> en-US -> multi -> per kata ->
+        judul alternatif/terjemahan). Ini menangani judul Indonesia yang punya
+        judul internasional (Impetigore / Perempuan Tanah Jahanam, Satan's Slaves /
+        Pengabdi Setan), typo ejaan, dan tahun rilis yang beda 1 tahun.
+        """
         if not self.is_enabled() or not title:
             return {}
 
-        clean_title = re.sub(r"[^\w\s]", " ", title).strip()
+        clean_title = re.sub(r"\s+", " ", str(title)).strip()
         if not clean_title:
             return {}
 
-        cache_key = f"tmdb_v2_{clean_title.lower()}_{year}_{1 if is_series else 0}"
+        cache_key = (
+            f"tmdb_v3_{re.sub(r'[^a-z0-9]+', '_', normalize_title_for_match(clean_title))}"
+            f"_{year}_{1 if is_series else 0}"
+        )
         cached_data = self.cache.get_setting(cache_key, "")
         if cached_data:
             try:
@@ -152,55 +175,30 @@ class TMDbService:
             except Exception:
                 pass
 
-        # 1. Search in Indonesian (id-ID)
-        endpoint = "search/tv" if is_series else "search/movie"
-        params: Dict[str, Any] = {
-            "query": clean_title,
-            "language": "id-ID",
-            "include_adult": "false"
-        }
-        if year and not is_series:
-            params["year"] = int(year)
-        elif year and is_series:
-            params["first_air_date_year"] = int(year)
+        pool = self._search_pool(clean_title, year, is_series)
+        best_item, best_type, _ = self._pick_best_from_pool(pool, clean_title, year, is_series)
 
-        search_resp = self._http_get(endpoint, params)
-        results = search_resp.get("results", []) if search_resp else []
+        # Belum ada yang yakin: coba cocokkan lewat judul alternatif/terjemahan resmi.
+        if not best_item and pool:
+            best_item, best_type, _ = self._pick_with_alternative_titles(
+                pool[:5], clean_title, year, is_series
+            )
 
-        # If 0 results, retry without year filter or in en-US
-        if not results and year:
-            params_noyear = dict(params)
-            params_noyear.pop("year", None)
-            params_noyear.pop("first_air_date_year", None)
-            search_resp = self._http_get(endpoint, params_noyear)
-            results = search_resp.get("results", []) if search_resp else []
-
-        if not results:
-            # Fallback to multi-search in en-US
-            multi_params = {
-                "query": clean_title,
-                "language": "en-US",
-                "include_adult": "false"
-            }
-            search_resp = self._http_get("search/multi", multi_params)
-            multi_items = search_resp.get("results", []) if search_resp else []
-            results = [it for it in multi_items if it.get("media_type") in ("movie", "tv")]
-
-        if not results:
-            return {}
-
-        # Pick best candidate
-        best_item = self._pick_best_match(results, clean_title, year, is_series)
         if not best_item:
             return {}
 
         tmdb_id = best_item.get("id")
-        media_type = best_item.get("media_type") or ("tv" if is_series or "first_air_date" in best_item else "movie")
+        media_type = best_type or best_item.get("media_type") or (
+            "tv" if is_series or "first_air_date" in best_item else "movie"
+        )
 
         # 2. Fetch full details with credits, videos, certification, images, and watch providers
         detail_endpoint = f"{media_type}/{tmdb_id}"
         append_extra = "release_dates" if media_type == "movie" else "content_ratings"
-        append_all = f"credits,videos,images,watch/providers,{append_extra}"
+        append_all = (
+            f"credits,videos,images,watch/providers,{append_extra},"
+            "alternative_titles,translations,external_ids"
+        )
         details_id = self._http_get(
             detail_endpoint,
             {
@@ -222,8 +220,13 @@ class TMDbService:
                 }
             ) or {}
 
-        # Combine details prioritizing Indonesian
-        result = self._extract_metadata(details_id, details_en, media_type)
+        # Combine details prioritizing Indonesian. Kalau detail gagal total,
+        # tetap pakai data hasil pencarian (judul, tahun, rating kasar).
+        result = self._extract_metadata(
+            details_id or best_item,
+            details_en,
+            media_type
+        )
         if result:
             try:
                 self.cache.set_setting(cache_key, json.dumps(result))
@@ -232,22 +235,173 @@ class TMDbService:
 
         return result
 
+    def _search_pool(
+        self,
+        query: str,
+        year: Optional[int],
+        is_series: bool
+    ) -> List[Tuple[str, Dict[str, Any]]]:
+        """Kumpulkan kandidat dari beberapa strategi pencarian, dedupe per (tipe, id)."""
+        endpoint = "search/tv" if is_series else "search/movie"
+        year_key = "first_air_date_year" if is_series else "year"
+        attempts: List[Tuple[str, Dict[str, Any]]] = []
+        if year:
+            attempts.append((endpoint, {
+                "query": query, "language": "id-ID",
+                "include_adult": "false", year_key: int(year)
+            }))
+        attempts.append((endpoint, {
+            "query": query, "language": "id-ID", "include_adult": "false"
+        }))
+        attempts.append((endpoint, {
+            "query": query, "language": "en-US", "include_adult": "false"
+        }))
+        attempts.append(("search/multi", {
+            "query": query, "language": "en-US", "include_adult": "false"
+        }))
+
+        pool: List[Tuple[str, Dict[str, Any]]] = []
+        seen = set()
+
+        def _add(endpoint_name: str, resp: Optional[Dict[str, Any]]):
+            for it in (resp or {}).get("results", []):
+                mtype = it.get("media_type") or (
+                    "tv" if endpoint_name == "search/tv" or "first_air_date" in it
+                    else "movie"
+                )
+                if mtype not in ("movie", "tv"):
+                    continue
+                key = (mtype, it.get("id"))
+                if not it.get("id") or key in seen:
+                    continue
+                seen.add(key)
+                pool.append((mtype, it))
+
+        for ep, params in attempts:
+            _add(ep, self._http_get(ep, params))
+            if pool and self._pick_best_from_pool(pool, query, year, is_series)[0]:
+                return pool
+
+        # Typo ejaan: TMDb sangat literal ("Pengadi Setan" -> 0 hasil).
+        # Cari per kata kunci terpanjang lalu skor ulang seluruh kandidat.
+        words = [w for w in normalize_title_for_match(query).split() if len(w) >= 4]
+        for word in sorted(set(words), key=len, reverse=True)[:2]:
+            word_years = [int(year), None] if year else [None]
+            for wy in word_years:
+                params = {"query": word, "language": "id-ID", "include_adult": "false"}
+                if wy:
+                    params[year_key] = wy
+                _add(endpoint, self._http_get(endpoint, params))
+                if pool and self._pick_best_from_pool(pool, query, year, is_series)[0]:
+                    return pool
+
+        return pool
+
+    def _pick_with_alternative_titles(
+        self,
+        candidates: List[Tuple[str, Dict[str, Any]]],
+        title: str,
+        year: Optional[int],
+        is_series: bool
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str], float]:
+        """Cocokkan ulang kandidat teratas memakai judul alternatif & terjemahan resmi TMDb."""
+        best_item, best_type, best_score = None, None, 0.0
+        for mtype, item in candidates:
+            details = self._http_get(
+                f"{mtype}/{item.get('id')}",
+                {"language": "en-US", "append_to_response": "alternative_titles,translations"}
+            ) or {}
+            alt_titles: List[str] = []
+            for alt in (details.get("alternative_titles") or {}).get("titles", []):
+                if alt.get("title"):
+                    alt_titles.append(alt["title"])
+            for tr in (details.get("translations") or {}).get("translations", []):
+                data = tr.get("data") or {}
+                for key in ("title", "name"):
+                    if data.get(key):
+                        alt_titles.append(data[key])
+            if not alt_titles:
+                continue
+            enriched = dict(item)
+            enriched["_alt_titles"] = alt_titles
+            found, ftype, score = self._pick_best_from_pool(
+                [(mtype, enriched)], title, year, is_series, return_score=True
+            )
+            if found and score > best_score:
+                best_item, best_type, best_score = found, ftype, score
+        return best_item, best_type, best_score
+
+    def _pick_best_from_pool(
+        self,
+        pool: List[Tuple[str, Dict[str, Any]]],
+        title: str,
+        year: Optional[int],
+        is_series: bool,
+        return_score: bool = False
+    ):
+        best_item, best_type, best_score = None, None, 0.0
+        for mtype, item in pool:
+            found, score, _ = self._pick_best_match(
+                [item], title, year, is_series, return_score=True
+            )
+            if found and score > best_score:
+                best_item, best_type, best_score = found, mtype, score
+        if return_score:
+            return best_item, best_type, best_score
+        return best_item, best_type, best_score
+
     def _pick_best_match(
         self,
         results: List[Dict[str, Any]],
         title: str,
         year: Optional[int],
-        is_series: bool
-    ) -> Optional[Dict[str, Any]]:
-        import difflib
-        import re
-        q_clean = title.lower().strip()
+        is_series: bool,
+        return_score: bool = False
+    ):
+        """Skor kandidat: kemiripan judul (termasuk judul alternatif), tahun, bahasa asli."""
+        q_norm = normalize_title_for_match(title)
+        if not q_norm:
+            return (None, None, 0.0) if return_score else None
+
         best_cand = None
+        best_type = None
         best_score = 0.0
 
         for it in results:
-            cand_title = (it.get("title") or it.get("name") or "").lower().strip()
-            cand_orig = (it.get("original_title") or it.get("original_name") or "").lower().strip()
+            cand_titles = [
+                it.get("title"), it.get("name"),
+                it.get("original_title"), it.get("original_name"),
+            ]
+            cand_titles.extend(it.get("_alt_titles") or [])
+            cand_norms = [normalize_title_for_match(t) for t in cand_titles if t]
+            cand_norms = [t for t in cand_norms if t]
+            if not cand_norms:
+                continue
+
+            cand_norm = cand_norms[0]
+            base_ratio = max(
+                (difflib.SequenceMatcher(None, q_norm, cn).ratio() for cn in cand_norms),
+                default=0.0
+            )
+
+            # Whole-word containment bonus (harus respect word boundaries)
+            for cn in cand_norms:
+                if f" {q_norm} " in f" {cn} ":
+                    base_ratio = max(base_ratio, 0.85)
+
+            # Sub-judul beda ejaan (Danur 2 Madelaine vs Danur 2: Maddah):
+            # izinkan bila 2 kata pertama sama dan tahunnya persis sama.
+            q_tokens = q_norm.split()
+            c_tokens = cand_norm.split()
+            prefix_match = (
+                len(q_tokens) >= 2
+                and len(c_tokens) >= 2
+                and q_tokens[:2] == c_tokens[:2]
+            )
+            if prefix_match and base_ratio < 0.85 and year:
+                date_str = it.get("release_date") or it.get("first_air_date") or ""
+                if not (date_str[:4].isdigit() and int(date_str[:4]) == int(year)):
+                    prefix_match = False
 
             # Extract year
             date_str = it.get("release_date") or it.get("first_air_date") or ""
@@ -255,29 +409,27 @@ class TMDbService:
             if date_str and len(date_str) >= 4 and date_str[:4].isdigit():
                 cand_year = int(date_str[:4])
 
-            # Disqualify if years differ significantly and title is not nearly identical
-            if year and cand_year and abs(year - cand_year) > 1:
-                # Calculate quick title ratio
-                r_quick = max(
-                    difflib.SequenceMatcher(None, q_clean, cand_title).ratio(),
-                    difflib.SequenceMatcher(None, q_clean, cand_orig).ratio()
-                )
-                if r_quick < 0.90:
+            # Tahun bagian dari judul (Dilan 1990, 1917, Blade Runner 2049) bukan mismatch.
+            year_is_title_part = bool(
+                year and re.search(rf"(?<!\d){int(year)}(?!\d)", " ".join(cand_norms))
+            )
+
+            if year and cand_year and abs(year - cand_year) > 1 and not year_is_title_part:
+                # Tahun beda jauh hanya boleh lolos kalau judul PERSIS sama DAN
+                # filmnya Indonesia (rilis Indonesia sering beda tahun).
+                # Contoh salah: "Photocopier" (2021) tidak boleh jadi film 2013.
+                if not (base_ratio >= 1.0 and it.get("original_language") == "id"):
                     continue
 
-            # Similarity ratio
-            ratio_title = difflib.SequenceMatcher(None, q_clean, cand_title).ratio()
-            ratio_orig = difflib.SequenceMatcher(None, q_clean, cand_orig).ratio()
-            base_ratio = max(ratio_title, ratio_orig)
-
-            # Whole-word substring match bonus (MUST respect word boundaries)
-            if re.search(r"\b" + re.escape(q_clean) + r"\b", cand_title) or re.search(r"\b" + re.escape(q_clean) + r"\b", cand_orig):
-                base_ratio = max(base_ratio, 0.85)
-
-            if base_ratio < 0.55:
+            if base_ratio < 0.85 and not prefix_match:
                 continue
 
             score = base_ratio * 100.0
+
+            media_type = it.get("media_type") or ("tv" if "first_air_date" in it else "movie")
+            is_tv = media_type == "tv"
+            if is_series != is_tv:
+                score -= 40.0
 
             # Year bonus / penalty
             if year and cand_year:
@@ -285,18 +437,43 @@ class TMDbService:
                     score += 25.0
                 elif abs(year - cand_year) == 1:
                     score += 10.0
-                else:
+                elif not year_is_title_part:
                     score -= 30.0
 
-            # Popularity / vote count bonus
-            pop = it.get("popularity", 0.0)
-            score += min(pop * 0.05, 10.0)
+            # Film Indonesia diprioritaskan (channel ini mayoritas film Indonesia).
+            if it.get("original_language") == "id":
+                score += 8.0
+
+            # Popularity / vote count kecil saja, jangan sampai mengalahkan judul+tahun.
+            pop = it.get("popularity", 0.0) or 0.0
+            score += min(pop * 0.03, 6.0)
 
             if score > best_score and score >= 60.0:
                 best_score = score
                 best_cand = it
+                best_type = media_type
 
+        if return_score:
+            return best_cand, best_score, best_type
         return best_cand
+
+    @staticmethod
+    def _translated_field(details: Dict[str, Any], field: str) -> str:
+        """Ambil field terjemahan Indonesia resmi dari append_to_response=translations."""
+        translations = (
+            (details.get("translations") or {}).get("translations")
+            or details.get("translations")
+            or []
+        )
+        if isinstance(translations, list):
+            for tr in translations:
+                if tr.get("iso_639_1") != "id":
+                    continue
+                data = tr.get("data") or {}
+                value = data.get(field)
+                if value and str(value).strip():
+                    return str(value).strip()
+        return ""
 
     def _extract_metadata(
         self,
@@ -338,7 +515,12 @@ class TMDbService:
         genre_str = ", ".join(translated_genres)
 
         # Overview / Synopsis (Guaranteed 100% Bahasa Indonesia)
-        raw_overview = (main.get("overview") or fallback.get("overview") or "").strip()
+        raw_overview = (
+            (main.get("overview") or "").strip()
+            or self._translated_field(main, "overview")
+            or self._translated_field(fallback, "overview")
+            or (fallback.get("overview") or "").strip()
+        )
         overview = ensure_indonesian_text(raw_overview) if raw_overview else ""
 
         # Credits: Director & Cast
@@ -383,7 +565,11 @@ class TMDbService:
                         break  # preferred
 
         # Tagline
-        tagline = (main.get("tagline") or fallback.get("tagline") or "").strip()
+        tagline = (
+            (main.get("tagline") or "").strip()
+            or self._translated_field(main, "tagline")
+            or (fallback.get("tagline") or "").strip()
+        )
 
         # Production Countries with flag codes
         prod_countries = main.get("production_countries") or fallback.get("production_countries") or []
@@ -469,6 +655,10 @@ class TMDbService:
             res["rating_value"] = round(vote_avg, 1)
         if genre_str:
             res["genre"] = genre_str
+        if vote_cnt:
+            res["vote_count"] = int(vote_cnt)
+        if vote_avg > 0:
+            res["tmdb_rating"] = round(float(vote_avg), 1)
         if director_str:
             res["director"] = director_str
         if actors_str:
@@ -560,8 +750,15 @@ class TMDbService:
         if providers_list:
             res["watch_providers"] = providers_list
 
-        # OMDb Extra: Awards, Rotten Tomatoes, Metascore
-        imdb_id = main.get("imdb_id") or fallback.get("imdb_id")
+        # OMDb Extra: Awards, Rotten Tomatoes, Metascore, IMDb rating
+        imdb_id = (
+            (main.get("external_ids") or {}).get("imdb_id")
+            or (fallback.get("external_ids") or {}).get("imdb_id")
+            or main.get("imdb_id")
+            or fallback.get("imdb_id")
+        )
+        if imdb_id:
+            res["imdb_id"] = imdb_id
         omdb_extra = self._fetch_omdb_extra(imdb_id, verified_title or main.get("title") or fallback.get("title"), year)
         if omdb_extra.get("awards"):
             res["awards"] = omdb_extra["awards"]
@@ -569,6 +766,8 @@ class TMDbService:
             res["rotten_tomatoes"] = omdb_extra["rotten_tomatoes"]
         if omdb_extra.get("metascore"):
             res["metascore"] = omdb_extra["metascore"]
+        if omdb_extra.get("imdb_rating"):
+            res["imdb_rating"] = omdb_extra["imdb_rating"]
 
         # Franchise / Universe Collection
         collection_raw = main.get("belongs_to_collection") or fallback.get("belongs_to_collection")
@@ -610,6 +809,11 @@ class TMDbService:
                         ms = data.get("Metascore")
                         if ms and ms != "N/A":
                             out["metascore"] = ms
+
+                        # IMDb rating
+                        imdb_r = data.get("imdbRating")
+                        if imdb_r and imdb_r != "N/A":
+                            out["imdb_rating"] = imdb_r
 
                         # Rotten Tomatoes
                         ratings = data.get("Ratings") or []

@@ -62,7 +62,11 @@ class MovieRatingService:
         cached_raw = self.cache.get_setting(cache_key, "")
         if cached_raw:
             try:
-                return json.loads(cached_raw)
+                cached_data = json.loads(cached_raw)
+                # Cache kosong lama (film yang dulu gagal dikenali) dianggap miss,
+                # supaya pencocokan TMDb yang baru bisa mencoba ulang.
+                if cached_data:
+                    return cached_data
             except Exception:
                 pass
 
