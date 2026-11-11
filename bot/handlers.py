@@ -6277,6 +6277,107 @@ async def _update_previous_episode_post(
         logger.warning(f"Failed to update previous episode post {prev_mid}: {e}")
 
 
+def _is_same_collection_part(p_title: str, p_year: Optional[int], target_title: str, target_year: Optional[int]) -> bool:
+    """Helper to check if a collection part refers to the target movie."""
+    if not p_title or not target_title:
+        return False
+    from .services.metadata.cache import extract_movie_sequel_tag
+    s1 = extract_movie_sequel_tag(p_title)
+    s2 = extract_movie_sequel_tag(target_title)
+    if s1 != s2:
+        return False
+    if p_year and target_year and abs(int(p_year) - int(target_year)) > 1:
+        return False
+    n1 = re.sub(r"[^\w\s]", "", p_title).lower().strip()
+    n2 = re.sub(r"[^\w\s]", "", target_title).lower().strip()
+    if n1 == n2 or n1.replace("q", "k") == n2.replace("q", "k"):
+        return True
+    if difflib.SequenceMatcher(None, n1, n2).ratio() >= 0.80:
+        return True
+    return False
+
+
+def _build_franchise_watch_order_block(
+    collection: Dict[str, Any],
+    sibling_title: str,
+    sibling_year: Optional[int],
+    clean_channel: str,
+    cache: Any,
+    style: str = "blockquote"
+) -> str:
+    """Generates the formatted 'Urutan Nonton' section for a specific sibling movie."""
+    parts = collection.get("parts", [])
+    if not parts or len(parts) < 2:
+        return ""
+    col_name = collection.get("name") or "Universe"
+    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    part_lines = []
+
+    for idx, part in enumerate(parts):
+        num = number_emojis[idx] if idx < len(number_emojis) else f"{idx + 1}."
+        p_title = (part.get("title") or "Film").strip()
+        p_year = part.get("year")
+        p_year_str = f" ({p_year})" if p_year else ""
+
+        if _is_same_collection_part(p_title, p_year, sibling_title, sibling_year):
+            part_lines.append(f"{num} <b>{html.escape(p_title)}{p_year_str}</b> 📍 <i>(Film Ini)</i>")
+        else:
+            existing = cache.find_existing_movie(p_title, p_year, clean_channel) if (cache and clean_channel) else None
+            if existing and existing.get("message_id"):
+                mid = existing["message_id"]
+                part_lines.append(f'{num} <a href="https://t.me/{clean_channel}/{mid}">{html.escape(p_title)}{p_year_str}</a>')
+            else:
+                part_lines.append(f"{num} {html.escape(p_title)}{p_year_str}")
+
+    if not part_lines:
+        return ""
+
+    if style == "details":
+        return f"<details>\n<summary>🗺️ Urutan Nonton: {html.escape(col_name)}</summary>\n" + "<br/>\n".join(part_lines) + "\n</details>"
+    else:
+        return f"<blockquote expandable>\n🗺️ <b>URUTAN NONTON: {html.escape(col_name).upper()}</b>\n" + "\n".join(part_lines) + "\n</blockquote>"
+
+
+def _update_caption_with_franchise_links(
+    orig_caption: str,
+    collection: Dict[str, Any],
+    sibling_title: str,
+    sibling_year: Optional[int],
+    clean_channel: str,
+    cache: Any
+) -> Optional[str]:
+    """Replaces or inserts the watch order block in a caption with the latest sibling links."""
+    if not orig_caption or not collection:
+        return None
+
+    pat_details = re.compile(r"<details>\s*<summary>[^<]*Urutan Nonton:[^<]*</summary>.*?</details>", re.DOTALL | re.IGNORECASE)
+    pat_bq = re.compile(r"<blockquote(?:\s+expandable)?>\s*🗺️\s*<b>\s*URUTAN NONTON:[^<]*</b>.*?</blockquote>", re.DOTALL | re.IGNORECASE)
+    pat_plain = re.compile(r"🗺️\s*<b>\s*URUTAN NONTON:[^\n]*\n(?:[1-9🔟\u0030-\u0039\ufe0f\u20e3\.\s][^\n]*\n?)+", re.IGNORECASE)
+
+    if pat_details.search(orig_caption):
+        new_block = _build_franchise_watch_order_block(collection, sibling_title, sibling_year, clean_channel, cache, style="details")
+        return pat_details.sub(new_block, orig_caption, count=1)
+    elif pat_bq.search(orig_caption):
+        new_block = _build_franchise_watch_order_block(collection, sibling_title, sibling_year, clean_channel, cache, style="blockquote")
+        return pat_bq.sub(new_block, orig_caption, count=1)
+    elif pat_plain.search(orig_caption):
+        new_block = _build_franchise_watch_order_block(collection, sibling_title, sibling_year, clean_channel, cache, style="blockquote")
+        return pat_plain.sub(new_block, orig_caption, count=1)
+    else:
+        new_block = _build_franchise_watch_order_block(collection, sibling_title, sibling_year, clean_channel, cache, style="blockquote")
+        if not new_block:
+            return None
+        m_tag = re.search(r"(\n(?:#\w+))", orig_caption)
+        if m_tag:
+            pos = m_tag.start()
+            return orig_caption[:pos] + "\n\n" + new_block + "\n" + orig_caption[pos:]
+        m_chan = re.search(r"(\n🍿\s*<b>Channel)", orig_caption, re.IGNORECASE)
+        if m_chan:
+            pos = m_chan.start()
+            return orig_caption[:pos] + "\n\n" + new_block + "\n" + orig_caption[pos:]
+        return orig_caption.rstrip() + "\n\n" + new_block
+
+
 async def sync_collection_sibling_posts(
     client: Client,
     channel_username: str,
@@ -6324,8 +6425,7 @@ async def sync_collection_sibling_posts(
         col_name = collection.get("name") or "Universe"
         logger.info(f"Syncing sibling posts in '{col_name}' ({len(parts)} parts) for new post '{new_title}' (#{new_message_id})...")
 
-        new_url = f"https://t.me/{clean_channel}/{new_message_id}"
-        year_str = f" ({new_year})" if new_year else ""
+        clean_chat = channel_username if (isinstance(channel_username, int) or str(channel_username).startswith("-100")) else f"@{clean_channel}"
 
         for part in parts:
             p_title = (part.get("title") or "").strip()
@@ -6334,10 +6434,7 @@ async def sync_collection_sibling_posts(
                 continue
 
             # Skip the newly uploaded movie itself
-            is_self = (p_title.lower() == new_title.lower().strip())
-            if not is_self and new_year and p_year and p_year == new_year:
-                is_self = (difflib.SequenceMatcher(None, p_title.lower(), new_title.lower().strip()).ratio() >= 0.85)
-            if is_self:
+            if _is_same_collection_part(p_title, p_year, new_title, new_year):
                 continue
 
             # Find sibling in channel catalog
@@ -6351,7 +6448,7 @@ async def sync_collection_sibling_posts(
 
             logger.info(f"Updating sibling '{p_title}' (#{sibling_mid}) with link to '{new_title}' (#{new_message_id})")
 
-            # Fetch current sibling message (for file_id fallback)
+            # Fetch current sibling message (for file_id fallback & media detection)
             target_msg = None
             try:
                 target_msg = await client.get_messages(clean_channel, sibling_mid)
@@ -6360,76 +6457,47 @@ async def sync_collection_sibling_posts(
 
             sibling_file_id = (target_msg.video.file_id if target_msg and getattr(target_msg, "video", None) else None) or sibling_item.get("file_id")
 
-            # Siapkan link baru ke film yang baru diupload
-            new_url = f"https://t.me/{clean_channel}/{new_message_id}"
-            year_str = f" ({new_year})" if new_year else ""
-            link_html = f'<a href="{new_url}">{html.escape(new_title)}{year_str}</a>'
+            # Check if this is a media message (has video/photo/doc) vs text/rich message
+            has_media = bool(
+                target_msg and (
+                    getattr(target_msg, "video", None)
+                    or getattr(target_msg, "photo", None)
+                    or getattr(target_msg, "document", None)
+                    or getattr(target_msg, "audio", None)
+                )
+            ) or bool(sibling_file_id)
 
-            # --- METHOD 1: Regex replace pada caption (untuk post non-rich / legacy) ---
-            orig_caption = (target_msg.caption if target_msg and target_msg.caption else None) or sibling_item.get("caption") or ""
-            updated_caption = None
-            if orig_caption:
-                pat = rf'(?P<num>[1-9\u0030-\u0039\ufe0f\u20e3\.]+\s*)(?:<b>)?{re.escape(new_title)}(?:\s*\({new_year}\))?(?:</b>)?(?!\s*</a>)'
+            orig_caption = (
+                (getattr(target_msg, "caption", None) or getattr(target_msg, "text", None))
+                if target_msg else None
+            ) or sibling_item.get("caption") or ""
+
+            # 1. Update caption via franchise block updater
+            updated_caption = _update_caption_with_franchise_links(
+                orig_caption=orig_caption,
+                collection=collection,
+                sibling_title=p_title,
+                sibling_year=p_year,
+                clean_channel=clean_channel,
+                cache=_engine.cache
+            )
+
+            # Fallback line regex if block updater didn't produce changes
+            if not updated_caption and orig_caption:
+                new_url = f"https://t.me/{clean_channel}/{new_message_id}"
+                year_str = f" ({new_year})" if new_year else ""
+                link_html = f'<a href="{new_url}">{html.escape(new_title)}{year_str}</a>'
+                pat = rf'(?P<num>[1-9🔟\u0030-\u0039\ufe0f\u20e3\.]+\s*)(?:<a\s+[^>]*>)?(?:<b>)?(?:{re.escape(new_title)}|{re.escape(p_title)})(?:\s*\(\d{{4}}\))?(?:</b>)?(?:</a>)?'
                 if re.search(pat, orig_caption, re.I):
                     updated_caption = re.sub(pat, rf'\g<num>{link_html}', orig_caption, count=1, flags=re.I)
 
-            caption_updated = False
-            if updated_caption and BOT_TOKEN:
-                cap_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageCaption"
-                cap_payload = {
-                    "chat_id": f"@{clean_channel}",
-                    "message_id": sibling_mid,
-                    "caption": updated_caption,
-                    "parse_mode": "HTML"
-                }
-                if target_msg and getattr(target_msg, "reply_markup", None):
-                    cap_payload["reply_markup"] = _build_bot_api_reply_markup(target_msg.reply_markup)
+            # Prepare reply markup if available
+            reply_markup_bot_api = None
+            reply_markup_client = getattr(target_msg, "reply_markup", None) if target_msg else None
+            if reply_markup_client:
+                reply_markup_bot_api = _build_bot_api_reply_markup(reply_markup_client)
 
-                def _edit_cap():
-                    req = urllib.request.Request(
-                        cap_url,
-                        data=json.dumps(cap_payload).encode("utf-8"),
-                        headers={"Content-Type": "application/json"}
-                    )
-                    with urllib.request.urlopen(req, timeout=10) as resp:
-                        return json.loads(resp.read().decode("utf-8"))
-
-                try:
-                    res = await asyncio.to_thread(_edit_cap)
-                    if res and res.get("ok"):
-                        caption_updated = True
-                        logger.info(f"✅ Updated caption #{sibling_mid} for {p_title} with link to {new_title}")
-                except Exception as e:
-                    logger.debug(f"editMessageCaption #{sibling_mid}: {e}")
-
-            if not caption_updated and updated_caption and target_msg and target_msg.caption:
-                try:
-                    await client.edit_message_caption(
-                        chat_id=clean_channel,
-                        message_id=sibling_mid,
-                        caption=updated_caption,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=target_msg.reply_markup
-                    )
-                    caption_updated = True
-                    logger.info(f"✅ Updated caption (client) #{sibling_mid} for {p_title}")
-                except Exception as c_err:
-                    logger.debug(f"client.edit_message_caption #{sibling_mid}: {c_err}")
-
-            # Simpan caption yang diupdate ke database katalog
-            if caption_updated and updated_caption:
-                try:
-                    conn = _engine.cache._conn()
-                    conn.execute(
-                        "UPDATE movie_catalog SET caption = ? WHERE LOWER(channel_username) = ? AND message_id = ?",
-                        (updated_caption, clean_channel, sibling_mid)
-                    )
-                    conn.commit()
-                except Exception:
-                    pass
-
-            # --- METHOD 2: Rebuild rich post (selalu jalan untuk rich posts / sendRichMessage) ---
-            # Ini yang memastikan 'Urutan Nonton' lengkap walaupun judul baru belum pernah muncul di caption lama.
+            # Metadata for rich post rebuild
             s_clean_t = re.sub(r"[^\w\s]", "", p_title).strip()
             s_key = f"rating_v2_{s_clean_t.lower()}_{p_year}" if p_year else f"rating_v2_{s_clean_t.lower()}"
             sibling_meta = None
@@ -6444,7 +6512,6 @@ async def sync_collection_sibling_posts(
                     sibling_meta = await _engine.rating_service.get_rating_and_genre(p_title, p_year)
                 except Exception:
                     sibling_meta = {}
-
             if not sibling_meta:
                 sibling_meta = {}
             sibling_meta.setdefault("title", p_title)
@@ -6453,7 +6520,6 @@ async def sync_collection_sibling_posts(
 
             poster_url = sibling_meta.get("poster_url") or sibling_meta.get("poster_path")
 
-            # Build reply markup
             bot_uname = (client.me.username if getattr(client, "me", None) else "") or _engine.cache.get_setting("bot_username", "")
             req_link = _get_user_request_link(chat_id or 0, bot_username=bot_uname)
             sibling_kb = build_channel_post_keyboard(
@@ -6479,7 +6545,7 @@ async def sync_collection_sibling_posts(
                 )
 
             rich_payload = build_rich_article_payload(
-                chat_id=f"@{clean_channel}",
+                chat_id=clean_chat,
                 metadata=sibling_meta,
                 watermark=f"@{clean_channel}",
                 video_file_id=actual_fid,
@@ -6489,31 +6555,160 @@ async def sync_collection_sibling_posts(
                 video_variants=sibling_variants
             )
 
-            edit_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
-            edit_body = {
-                "chat_id": f"@{clean_channel}",
-                "message_id": sibling_mid,
-                "rich_message": rich_payload["rich_message"],
-                "reply_markup": rich_kb
-            }
+            caption_updated = False
 
-            def _edit_rich():
-                req = urllib.request.Request(
-                    edit_url,
-                    data=json.dumps(edit_body).encode("utf-8"),
-                    headers={"Content-Type": "application/json"}
-                )
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
+            # --- ATTEMPT 1: Telegram Bot API HTTP ---
+            if BOT_TOKEN:
+                # 1. Primary: Rich Article Card update via editMessageText
+                if rich_payload and "rich_message" in rich_payload:
+                    edit_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+                    edit_body = {
+                        "chat_id": clean_chat,
+                        "message_id": sibling_mid,
+                        "rich_message": rich_payload["rich_message"],
+                        "reply_markup": rich_kb
+                    }
 
-            try:
-                res = await asyncio.to_thread(_edit_rich)
-                if res and res.get("ok"):
-                    logger.info(f"✅ Updated rich post #{sibling_mid} for {p_title} with link to {new_title}")
-                else:
-                    logger.warning(f"⚠️ Telegram rejected update for #{sibling_mid}: {res}")
-            except Exception as r_err:
-                logger.warning(f"⚠️ Failed to update sibling post #{sibling_mid} for {p_title}: {r_err}")
+                    def _edit_rich():
+                        req = urllib.request.Request(
+                            edit_url,
+                            data=json.dumps(edit_body).encode("utf-8"),
+                            headers={"Content-Type": "application/json"}
+                        )
+                        with urllib.request.urlopen(req, timeout=10) as resp:
+                            return json.loads(resp.read().decode("utf-8"))
+
+                    try:
+                        res = await asyncio.to_thread(_edit_rich)
+                        if res and res.get("ok"):
+                            caption_updated = True
+                            logger.info(f"✅ Updated rich post #{sibling_mid} for {p_title} with link to {new_title}")
+                        elif res and "message is not modified" in str(res.get("description", "")).lower():
+                            caption_updated = True
+                    except urllib.error.HTTPError as he:
+                        body_err = he.read().decode("utf-8", errors="ignore")
+                        if "message is not modified" in body_err.lower():
+                            caption_updated = True
+                        else:
+                            logger.debug(f"editMessageText (rich) HTTP {he.code} #{sibling_mid}: {body_err}")
+                    except Exception as r_err:
+                        logger.debug(f"editMessageText (rich) #{sibling_mid}: {r_err}")
+
+                # 2. Fallback: editMessageCaption for legacy media posts (video/photo)
+                if not caption_updated and updated_caption:
+                    cap_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageCaption"
+                    cap_payload = {
+                        "chat_id": clean_chat,
+                        "message_id": sibling_mid,
+                        "caption": updated_caption,
+                        "parse_mode": "HTML"
+                    }
+                    if reply_markup_bot_api:
+                        cap_payload["reply_markup"] = reply_markup_bot_api
+
+                    def _edit_cap():
+                        req = urllib.request.Request(
+                            cap_url,
+                            data=json.dumps(cap_payload).encode("utf-8"),
+                            headers={"Content-Type": "application/json"}
+                        )
+                        with urllib.request.urlopen(req, timeout=10) as resp:
+                            return json.loads(resp.read().decode("utf-8"))
+
+                    try:
+                        res = await asyncio.to_thread(_edit_cap)
+                        if res and res.get("ok"):
+                            caption_updated = True
+                            logger.info(f"✅ Updated caption #{sibling_mid} for {p_title} with link to {new_title}")
+                        elif res and "message is not modified" in str(res.get("description", "")).lower():
+                            caption_updated = True
+                    except urllib.error.HTTPError as he:
+                        body_err = he.read().decode("utf-8", errors="ignore")
+                        if "message is not modified" in body_err.lower():
+                            caption_updated = True
+                        else:
+                            logger.debug(f"editMessageCaption HTTP {he.code} #{sibling_mid}: {body_err}")
+                    except Exception as e:
+                        logger.debug(f"editMessageCaption #{sibling_mid}: {e}")
+
+                # 3. Fallback: editMessageText for legacy plain text posts
+                if not caption_updated and updated_caption:
+                    edit_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+                    text_body = {
+                        "chat_id": clean_chat,
+                        "message_id": sibling_mid,
+                        "text": updated_caption,
+                        "parse_mode": "HTML"
+                    }
+                    if reply_markup_bot_api:
+                        text_body["reply_markup"] = reply_markup_bot_api
+
+                    def _edit_txt():
+                        req = urllib.request.Request(
+                            edit_url,
+                            data=json.dumps(text_body).encode("utf-8"),
+                            headers={"Content-Type": "application/json"}
+                        )
+                        with urllib.request.urlopen(req, timeout=10) as resp:
+                            return json.loads(resp.read().decode("utf-8"))
+
+                    try:
+                        res = await asyncio.to_thread(_edit_txt)
+                        if res and res.get("ok"):
+                            caption_updated = True
+                            logger.info(f"✅ Updated text post #{sibling_mid} for {p_title} with link to {new_title}")
+                        elif res and "message is not modified" in str(res.get("description", "")).lower():
+                            caption_updated = True
+                    except Exception as t_err:
+                        logger.debug(f"editMessageText (plain) #{sibling_mid}: {t_err}")
+
+            # --- ATTEMPT 2: Pyrogram Client Fallback ---
+            if not caption_updated and updated_caption:
+                try:
+                    if has_media:
+                        await client.edit_message_caption(
+                            chat_id=clean_channel,
+                            message_id=sibling_mid,
+                            caption=updated_caption,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=reply_markup_client
+                        )
+                    else:
+                        await client.edit_message_text(
+                            chat_id=clean_channel,
+                            message_id=sibling_mid,
+                            text=updated_caption,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=reply_markup_client
+                        )
+                    caption_updated = True
+                    logger.info(f"✅ Updated sibling post (client) #{sibling_mid} for {p_title}")
+                except Exception as c_err:
+                    if "message is not modified" in str(c_err).lower():
+                        caption_updated = True
+                    else:
+                        logger.warning(f"client edit failed for #{sibling_mid}: {c_err}")
+
+            # Update database catalog (SQLite & Supabase cloud) with the latest caption
+            final_cap = updated_caption or orig_caption
+            if final_cap:
+                try:
+                    conn = _engine.cache._conn()
+                    conn.execute(
+                        "UPDATE movie_catalog SET caption = ? WHERE LOWER(channel_username) = ? AND message_id = ?",
+                        (final_cap, clean_channel, sibling_mid)
+                    )
+                    conn.commit()
+                except Exception as db_err:
+                    logger.debug(f"Catalog DB update error: {db_err}")
+
+                if getattr(_engine.cache, "cloud", None) and _engine.cache.cloud.is_enabled:
+                    try:
+                        s_copy = dict(sibling_item)
+                        s_copy["caption"] = final_cap
+                        asyncio.create_task(_engine.cache.cloud.async_save_catalog(s_copy))
+                    except Exception as cl_err:
+                        logger.debug(f"Cloud catalog update error: {cl_err}")
 
     except Exception as e:
         logger.warning(f"Error in sync_collection_sibling_posts: {e}")
@@ -6573,6 +6768,14 @@ async def cmd_refresh_series(client: Client, msg: Message):
             try:
                 c_data = json.loads(cached_raw)
                 collection = c_data.get("collection")
+            except Exception:
+                pass
+
+        if not collection:
+            try:
+                rate_res = await _engine.rating_service.get_rating_and_genre(m_title, m_year)
+                if rate_res and rate_res.get("collection"):
+                    collection = rate_res["collection"]
             except Exception:
                 pass
 

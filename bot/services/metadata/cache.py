@@ -1056,6 +1056,10 @@ class MetadataCache:
             if mk == norm_k or mt.lower() == norm_t.lower():
                 return m
 
+            # Transliteration match (e.g. Qodrat <-> Kodrat)
+            if norm_t.lower().replace("q", "k") == mt.lower().replace("q", "k"):
+                return m
+
         # Pass 2: High-confidence Typo / Fuzzy Match (Strict)
         best_cand = None
         best_ratio = 0.0
@@ -1094,6 +1098,8 @@ class MetadataCache:
                     is_valid_typo = True
                 elif len(target_words) == len(cand_words) and ratio >= 0.90:
                     is_valid_typo = True
+            elif ratio >= 0.80 and norm_y and my and abs(norm_y - my) <= 1:
+                is_valid_typo = True
 
             if is_valid_typo and ratio > best_ratio:
                 if norm_y and my and norm_y != my:

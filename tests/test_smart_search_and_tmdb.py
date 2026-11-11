@@ -323,6 +323,101 @@ class TestSmartSearchAndFuzzyMatching(unittest.TestCase):
         self.assertIn('<a href="https://t.me/film_indonesia1/1379">Ayo Putus (2022)</a>', call_args["caption"])
         self.assertIn('2️⃣ <b>Ayo Balikan (2024)</b> 📍 <i>(Film Ini)</i>', call_args["caption"])
 
+    def test_sync_collection_kodrat_qodrat_transliteration_and_old_link_replacement(self):
+        """Verifies:
+        1. Qodrat (TMDb) matches Kodrat (uploaded title) via transliteration
+        2. Sibling's old link (e.g. #855) is replaced with the newly uploaded message ID (#2313)
+        3. Video post expandable blockquote is updated cleanly
+        """
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from bot.handlers import sync_collection_sibling_posts
+        from bot.services.metadata.caption import CaptionGenerator
+
+        conn = self.cache._conn()
+        self.cache._ensure_catalog_table(conn)
+
+        # Post 1 (Kodrat 2022) in channel with an old link to #855 (or plain text)
+        orig_cap = (
+            "🎬 <b>KODRAT</b> (2022)\n"
+            "⭐ <b>6.4/10</b>\n\n"
+            "<blockquote expandable>\n"
+            "🗺️ <b>URUTAN NONTON: SERI QODRAT UNIVERSE</b>\n"
+            "1️⃣ <b>Qodrat (2022)</b> 📍 <i>(Film Ini)</i>\n"
+            '2️⃣ <a href="https://t.me/film_indonesia1/855">Qodrat 2 (2025)</a>\n'
+            "3️⃣ Qodrat 3\n"
+            "</blockquote>\n\n"
+            "#Kodrat #Film2022"
+        )
+        self.cache.save_movie_post(
+            title="Kodrat",
+            year=2022,
+            channel_username="film_indonesia1",
+            message_id=2310,
+            caption=orig_cap,
+            file_id="dummy_video_file_id_kodrat"
+        )
+        # Post 2 (Kodrat 2) just uploaded at msg #2313
+        self.cache.save_movie_post(
+            title="Kodrat 2",
+            year=2025,
+            channel_username="film_indonesia1",
+            message_id=2313,
+            file_id="dummy_video_file_id_kodrat2"
+        )
+
+        mock_msg = MagicMock()
+        mock_msg.caption = orig_cap
+        mock_msg.reply_markup = None
+        mock_msg.video = MagicMock(file_id="dummy_video_file_id_kodrat")
+
+        mock_client = MagicMock()
+        mock_client.get_messages = AsyncMock(return_value=mock_msg)
+        mock_client.edit_message_caption = AsyncMock()
+
+        collection = {
+            "name": "Seri Qodrat Universe",
+            "parts": [
+                {"title": "Qodrat", "year": 2022},
+                {"title": "Qodrat 2", "year": 2025},
+                {"title": "Qodrat 3", "year": None}
+            ]
+        }
+
+        with patch("bot.handlers._engine.cache", self.cache), \
+             patch("bot.handlers.BOT_TOKEN", ""):
+            asyncio.run(
+                sync_collection_sibling_posts(
+                    client=mock_client,
+                    channel_username="film_indonesia1",
+                    new_title="Kodrat 2",
+                    new_year=2025,
+                    new_message_id=2313,
+                    collection=collection
+                )
+            )
+
+        mock_client.edit_message_caption.assert_awaited_once()
+        call_args = mock_client.edit_message_caption.call_args[1]
+        self.assertEqual(call_args["chat_id"], "film_indonesia1")
+        self.assertEqual(call_args["message_id"], 2310)
+        # Old link to 855 must be replaced with link to 2313!
+        self.assertNotIn("/855", call_args["caption"])
+        self.assertIn('<a href="https://t.me/film_indonesia1/2313">Qodrat 2 (2025)</a>', call_args["caption"])
+        self.assertIn("1️⃣ <b>Qodrat (2022)</b> 📍 <i>(Film Ini)</i>", call_args["caption"])
+
+        # Also verify CaptionGenerator for Kodrat 2 includes link back to Kodrat 1 (#2310)
+        cap_gen = CaptionGenerator(watermark="@film_indonesia1", cache=self.cache)
+        meta_kodrat2 = {
+            "title": "Kodrat 2",
+            "year": 2025,
+            "collection": collection,
+            "genre": "Horor, Aksi"
+        }
+        res_cap = cap_gen.generate(meta_kodrat2, custom_watermark="@film_indonesia1", style="article")
+        self.assertIn('<a href="https://t.me/film_indonesia1/2310">Qodrat (2022)</a>', res_cap)
+        self.assertIn("2️⃣ <b>Qodrat 2 (2025)</b> 📍 <i>(Film Ini)</i>", res_cap)
+
 
 class TestTMDbService(unittest.TestCase):
     def setUp(self):

@@ -22,6 +22,7 @@ import urllib.request
 import uuid
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from .cache import extract_movie_sequel_tag
 from .hashtags import generate_smart_hashtags
 from .synopsis import ensure_indonesian_text
 
@@ -694,9 +695,15 @@ def build_rich_article_payload(
             p_year_str = f" ({p_year})" if p_year else ""
 
             # Check if this part is the current movie being posted
-            is_current = (p_title.lower() == title.lower().strip())
-            if not is_current and year and p_year and p_year == year:
-                is_current = (difflib.SequenceMatcher(None, p_title.lower(), title.lower().strip()).ratio() >= 0.85)
+            p_norm = re.sub(r"[^\w\s]", "", p_title).lower().strip()
+            t_norm = re.sub(r"[^\w\s]", "", title).lower().strip()
+            s_p = extract_movie_sequel_tag(p_title)
+            s_t = extract_movie_sequel_tag(title)
+            is_current = (s_p == s_t) and (
+                p_norm == t_norm
+                or p_norm.replace("q", "k") == t_norm.replace("q", "k")
+                or (bool(year and p_year and abs(year - p_year) <= 1) and difflib.SequenceMatcher(None, p_norm, t_norm).ratio() >= 0.80)
+            )
 
             if is_current:
                 part_lines.append(f"{num} <b>{html_mod.escape(p_title)}{p_year_str}</b> 📍 <i>(Film Ini)</i>")

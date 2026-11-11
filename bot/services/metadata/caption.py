@@ -8,11 +8,13 @@ Renders modern unified article post format:
 Guaranteed to be valid HTML and strictly <= 1024 characters.
 """
 
+import difflib
 import html
 import os
 import re
 from typing import Any, Dict, List, Optional
 
+from .cache import extract_movie_sequel_tag
 from .hashtags import generate_smart_hashtags
 
 
@@ -282,7 +284,15 @@ class CaptionGenerator:
                 p_year = part.get("year")
                 p_year_str = f" ({p_year})" if p_year else ""
 
-                is_current = (p_title.lower() == f["title"].lower().strip())
+                p_norm = re.sub(r"[^\w\s]", "", p_title).lower().strip()
+                f_norm = re.sub(r"[^\w\s]", "", f["title"]).lower().strip()
+                s_p = extract_movie_sequel_tag(p_title)
+                s_f = extract_movie_sequel_tag(f["title"])
+                is_current = (s_p == s_f) and (
+                    p_norm == f_norm
+                    or p_norm.replace("q", "k") == f_norm.replace("q", "k")
+                    or (bool(p_year and f.get("year") and abs(p_year - f["year"]) <= 1) and difflib.SequenceMatcher(None, p_norm, f_norm).ratio() >= 0.80)
+                )
                 if is_current:
                     col_lines.append(f"{num} <b>{html.escape(p_title)}{p_year_str}</b> 📍 <i>(Film Ini)</i>")
                 else:
