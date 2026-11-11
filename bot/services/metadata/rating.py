@@ -71,7 +71,10 @@ class MovieRatingService:
             # Cache baru menyimpan collection_checked. Cache lama tanpa penanda
             # bisa saja dibuat sebelum fitur "Urutan Nonton" ada, jadi coba
             # lengkapi sekali lewat TMDb sebelum menyerah ke data lama.
-            if cached_data.get("collection") or cached_data.get("collection_checked"):
+            if (
+                (cached_data.get("collection") or cached_data.get("collection_checked"))
+                and cached_data.get("title_localized_checked")
+            ):
                 return cached_data
             if self.tmdb.is_enabled():
                 try:

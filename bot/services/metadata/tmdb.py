@@ -176,9 +176,12 @@ class TMDbService:
                 # Cache lama dibuat sebelum fitur koleksi ada. Film yang memang
                 # bukan bagian franchise menyimpan collection_checked=True agar
                 # tidak di-refresh berulang kali.
-                if cached_result.get("collection") or cached_result.get("collection_checked"):
+                if (
+                    (cached_result.get("collection") or cached_result.get("collection_checked"))
+                    and cached_result.get("title_localized_checked")
+                ):
                     return cached_result
-                logger.info(f"TMDb cache lama tanpa info koleksi, refresh: {clean_title} ({year})")
+                logger.info(f"TMDb cache lama tanpa info koleksi/judul lokal, refresh: {clean_title} ({year})")
             except Exception:
                 cached_result = None
 
@@ -497,6 +500,28 @@ class TMDbService:
         verified_title = main.get("title") or main.get("name") or fallback.get("title") or fallback.get("name")
         original_title = main.get("original_title") or main.get("original_name")
 
+        # Semua judul alternatif/terjemahan resmi. Dipakai untuk mengenali file
+        # berjudul Inggris (mis. "Satan's Slaves") lalu menampilkan judul
+        # Indonesia resminya ("Pengabdi Setan").
+        alt_titles: List[str] = []
+        seen_alt = set()
+        for source in (main, fallback):
+            alt_block = source.get("alternative_titles") or {}
+            for item in (alt_block.get("titles") or []):
+                alt = (item.get("title") or "").strip()
+                key = alt.lower()
+                if alt and key not in seen_alt and len(alt_titles) < 40:
+                    seen_alt.add(key)
+                    alt_titles.append(alt)
+            translations = (source.get("translations") or {}).get("translations", []) or []
+            for item in translations:
+                data = item.get("data") or {}
+                alt = (data.get("title") or data.get("name") or "").strip()
+                key = alt.lower()
+                if alt and key not in seen_alt and len(alt_titles) < 40:
+                    seen_alt.add(key)
+                    alt_titles.append(alt)
+
         # Year
         date_str = main.get("release_date") or main.get("first_air_date") or fallback.get("release_date") or fallback.get("first_air_date") or ""
         year = None
@@ -655,8 +680,11 @@ class TMDbService:
         }
         if verified_title:
             res["verified_title"] = verified_title
+            res["localized_title"] = verified_title
         if original_title:
             res["original_title"] = original_title
+        if alt_titles:
+            res["alternative_titles"] = alt_titles
         if year:
             res["year"] = year
         if rating_str:
@@ -797,6 +825,7 @@ class TMDbService:
                 collection_checked = False
                 logger.debug(f"Failed to fetch collection {collection_raw}: {ce}")
         res["collection_checked"] = collection_checked
+        res["title_localized_checked"] = bool(details_id) if details_ok is None else bool(details_ok)
 
         return res
 

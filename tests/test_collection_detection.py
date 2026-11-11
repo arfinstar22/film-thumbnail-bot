@@ -69,6 +69,7 @@ class TestStaleRatingCache(unittest.TestCase):
             "rating": "7.0 / 10",
             "collection": PERAHU_COLLECTION,
             "collection_checked": True,
+            "title_localized_checked": True,
         }
 
         service = MovieRatingService(cache=self.cache, tmdb_service=fake_tmdb)
@@ -84,6 +85,7 @@ class TestStaleRatingCache(unittest.TestCase):
         self.cache.set_setting(key, json.dumps({
             "rating": "7.0 / 10",
             "collection_checked": True,
+            "title_localized_checked": True,
         }))
 
         fake_tmdb = MagicMock()
@@ -131,6 +133,7 @@ class TestTMDbCollectionCache(unittest.TestCase):
 
         self.assertEqual(result["collection"]["name"], "Seri Perahu Kertas")
         self.assertTrue(result["collection_checked"])
+        self.assertTrue(result["title_localized_checked"])
         cached = json.loads(self.cache.get_setting(key, "{}"))
         self.assertEqual(cached["collection_id"], 55)
 

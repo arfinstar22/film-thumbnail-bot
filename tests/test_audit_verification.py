@@ -125,7 +125,9 @@ def test_smart_caption_enrichment():
     caption = result.get("caption", "")
     meta = result.get("metadata", {})
     
-    assert "SLEEP NO MORE" in caption
+    # TMDb menyimpan judul Indonesia resmi untuk film ini
+    # ("Monster Pabrik Rambut"); tanpa TMDb judul file tetap "Sleep No More".
+    assert (meta.get("title") or "").upper() in caption
     assert "SINOPSIS LENGKAP" in caption.upper(), "Synopsis should never be empty for smart captions"
     assert len(caption) <= 1024
     print("✅ Smart Caption: Fallback synopsis, translation, and enrichment verified!")

@@ -28,31 +28,48 @@ def resolve_verified_identity(
     (Dilan 1990, 1917) atau typo judul tidak dianggap mismatch.
     """
     verified = str(rate_res.get("verified_title") or "").strip()
+    # Judul hasil TMDb dengan bahasa id-ID. Kalau TMDb punya terjemahan resmi
+    # Indonesia, judul inilah yang dipakai (mis. Satan's Slaves -> Pengabdi Setan).
+    localized = str(rate_res.get("localized_title") or verified or "").strip()
     rate_year = rate_res.get("year")
     o = normalize_title_for_match(parsed_title)
-    v = normalize_title_for_match(verified) if verified else o
+    v = normalize_title_for_match(localized) if localized else o
 
-    close = bool(o and v) and (
-        o == v or difflib.SequenceMatcher(None, o, v).ratio() >= 0.85
-    )
+    def _title_close(candidate: str) -> bool:
+        c = normalize_title_for_match(candidate)
+        return bool(o and c) and (
+            o == c or difflib.SequenceMatcher(None, o, c).ratio() >= 0.85
+        )
+
+    close = _title_close(localized) if localized else False
+    aliases = [verified, rate_res.get("original_title")]
+    aliases.extend(rate_res.get("alternative_titles") or [])
+    alias_match = any(_title_close(a) for a in aliases if a)
+
     numeric_extension = False
     if o and v.startswith(o + " "):
         extra = v[len(o) + 1:].strip()
         numeric_extension = bool(re.fullmatch(r"[\d ivx]+", extra))
     whole_word = bool(o and v) and f" {o} " in f" {v} "
     year_in_verified = bool(parsed_year) and bool(
-        re.search(rf"(?<!\d){int(parsed_year)}(?!\d)", verified)
+        re.search(rf"(?<!\d){int(parsed_year)}(?!\d)", localized)
     )
 
     if parsed_year and rate_year and abs(int(parsed_year) - int(rate_year)) > 1:
         # Tahun beda jauh: hanya boleh kalau judul PERSIS sama (modulo tanda baca),
         # tahunnya bagian dari judul, atau judul hasilnya memperpanjang angka tahun.
-        identical = bool(o and v) and o == v
+        identical = bool(o) and (
+            o == v or any(normalize_title_for_match(a) == o for a in aliases if a)
+        )
         if not (identical or numeric_extension or year_in_verified):
             return False, parsed_title, parsed_year
 
     new_title = parsed_title
-    if verified and (close or numeric_extension or (title_confidence < 0.6 and whole_word)):
+    if alias_match and localized:
+        # File memakai judul alternatif/Inggris, tetapi TMDb punya judul
+        # Indonesia resmi. Tampilkan versi Indonesia.
+        new_title = localized
+    elif verified and (close or numeric_extension or (title_confidence < 0.6 and whole_word)):
         new_title = verified
 
     # Tahun hasil TMDb hanya menimpa tahun file kalau file tidak punya tahun,

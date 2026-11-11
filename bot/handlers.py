@@ -1194,6 +1194,7 @@ def get_banner_fix_menu_kb(chat_id_or_msg_id: int):
 
 BOT_COMMANDS_LIST = [
     BotCommand("start", "Panduan lengkap & status bot"),
+    BotCommand("status", "Buka dashboard status bot"),
     BotCommand("request", "Kirim permintaan judul film"),
     BotCommand("mood", "Rekomendasi film sesuai mood / genre"),
     BotCommand("acak", "Pilih film acak (bingung mau nonton apa)"),
@@ -1763,7 +1764,7 @@ async def start_cmd(client: Client, msg: Message):
     await msg.reply_text(member_text, parse_mode=ParseMode.HTML, reply_markup=member_kb)
 
 
-@app.on_message(filters.command(["help", "dashboard"]))
+@app.on_message(filters.command(["help", "dashboard", "status"]))
 async def help_dashboard_cmd(client: Client, msg: Message):
     user_id = msg.from_user.id if msg.from_user else msg.chat.id
     first_name = msg.from_user.first_name if msg.from_user else "Sobat Film"
