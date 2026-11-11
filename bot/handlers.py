@@ -5591,7 +5591,7 @@ async def update_pinned_catalog(
     Guarantees that older duplicate catalog messages are deleted and unpinned,
     leaving strictly ONE clean pinned catalog in the channel.
     """
-    clean_channel = (channel_username or "").lstrip("@").strip()
+    clean_channel = (channel_username or "").lstrip("@").strip().lower()
     if not clean_channel:
         return 0
 
@@ -9212,7 +9212,7 @@ async def auto_sync_new_channel_post(client: Client, msg: Message):
             )
             logger.info(f"✨ Auto-synced NEW movie post #{msg.id} in @{clean_channel}: {info['title']}")
             try:
-                _engine.cache.fulfill_movie_requests(clean_channel, info["title"], info["year"], info["message_id"])
+                _engine.cache.fulfill_movie_requests(info["title"], clean_channel, info["year"])
             except Exception as fe:
                 logger.debug(f"Request fulfill error: {fe}")
             asyncio.create_task(update_pinned_catalog(client, clean_channel))

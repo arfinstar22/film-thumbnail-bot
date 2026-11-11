@@ -1,7 +1,9 @@
+import hashlib
 import json
 import logging
 import math
 import re
+import time
 import urllib.parse
 import urllib.request
 from collections import defaultdict
@@ -11,21 +13,40 @@ logger = logging.getLogger(__name__)
 
 # Telegraph hard limit is 64KB per page; stay under with margin
 _MAX_PAGE_BYTES = 58000
+# Small pause between real writes so a full rebuild does not trip rate limits.
+_TELEGRAPH_WRITE_PAUSE = 0.4
 
 
-def _telegraph_api(endpoint: str, payload: dict, timeout: int = 15) -> Optional[dict]:
-    """Call a Telegraph API endpoint and return the result dict, or None on failure."""
+def _telegraph_api(endpoint: str, payload: dict, timeout: int = 15, max_attempts: int = 3) -> Optional[dict]:
+    """Call a Telegraph API endpoint and return the result dict, or None on failure.
+
+    Transient failures (network/timeout/rate limit/5xx) are retried: a single
+    hiccup must not leave the public A-Z catalog silently stale.
+    """
     data = urllib.parse.urlencode(payload).encode("utf-8")
-    try:
-        with urllib.request.urlopen(
-            urllib.request.Request(f"https://api.telegra.ph/{endpoint}", data=data),
-            timeout=timeout,
-        ) as resp:
-            res = json.loads(resp.read().decode("utf-8"))
-            if res.get("ok"):
-                return res.get("result", {})
-    except Exception as e:
-        logger.warning(f"Telegraph API {endpoint} failed: {e}")
+    last_error = "unknown"
+    for attempt in range(max_attempts):
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(f"https://api.telegra.ph/{endpoint}", data=data),
+                timeout=timeout,
+            ) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+                if res.get("ok"):
+                    return res.get("result", {})
+                last_error = str(res.get("error") or "unknown")
+                logger.warning(f"Telegraph API {endpoint} error: {last_error}")
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"Telegraph API {endpoint} failed: {e}")
+
+        transient = any(
+            key in last_error.upper()
+            for key in ("FLOOD", "TOO_MANY", "TIMEOUT", "TEMPORARY", "CONNECTION", "429", "500", "502", "503", "504")
+        )
+        if not transient or attempt + 1 >= max_attempts:
+            break
+        time.sleep(1.5 * (attempt + 1))
     return None
 
 
@@ -48,13 +69,23 @@ def _ensure_token(cache: Any, channel: str) -> Optional[str]:
 
 
 def _publish_page(token: str, title: str, nodes: list, channel: str,
-                  cache: Any, cache_key: str) -> Optional[str]:
-    """Create or edit a single Telegraph page. Returns URL or None."""
+                  cache: Any, cache_key: str) -> Tuple[Optional[str], bool]:
+    """Create or edit a single Telegraph page. Returns (URL or None, did_write).
+
+    Unchanged pages are skipped using a content hash. Previously every catalog
+    refresh re-edited every A-Z letter page, which hit Telegraph rate limits and
+    left some letters stale after a failed edit (silently reported as success).
+    """
     content_str = json.dumps(nodes)
     author = f"@{channel}"
     author_url = f"https://t.me/{channel}"
+    content_hash = hashlib.sha256(f"{title}\n{author}\n{content_str}".encode("utf-8")).hexdigest()
+    hash_key = f"{cache_key}_hash"
 
     cached_path = cache.get_setting(cache_key, "")
+    if cached_path and cache.get_setting(hash_key, "") == content_hash:
+        return f"https://telegra.ph/{cached_path}", False
+
     if cached_path:
         result = _telegraph_api("editPage", {
             "access_token": token,
@@ -66,9 +97,12 @@ def _publish_page(token: str, title: str, nodes: list, channel: str,
             "return_content": "false",
         })
         if result:
-            return result.get("url") or f"https://telegra.ph/{cached_path}"
-        # Even if editPage API call failed (rate limit/network), page still exists at cached path
-        return f"https://telegra.ph/{cached_path}"
+            cache.set_setting(hash_key, content_hash)
+            return result.get("url") or f"https://telegra.ph/{cached_path}", True
+        # Keep the old page URL (still valid) but log loudly. Hash is NOT stored,
+        # so the next catalog refresh retries this page instead of skipping it.
+        logger.error(f"Telegraph editPage gagal untuk '{title}' ({cached_path}); halaman lama tetap dipakai.")
+        return f"https://telegra.ph/{cached_path}", True
 
     result = _telegraph_api("createPage", {
         "access_token": token,
@@ -82,8 +116,9 @@ def _publish_page(token: str, title: str, nodes: list, channel: str,
         path = result.get("path")
         if path:
             cache.set_setting(cache_key, path)
-        return result.get("url")
-    return None
+            cache.set_setting(hash_key, content_hash)
+        return result.get("url"), True
+    return None, True
 
 
 def _build_film_nodes(films: List[Dict[str, Any]], channel: str,
@@ -131,7 +166,7 @@ def publish_or_update_telegraph_catalog(
     When they don't, creates per-letter sub-pages and a master index page
     linking to each. Scales to 1000+ films without hitting Telegraph's 64KB limit.
     """
-    clean_channel = (channel_username or "").lstrip("@").strip()
+    clean_channel = (channel_username or "").lstrip("@").strip().lower()
     if not movies:
         return None
 
@@ -176,31 +211,34 @@ def _build_and_publish(
     if _content_size(single_nodes) <= _MAX_PAGE_BYTES:
         cache_key = f"telegraph_path_{channel}"
         title = f"🍿 KATALOG FILM @{channel.upper()}"
-        return _publish_page(token, title, single_nodes, channel, cache, cache_key)
+        url, _ = _publish_page(token, title, single_nodes, channel, cache, cache_key)
+        return url
 
     # --- Try single-page compact (no meta) ---
     compact_nodes = _build_single_page_nodes(movies, groups, sorted_keys, channel, bot_mention, include_meta=False)
     if _content_size(compact_nodes) <= _MAX_PAGE_BYTES:
         cache_key = f"telegraph_path_{channel}"
         title = f"🍿 KATALOG FILM @{channel.upper()}"
-        return _publish_page(token, title, compact_nodes, channel, cache, cache_key)
+        url, _ = _publish_page(token, title, compact_nodes, channel, cache, cache_key)
+        return url
 
     # --- Multi-page: one page per letter, then master index ---
-    letter_urls: List[Tuple[str, int, str]] = []  # (char, count, url)
+    letter_pages: List[Tuple[str, int, List[str]]] = []  # (char, count, urls)
     for char in sorted_keys:
         char_films = groups[char]
         urls = _publish_letter_pages(token, channel, cache, char, char_films, bot_mention)
         if urls:
-            letter_urls.append((char, len(char_films), urls[0]))
+            letter_pages.append((char, len(char_films), urls))
 
-    if not letter_urls:
+    if not letter_pages:
         return None
 
     # Build index page
-    index_nodes = _build_index_page_nodes(movies, letter_urls, channel, bot_mention)
+    index_nodes = _build_index_page_nodes(movies, letter_pages, channel, bot_mention)
     cache_key = f"telegraph_path_{channel}"
     title = f"🍿 KATALOG FILM @{channel.upper()}"
-    return _publish_page(token, title, index_nodes, channel, cache, cache_key)
+    url, _ = _publish_page(token, title, index_nodes, channel, cache, cache_key)
+    return url
 
 
 def _build_single_page_nodes(
@@ -244,7 +282,7 @@ def _publish_letter_pages(
 
     If the letter's films exceed _MAX_PAGE_BYTES, they get chunked
     into multiple pages (e.g. A part 1/2, A part 2/2).
-    Returns list of URLs (first URL is the main one for this letter).
+    Returns URLs for every chunk; the index page links all of them.
     """
     # Try full meta first
     items = _build_film_nodes(films, channel, include_meta=True)
@@ -273,7 +311,9 @@ def _publish_letter_pages(
     if _content_size(test_nodes) <= _MAX_PAGE_BYTES:
         cache_key = f"telegraph_letter_{channel}_{char}"
         title = f"📁 Katalog [{char}] — @{channel.upper()}"
-        url = _publish_page(token, title, test_nodes, channel, cache, cache_key)
+        url, did_write = _publish_page(token, title, test_nodes, channel, cache, cache_key)
+        if did_write:
+            time.sleep(_TELEGRAPH_WRITE_PAUSE)
         return [url] if url else []
 
     # Strip meta and retry
@@ -282,7 +322,9 @@ def _publish_letter_pages(
     if _content_size(test_nodes) <= _MAX_PAGE_BYTES:
         cache_key = f"telegraph_letter_{channel}_{char}"
         title = f"📁 Katalog [{char}] — @{channel.upper()}"
-        url = _publish_page(token, title, test_nodes, channel, cache, cache_key)
+        url, did_write = _publish_page(token, title, test_nodes, channel, cache, cache_key)
+        if did_write:
+            time.sleep(_TELEGRAPH_WRITE_PAUSE)
         return [url] if url else []
 
     # Still too big — chunk the films
@@ -319,7 +361,9 @@ def _publish_letter_pages(
         page_nodes = part_header + [{"tag": "ul", "children": chunk_items}] + footer_nodes
         cache_key = f"telegraph_letter_{channel}_{char}_p{idx}"
         title = f"📁 [{char}] Bag.{idx}/{len(chunks)} — @{channel.upper()}"
-        url = _publish_page(token, title, page_nodes, channel, cache, cache_key)
+        url, did_write = _publish_page(token, title, page_nodes, channel, cache, cache_key)
+        if did_write:
+            time.sleep(_TELEGRAPH_WRITE_PAUSE)
         if url:
             urls.append(url)
     return urls
@@ -327,11 +371,15 @@ def _publish_letter_pages(
 
 def _build_index_page_nodes(
     movies: List[Dict[str, Any]],
-    letter_urls: List[Tuple[str, int, str]],
+    letter_pages: List[Tuple[str, int, List[str]]],
     channel: str,
     bot_mention: str,
 ) -> list:
-    """Build the master index page that links to each letter sub-page."""
+    """Build the master index page that links to each letter sub-page.
+
+    A letter split into multiple chunks links every chunk. Previously only the
+    first chunk was linked, so films in part 2+ were unreachable from the index.
+    """
     nodes = [
         {"tag": "h3", "children": [f"🍿 KATALOG KOLEKSI FILM @{channel.upper()} (A - Z)"]},
         {"tag": "blockquote", "children": [
@@ -344,14 +392,25 @@ def _build_index_page_nodes(
         {"tag": "h4", "children": ["📂 INDEKS KATALOG A - Z"]},
     ]
 
+    def _full_url(url: str) -> str:
+        return url if str(url).startswith("http") else f"https://telegra.ph/{str(url).lstrip('/')}"
+
     li_items = []
-    for char, count, url in letter_urls:
-        full_url = url if str(url).startswith("http") else f"https://telegra.ph/{str(url).lstrip('/')}"
-        li_items.append({"tag": "li", "children": [
-            {"tag": "b", "children": [
-                {"tag": "a", "attrs": {"href": full_url}, "children": [f"📁 [ {char} ] — {count} Film"]},
-            ]},
-        ]})
+    for char, count, urls in letter_pages:
+        parts = urls if isinstance(urls, (list, tuple)) else [urls]
+        if len(parts) == 1:
+            li_items.append({"tag": "li", "children": [
+                {"tag": "b", "children": [
+                    {"tag": "a", "attrs": {"href": _full_url(parts[0])}, "children": [f"📁 [ {char} ] — {count} Film"]},
+                ]},
+            ]})
+        else:
+            for idx, url in enumerate(parts, 1):
+                li_items.append({"tag": "li", "children": [
+                    {"tag": "b", "children": [
+                        {"tag": "a", "attrs": {"href": _full_url(url)}, "children": [f"📁 [ {char} ] — Bagian {idx}/{len(parts)} ({count} Film)"]},
+                    ]},
+                ]})
     nodes.append({"tag": "ul", "children": li_items})
     nodes.append({"tag": "hr"})
 
@@ -446,7 +505,7 @@ def publish_movie_instant_view(
     """Publishes a rich, cinematic Telegraph Instant View page for a single movie.
     Returns the Telegraph URL for inclusion in channel post buttons.
     """
-    clean_channel = channel_username.lstrip("@").strip()
+    clean_channel = channel_username.lstrip("@").strip().lower()
     title = (metadata.get("title") or "Film").strip()
     year = metadata.get("year")
     title_disp = f"{title} ({year})" if year else title
@@ -548,7 +607,7 @@ def publish_movie_instant_view(
     })
 
     page_title = f"{title_disp} — Brosur Resmi"
-    url = _publish_page(token, page_title, nodes, clean_channel, cache, cache_key)
+    url, _ = _publish_page(token, page_title, nodes, clean_channel, cache, cache_key)
     if url:
         cache.set_setting(cache_key, url)
     return url
