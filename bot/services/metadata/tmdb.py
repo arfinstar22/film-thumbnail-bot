@@ -168,12 +168,19 @@ class TMDbService:
             f"tmdb_v3_{re.sub(r'[^a-z0-9]+', '_', normalize_title_for_match(clean_title))}"
             f"_{year}_{1 if is_series else 0}"
         )
+        cached_result = None
         cached_data = self.cache.get_setting(cache_key, "")
         if cached_data:
             try:
-                return json.loads(cached_data)
+                cached_result = json.loads(cached_data)
+                # Cache lama dibuat sebelum fitur koleksi ada. Film yang memang
+                # bukan bagian franchise menyimpan collection_checked=True agar
+                # tidak di-refresh berulang kali.
+                if cached_result.get("collection") or cached_result.get("collection_checked"):
+                    return cached_result
+                logger.info(f"TMDb cache lama tanpa info koleksi, refresh: {clean_title} ({year})")
             except Exception:
-                pass
+                cached_result = None
 
         pool = self._search_pool(clean_title, year, is_series)
         best_item, best_type, _ = self._pick_best_from_pool(pool, clean_title, year, is_series)
@@ -185,7 +192,7 @@ class TMDbService:
             )
 
         if not best_item:
-            return {}
+            return cached_result or {}
 
         tmdb_id = best_item.get("id")
         media_type = best_type or best_item.get("media_type") or (
@@ -225,7 +232,8 @@ class TMDbService:
         result = self._extract_metadata(
             details_id or best_item,
             details_en,
-            media_type
+            media_type,
+            details_ok=bool(details_id)
         )
         if result:
             try:
@@ -233,7 +241,7 @@ class TMDbService:
             except Exception:
                 pass
 
-        return result
+        return result or cached_result or {}
 
     def _search_pool(
         self,
@@ -479,7 +487,8 @@ class TMDbService:
         self,
         details_id: Dict[str, Any],
         details_en: Dict[str, Any],
-        media_type: str
+        media_type: str,
+        details_ok: Optional[bool] = None
     ) -> Dict[str, Any]:
         """Extracts normalized metadata dictionary matching Film Thumbnail Bot conventions."""
         main = details_id if details_id else details_en
@@ -770,15 +779,24 @@ class TMDbService:
             res["imdb_rating"] = omdb_extra["imdb_rating"]
 
         # Franchise / Universe Collection
+        # collection_checked menandai bahwa detail TMDb sudah sukses dicek.
+        # Tanpa penanda ini, cache lama (pra-fitur koleksi) akan terus dipakai
+        # dan "Urutan Nonton" tidak pernah muncul lagi.
+        collection_checked = bool(details_id) if details_ok is None else bool(details_ok)
         collection_raw = main.get("belongs_to_collection") or fallback.get("belongs_to_collection")
         if collection_raw and isinstance(collection_raw, dict) and collection_raw.get("id"):
             try:
                 cid = collection_raw["id"]
+                res["collection_id"] = cid
                 col_data = self.get_collection(cid)
                 if col_data and len(col_data.get("parts", [])) > 1:
                     res["collection"] = col_data
+                elif not col_data:
+                    collection_checked = False
             except Exception as ce:
+                collection_checked = False
                 logger.debug(f"Failed to fetch collection {collection_raw}: {ce}")
+        res["collection_checked"] = collection_checked
 
         return res
 

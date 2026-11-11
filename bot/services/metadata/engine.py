@@ -71,6 +71,7 @@ RESCUE_FIELDS = (
     "poster_url", "backdrop_url", "trailer_url", "rating", "genre", "director",
     "actors", "original_title", "tmdb_id", "year", "plot", "tagline",
     "production_countries", "country_codes", "certification", "runtime_minutes",
+    "collection", "collection_checked",
 )
 
 
@@ -115,6 +116,12 @@ class MetadataEngine:
         self.rating_service = MovieRatingService(cache=self.cache)
         self.tmdb_service = self.rating_service.tmdb
         self.synopsis_service = WikipediaSynopsisService(cache=self.cache)
+        if not self.tmdb_service.is_enabled():
+            logger.warning(
+                "TMDb API tidak aktif. Poster HD, tagline, dan 'Urutan Nonton' "
+                "tidak dapat dideteksi; bot memakai fallback OMDb/IMDb. "
+                "Set TMDB_API_KEY di Render atau jalankan /settmdb <api_key>."
+            )
 
     async def process(
         self,

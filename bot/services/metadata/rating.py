@@ -59,16 +59,29 @@ class MovieRatingService:
 
         clean_title = re.sub(r"[^\w\s]", "", title).strip()
         cache_key = f"rating_v2_{clean_title.lower()}_{year}" if year else f"rating_v2_{clean_title.lower()}"
+        cached_data = None
         cached_raw = self.cache.get_setting(cache_key, "")
         if cached_raw:
             try:
                 cached_data = json.loads(cached_raw)
-                # Cache kosong lama (film yang dulu gagal dikenali) dianggap miss,
-                # supaya pencocokan TMDb yang baru bisa mencoba ulang.
-                if cached_data:
-                    return cached_data
             except Exception:
-                pass
+                cached_data = None
+
+        if cached_data:
+            # Cache baru menyimpan collection_checked. Cache lama tanpa penanda
+            # bisa saja dibuat sebelum fitur "Urutan Nonton" ada, jadi coba
+            # lengkapi sekali lewat TMDb sebelum menyerah ke data lama.
+            if cached_data.get("collection") or cached_data.get("collection_checked"):
+                return cached_data
+            if self.tmdb.is_enabled():
+                try:
+                    tmdb_res = self.tmdb.search_movie(title, year)
+                    if tmdb_res:
+                        self.cache.set_setting(cache_key, json.dumps(tmdb_res))
+                        return tmdb_res
+                except Exception as e:
+                    logger.debug(f"TMDb refresh cache lama gagal untuk '{title}': {e}")
+            return cached_data
 
         # Step 0: TMDb API check (HD poster, backdrop, Indonesian synopsis, official rating)
         if self.tmdb.is_enabled():
