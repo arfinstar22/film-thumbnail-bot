@@ -6352,7 +6352,7 @@ def _update_caption_with_franchise_links(
 
     pat_details = re.compile(r"<details>\s*<summary>[^<]*Urutan Nonton:[^<]*</summary>.*?</details>", re.DOTALL | re.IGNORECASE)
     pat_bq = re.compile(r"<blockquote(?:\s+expandable)?>\s*🗺️\s*<b>\s*URUTAN NONTON:[^<]*</b>.*?</blockquote>", re.DOTALL | re.IGNORECASE)
-    pat_plain = re.compile(r"🗺️\s*<b>\s*URUTAN NONTON:[^\n]*\n(?:[1-9🔟\u0030-\u0039\ufe0f\u20e3\.\s][^\n]*\n?)+", re.IGNORECASE)
+    pat_plain = re.compile(r"🗺️\s*(?:<b>\s*)?URUTAN NONTON:[^\n]*(?:</b>)?\n(?:[1-9🔟\u0030-\u0039\ufe0f\u20e3\.\s][^\n]*\n?)+", re.IGNORECASE)
 
     if pat_details.search(orig_caption):
         new_block = _build_franchise_watch_order_block(collection, sibling_title, sibling_year, clean_channel, cache, style="details")
@@ -6514,8 +6514,14 @@ async def sync_collection_sibling_posts(
                     sibling_meta = {}
             if not sibling_meta:
                 sibling_meta = {}
-            sibling_meta.setdefault("title", p_title)
-            sibling_meta.setdefault("year", p_year)
+            if not sibling_meta.get("title"):
+                sibling_meta["title"] = p_title
+            if not sibling_meta.get("year") and p_year:
+                sibling_meta["year"] = p_year
+            if not sibling_meta.get("rating") and sibling_item.get("rating"):
+                sibling_meta["rating"] = sibling_item["rating"]
+            if not sibling_meta.get("genre") and sibling_item.get("genre"):
+                sibling_meta["genre"] = sibling_item["genre"]
             sibling_meta["collection"] = collection
 
             poster_url = sibling_meta.get("poster_url") or sibling_meta.get("poster_path")
