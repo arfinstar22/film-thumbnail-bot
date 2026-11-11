@@ -35,7 +35,8 @@ from .services.metadata.engine import MetadataEngine, rescue_poster_metadata
 from .services.metadata.banner import _download_image_bytes
 from .services.metadata.catalog import format_pinned_catalog, publish_or_update_telegraph_catalog, publish_movie_instant_view
 from .services.metadata.rich_post import (
-    async_send_rich_article_post, build_rich_article_payload, async_delete_channel_post
+    async_send_rich_article_post, build_rich_article_payload, async_delete_channel_post,
+    _quality_rank
 )
 from .services.metadata.cache import (
     WIB, get_next_prime_time_slots, normalize_movie_title_and_year, is_invalid_movie_title
@@ -1155,16 +1156,88 @@ def build_channel_post_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def _video_variants_cache_key(title: str, year: Optional[Any]) -> str:
+    clean_t = re.sub(r"[^\w\s]", "", str(title or "")).strip().lower()
+    return f"video_variants_{clean_t}_{year}" if year else f"video_variants_{clean_t}"
+
+
+def _load_video_variants(title: str, year: Optional[Any]) -> List[Dict[str, str]]:
+    raw = _engine.cache.get_setting(_video_variants_cache_key(title, year), "")
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    out: List[Dict[str, str]] = []
+    if not isinstance(data, list):
+        return out
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        fid = str(item.get("file_id") or "").strip()
+        quality = str(item.get("quality") or "Original").strip()
+        if fid:
+            out.append({"quality": quality, "file_id": fid})
+    return out
+
+
+def _save_video_variants(title: str, year: Optional[Any], variants: List[Dict[str, str]]) -> None:
+    if not variants:
+        _engine.cache.set_setting(_video_variants_cache_key(title, year), "")
+        return
+    _engine.cache.set_setting(
+        _video_variants_cache_key(title, year),
+        json.dumps(variants, ensure_ascii=False)
+    )
+
+
+def _upsert_video_variant(
+    variants: List[Dict[str, str]],
+    file_id: str,
+    quality: str
+) -> List[Dict[str, str]]:
+    q_key = str(quality or "").strip().lower()
+    out = [
+        v for v in variants
+        if v.get("file_id") != file_id and str(v.get("quality") or "").strip().lower() != q_key
+    ]
+    out.append({"quality": str(quality or "Original").strip(), "file_id": file_id})
+    out.sort(key=lambda v: _quality_rank(v.get("quality")), reverse=True)
+    return out
+
+
+def _detect_quality(text: str, fallback: str = "") -> str:
+    low = str(text or "").lower()
+    if not low.strip():
+        return fallback
+    m = re.search(r"\b(2160p|1440p|1080p|720p|576p|480p|360p|4k|uhd|fullhd|full hd|fhd|hd|sd)\b", low)
+    if not m:
+        return fallback
+    token = m.group(1)
+    if token in ("4k", "uhd"):
+        return "2160p"
+    if token in ("fullhd", "full hd", "fhd"):
+        return "1080p"
+    if token == "hd":
+        return "720p"
+    if token == "sd":
+        return "480p"
+    return token
+
+
 def get_caption_kb(message_id: int, watermark: str):
     btn_post = InlineKeyboardButton("🚀 Posting ke Channel", callback_data=f"post_banner:{message_id}")
     btn_post.style = "primary"
 
     btn_prev = InlineKeyboardButton("👁️ Preview", callback_data=f"banner:{message_id}")
     btn_fix = InlineKeyboardButton("🖼️ Perbaiki Poster", callback_data=f"fixbanner:{message_id}")
+    btn_quality = InlineKeyboardButton("➕ Tambah Kualitas Video", callback_data=f"addquality:{message_id}")
 
     return InlineKeyboardMarkup([
         [btn_post],
-        [btn_prev, btn_fix]
+        [btn_prev, btn_fix],
+        [btn_quality]
     ])
 
 
@@ -6380,6 +6453,14 @@ async def sync_collection_sibling_posts(
                 cached_banner = _engine.cache.get_setting(f"banner_fid_{s_clean_t.lower()}_{p_year}", "") or _engine.cache.get_setting(f"banner_fid_{s_clean_t.lower()}", "")
                 banner_url = sibling_meta.get("banner_url") or sibling_meta.get("backdrop_url") or cached_banner
 
+                sibling_variants = _load_video_variants(p_title, p_year)
+                if sibling_variants and actual_fid and not any(v.get("file_id") == actual_fid for v in sibling_variants):
+                    sibling_variants = _upsert_video_variant(
+                        sibling_variants,
+                        actual_fid,
+                        sibling_meta.get("resolution") or "Video"
+                    )
+
                 poster_url = sibling_meta.get("poster_url") or sibling_meta.get("poster_path")
                 rich_payload = build_rich_article_payload(
                     chat_id=f"@{clean_channel}",
@@ -6388,7 +6469,8 @@ async def sync_collection_sibling_posts(
                     video_file_id=actual_fid,
                     banner_file_id_or_url=banner_url,
                     poster_file_id_or_url=poster_url,
-                    reply_markup=rich_kb
+                    reply_markup=rich_kb,
+                    video_variants=sibling_variants
                 )
 
                 edit_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
@@ -6443,7 +6525,8 @@ async def publish_video_to_channel(
     thumb_path: Optional[str] = None,
     with_banner: Optional[bool] = None,
     poster_source: Optional[str] = None,
-    pregenerated_banner_path: Optional[str] = None
+    pregenerated_banner_path: Optional[str] = None,
+    video_variants: Optional[List[Dict[str, str]]] = None
 ) -> Optional[Message]:
     """Publishes a video post to the channel with buttons, divider sticker, cache update, and pinned catalog refresh."""
     # P0-4: throttle per-channel (tidak ubah isi/tampilan, hanya jeda anti FloodWait)
@@ -6459,6 +6542,13 @@ async def publish_video_to_channel(
     year_meta = meta.get("year")
     season_meta = meta.get("season")
     episode_meta = meta.get("episode")
+
+    # Multi-quality: explicit variants from the upload session, else stored variants for this film
+    variants = video_variants
+    if variants is None:
+        variants = _load_video_variants(title_meta, year_meta)
+    if variants and video_file_id and not any(v.get("file_id") == video_file_id for v in variants):
+        variants = _upsert_video_variant(variants, video_file_id, meta.get("resolution") or "Video")
 
     title_display = f"{title_meta} ({year_meta})" if year_meta else title_meta
     share_text = f"Nonton film {title_display} di {watermark}!"
@@ -6600,6 +6690,7 @@ async def publish_video_to_channel(
                 poster_path=poster_path,
                 reply_markup=rich_kb,
                 protect_content=protect_flag,
+                video_variants=variants
             )
 
             if result and result.get("message_id"):
@@ -6852,6 +6943,10 @@ async def publish_video_to_channel(
             if year_meta:
                 _engine.cache.set_setting(f"banner_fid_{clean_t.lower()}_{year_meta}", str(banner_src))
             _engine.cache.set_setting(f"banner_fid_{clean_t.lower()}", str(banner_src))
+        try:
+            _save_video_variants(title_meta, year_meta, variants or [])
+        except Exception as ve:
+            logger.debug(f"Gagal menyimpan video variants: {ve}")
     except Exception as ce:
         logger.warning(f"Gagal mencatat ke katalog film: {ce}")
 
@@ -7327,6 +7422,10 @@ async def _process_video_task(client: Client, msg: Message):
         if sent:
             await _apply_expandable_caption(chat_id, sent.id, caption, get_caption_kb(msg.id, wm))
 
+        primary_quality = _detect_quality(meta.get("resolution")) or _detect_quality(filename) or "Original"
+        variants = _load_video_variants(title_meta, meta.get("year"))
+        variants = _upsert_video_variant(variants, media.file_id, primary_quality)
+
         current_job = {
             "chat_id": chat_id,
             "filename": filename,
@@ -7339,7 +7438,8 @@ async def _process_video_task(client: Client, msg: Message):
             "raw_thumb_path": raw_thumb_path,
             "poster_url": poster_src,
             "temp_dir": tmp,
-            "video_msg": msg
+            "video_msg": msg,
+            "video_variants": variants
         }
         _jobs[chat_id] = current_job
         if sent:
@@ -7709,6 +7809,259 @@ async def video_queue_worker(client: Client):
             _video_queue.task_done()
 
 
+async def _handle_quality_video_upload(client: Client, msg: Message, target_chat_id: int):
+    """Handle a deliberate second-quality upload and attach it to the active film job."""
+    user_id = msg.from_user.id if msg.from_user else msg.chat.id
+    _user_states.pop(user_id, None)
+
+    media = msg.video or msg.document
+    is_video = bool(msg.video or (msg.document and str(msg.document.mime_type or "").startswith("video")))
+    if not media or not is_video:
+        await msg.reply_text("❌ Kirim <b>video</b> untuk menambah kualitas, bukan dokumen lain.", parse_mode=ParseMode.HTML)
+        return
+
+    job = _jobs.get(target_chat_id)
+    if not job:
+        await msg.reply_text("❌ Sesi film sudah kadaluarsa. Kirim ulang video utama filmnya.", parse_mode=ParseMode.HTML)
+        return
+
+    meta = job.get("metadata") or {}
+    title = meta.get("title") or job.get("filename") or "Film"
+    year = meta.get("year")
+    file_id = media.file_id
+    filename = extract_filename(media, msg)
+
+    variants = job.get("video_variants") or _load_video_variants(title, year)
+    if any(v.get("file_id") == file_id for v in variants):
+        await msg.reply_text(
+            "⚠️ <b>Video ini sudah tersimpan</b> sebagai salah satu kualitas film tersebut.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    quality = _detect_quality(filename)
+    if not quality:
+        job["pending_quality"] = {"file_id": file_id, "quality": "", "filename": filename}
+        await msg.reply_text(
+            f"🎬 <b>{html.escape(title)}</b>{f' ({html.escape(str(year))})' if year else ''}\n"
+            f"📦 <code>{html.escape(filename)}</code>\n\n"
+            f"⚠️ Kualitas tidak terdeteksi dari nama file. Pilih kualitas video ini:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🎞️ 1080p", callback_data=f"qualitypick:{target_chat_id}:1080p"),
+                    InlineKeyboardButton("🎞️ 720p", callback_data=f"qualitypick:{target_chat_id}:720p")
+                ],
+                [
+                    InlineKeyboardButton("🎞️ 480p", callback_data=f"qualitypick:{target_chat_id}:480p"),
+                    InlineKeyboardButton("🎞️ 360p", callback_data=f"qualitypick:{target_chat_id}:360p")
+                ],
+                [
+                    InlineKeyboardButton("❌ Batal", callback_data=f"qualitycancel:{target_chat_id}")
+                ]
+            ])
+        )
+        return
+
+    primary_file_id = None
+    sent_msg = job.get("sent_msg")
+    if sent_msg and getattr(sent_msg, "video", None):
+        primary_file_id = sent_msg.video.file_id
+    elif job.get("video_msg"):
+        vm = job.get("video_msg")
+        vm_media = getattr(vm, "video", None) or getattr(vm, "document", None)
+        primary_file_id = getattr(vm_media, "file_id", None)
+    primary_quality = next(
+        (str(v.get("quality") or "").lower() for v in variants if v.get("file_id") == primary_file_id),
+        ""
+    )
+    if primary_quality and primary_quality == quality.lower():
+        await msg.reply_text(
+            f"⚠️ Kualitas <b>{html.escape(quality)}</b> sama dengan kualitas utama film.\n"
+            f"Kirim video dengan kualitas lain.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    await _confirm_quality_attachment(msg, target_chat_id, job, title, year, file_id, quality, filename)
+
+
+async def _confirm_quality_attachment(
+    msg: Message,
+    target_chat_id: int,
+    job: Dict[str, Any],
+    title: str,
+    year: Optional[Any],
+    file_id: str,
+    quality: str,
+    filename: str
+):
+    variants = job.get("video_variants") or []
+    replace_note = ""
+    if any(str(v.get("quality") or "").strip().lower() == quality.lower() for v in variants):
+        replace_note = (
+            f"\n⚠️ Kualitas <b>{html.escape(quality)}</b> sudah ada — "
+            f"file baru akan menggantikan file lama untuk kualitas tersebut."
+        )
+
+    job["pending_quality"] = {"file_id": file_id, "quality": quality, "filename": filename}
+
+    await msg.reply_text(
+        f"➕ <b>Tambah Kualitas Video</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎬 Film: <b>{html.escape(title)}</b>{f' ({html.escape(str(year))})' if year else ''}\n"
+        f"📦 File: <code>{html.escape(filename)}</code>\n"
+        f"🎞️ Kualitas: <b>{html.escape(quality)}</b>"
+        f"{replace_note}\n\n"
+        f"Lampirkan video ini ke film di atas?",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Lampirkan ke Film", callback_data=f"qualityconfirm:{target_chat_id}"),
+                InlineKeyboardButton("❌ Batal", callback_data=f"qualitycancel:{target_chat_id}")
+            ]
+        ])
+    )
+
+
+def _apply_quality_variant(job: Dict[str, Any], pending: Dict[str, str]) -> bool:
+    meta = job.get("metadata") or {}
+    title = meta.get("title") or job.get("filename") or "Film"
+    year = meta.get("year")
+    variants = job.get("video_variants") or _load_video_variants(title, year)
+    variants = _upsert_video_variant(variants, pending["file_id"], pending["quality"])
+    job["video_variants"] = variants
+    _save_video_variants(title, year, variants)
+    return True
+
+
+@app.on_callback_query(filters.regex(r"^addquality:(\d+)$"))
+async def handle_addquality_callback(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Hanya Administrator!", show_alert=True)
+        return
+
+    chat_id = call.message.chat.id
+    job = _jobs.get(chat_id)
+    if not job:
+        await call.answer("Sesi film sudah kadaluarsa. Kirim ulang videonya.", show_alert=True)
+        return
+
+    user_id = call.from_user.id if call.from_user else chat_id
+    _user_states[user_id] = f"waiting_quality_video:{chat_id}"
+
+    meta = job.get("metadata") or {}
+    title = meta.get("title") or job.get("filename") or "Film"
+    year = meta.get("year")
+    variants = job.get("video_variants") or []
+    labels = ", ".join(v.get("quality") or "Original" for v in variants) or "belum ada"
+
+    await call.answer("Kirim video kualitas lain")
+    await call.message.reply_text(
+        f"➕ <b>Tambah Kualitas Video</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎬 Film: <b>{html.escape(title)}</b>{f' ({html.escape(str(year))})' if year else ''}\n"
+        f"🎞️ Kualitas saat ini: <b>{html.escape(labels)}</b>\n\n"
+        f"Kirim <b>video</b> kualitas lain ke bot.\n"
+        f"<i>Bot menampilkan konfirmasi target film sebelum melampirkan video.</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+
+@app.on_callback_query(filters.regex(r"^qualityconfirm:(\d+)$"))
+async def handle_quality_confirm_callback(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Hanya Administrator!", show_alert=True)
+        return
+
+    target_chat_id = int(call.matches[0].group(1))
+    user_id = call.from_user.id if call.from_user else call.message.chat.id
+    _user_states.pop(user_id, None)
+
+    job = _jobs.get(target_chat_id)
+    pending = job.get("pending_quality") if job else None
+    if not pending:
+        await call.answer("Sesi kualitas sudah kadaluarsa.", show_alert=True)
+        return
+
+    job.pop("pending_quality", None)
+    _apply_quality_variant(job, pending)
+
+    meta = job.get("metadata") or {}
+    title = meta.get("title") or job.get("filename") or "Film"
+    year = meta.get("year")
+    labels = ", ".join(v.get("quality") or "Original" for v in job.get("video_variants") or [])
+
+    await call.answer("✅ Kualitas ditambahkan")
+    try:
+        await call.message.edit_text(
+            f"✅ <b>Kualitas {html.escape(pending['quality'])} ditambahkan</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎬 Film: <b>{html.escape(title)}</b>{f' ({html.escape(str(year))})' if year else ''}\n"
+            f"🎞️ Kualitas tersedia: <b>{html.escape(labels)}</b>\n\n"
+            f"Tekan <b>🚀 Posting ke Channel</b> di pesan preview untuk menerbitkan.",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
+
+
+@app.on_callback_query(filters.regex(r"^qualitypick:(\d+):(\w+)$"))
+async def handle_quality_pick_callback(client: Client, call: CallbackQuery):
+    if not check_admin(call):
+        await call.answer("⛔ Hanya Administrator!", show_alert=True)
+        return
+
+    target_chat_id = int(call.matches[0].group(1))
+    quality = call.matches[0].group(2)
+    user_id = call.from_user.id if call.from_user else call.message.chat.id
+    _user_states.pop(user_id, None)
+
+    job = _jobs.get(target_chat_id)
+    pending = job.get("pending_quality") if job else None
+    if not pending:
+        await call.answer("Sesi kualitas sudah kadaluarsa.", show_alert=True)
+        return
+
+    pending["quality"] = quality
+    job.pop("pending_quality", None)
+    _apply_quality_variant(job, pending)
+
+    meta = job.get("metadata") or {}
+    title = meta.get("title") or job.get("filename") or "Film"
+    year = meta.get("year")
+    labels = ", ".join(v.get("quality") or "Original" for v in job.get("video_variants") or [])
+
+    await call.answer(f"✅ Kualitas {quality} ditambahkan")
+    try:
+        await call.message.edit_text(
+            f"✅ <b>Kualitas {html.escape(quality)} ditambahkan</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎬 Film: <b>{html.escape(title)}</b>{f' ({html.escape(str(year))})' if year else ''}\n"
+            f"🎞️ Kualitas tersedia: <b>{html.escape(labels)}</b>",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
+
+
+@app.on_callback_query(filters.regex(r"^qualitycancel:(\d+)$"))
+async def handle_quality_cancel_callback(client: Client, call: CallbackQuery):
+    target_chat_id = int(call.matches[0].group(1))
+    user_id = call.from_user.id if call.from_user else call.message.chat.id
+    _user_states.pop(user_id, None)
+
+    job = _jobs.get(target_chat_id)
+    if job:
+        job.pop("pending_quality", None)
+
+    await call.answer("Dibatalkan")
+    try:
+        await call.message.edit_text("❌ <b>Penambahan kualitas video dibatalkan.</b>", parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
+
+
 @app.on_message(filters.video | filters.document)
 async def receive_video(client: Client, msg: Message):
     media = msg.video or msg.document
@@ -7735,6 +8088,17 @@ async def receive_video(client: Client, msg: Message):
                 [InlineKeyboardButton("💬 Request Film", callback_data="btn_start_request")]
             ])
         )
+        return
+
+    # Multi-quality: intercept video upload when admin is adding another quality
+    state_val = _user_states.get(user_id, "")
+    if state_val.startswith("waiting_quality_video:"):
+        target_chat_str = state_val.split(":", 1)[1] if ":" in state_val else str(chat_id)
+        try:
+            target_chat_id = int(target_chat_str)
+        except ValueError:
+            target_chat_id = chat_id
+        await _handle_quality_video_upload(client, msg, target_chat_id)
         return
 
     # Check if this document is a JSON file (Antrean backup or catalog backup)
@@ -8335,7 +8699,8 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
             thumb_path=job.get("thumb_path"),
             with_banner=with_banner,
             poster_source=latest_poster,
-            pregenerated_banner_path=banner_file
+            pregenerated_banner_path=banner_file,
+            video_variants=job.get("video_variants")
         )
 
         job["posted"] = True

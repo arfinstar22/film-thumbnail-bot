@@ -122,6 +122,83 @@ def _format_genre_with_emojis(genre_str: str) -> str:
     return f"🎭 {g_s}"
 
 
+_VIDEO_QUALITY_RANK = {
+    "2160p": 2160, "4k": 2160, "uhd": 2160,
+    "1440p": 1440, "2k": 1440,
+    "1080p": 1080, "full hd": 1080, "fullhd": 1080, "fhd": 1080,
+    "720p": 720, "hd": 720,
+    "576p": 576,
+    "480p": 480, "sd": 480,
+    "360p": 360,
+}
+
+
+def _quality_rank(label: str) -> int:
+    return _VIDEO_QUALITY_RANK.get(str(label or "").strip().lower(), 0)
+
+
+def _format_quality_display(label: str) -> str:
+    low = str(label or "").strip().lower()
+    if low == "1080p":
+        return "1080p • Full HD"
+    if low == "720p":
+        return "720p • HD"
+    if low == "2160p" or low == "4k":
+        return "2160p • 4K UHD"
+    return str(label or "").strip()
+
+
+def _normalize_video_variants(
+    video_file_id: Optional[str],
+    video_variants: Optional[Union[str, List[Dict[str, Any]]]],
+    primary_quality: Optional[str] = None,
+) -> List[Dict[str, str]]:
+    """Normalize variant input into an ordered, de-duplicated list of {quality, file_id}."""
+    raw = video_variants or []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = []
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list):
+        raw = []
+
+    items: List[Dict[str, str]] = []
+    if video_file_id:
+        items.append({
+            "quality": str(primary_quality or "Video").strip(),
+            "file_id": str(video_file_id).strip(),
+        })
+
+    for v in raw:
+        if not isinstance(v, dict):
+            continue
+        fid = str(v.get("file_id") or v.get("media") or "").strip()
+        if not fid:
+            continue
+        items.append({
+            "quality": str(v.get("quality") or "").strip(),
+            "file_id": fid,
+        })
+
+    seen_ids = set()
+    seen_qualities = set()
+    unique: List[Dict[str, str]] = []
+    for item in items:
+        q_key = item["quality"].lower()
+        if item["file_id"] in seen_ids or (q_key and q_key in seen_qualities):
+            continue
+        seen_ids.add(item["file_id"])
+        if q_key:
+            seen_qualities.add(q_key)
+        unique.append(item)
+
+    unique.sort(key=lambda item: _quality_rank(item["quality"]), reverse=True)
+    return unique
+
+
 def build_rich_article_payload(
     chat_id: Union[int, str],
     metadata: Dict[str, Any],
@@ -132,6 +209,7 @@ def build_rich_article_payload(
     reply_markup: Optional[Dict[str, Any]] = None,
     protect_content: bool = False,
     disable_notification: bool = False,
+    video_variants: Optional[Union[str, List[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """Build the complete JSON payload for Telegram Bot API `sendRichMessage`.
 
@@ -192,15 +270,35 @@ def build_rich_article_payload(
     media_items: List[Dict[str, Any]] = []
 
     # 1. VIDEO (Film Player at top of card)
-    if video_file_id:
+    video_items = _normalize_video_variants(video_file_id, video_variants, resolution)
+    if len(video_items) == 1:
         html_parts.append('<video src="tg://video?id=film_video"></video>')
         media_items.append({
             "id": "film_video",
             "media": {
                 "type": "video",
-                "media": video_file_id
+                "media": video_items[0]["file_id"]
             }
         })
+    elif len(video_items) > 1:
+        variant_labels = [v["quality"] for v in video_items if v.get("quality")]
+        if variant_labels:
+            html_parts.append(
+                f"<p>🎞️ <b>Kualitas Tersedia:</b> {html_mod.escape(' • '.join(variant_labels))} "
+                f"<i>(geser video untuk pilih kualitas)</i></p>"
+            )
+        video_tags: List[str] = []
+        for idx, item in enumerate(video_items):
+            vid_id = "film_video" if idx == 0 else f"film_video_{idx + 1}"
+            video_tags.append(f'<video src="tg://video?id={vid_id}"/>')
+            media_items.append({
+                "id": vid_id,
+                "media": {
+                    "type": "video",
+                    "media": item["file_id"]
+                }
+            })
+        html_parts.append(f"<tg-slideshow>\n{''.join(video_tags)}\n</tg-slideshow>")
 
     # 2. HEADING (Film Title & Tagline)
     html_parts.append(f"<h1>🎬 {title_disp}</h1>")
@@ -440,13 +538,16 @@ def build_rich_article_payload(
     if revenue and isinstance(revenue, (int, float)) and revenue > 0:
         spec_lines.append(f"💵 <b>Box Office :</b> {html_mod.escape(_format_money(revenue))}")
     if resolution:
-        res_display = str(resolution)
-        if resolution == "1080p":
-            res_display = "1080p • Full HD"
-        elif resolution == "720p":
-            res_display = "720p • HD"
-        elif resolution == "2160p":
-            res_display = "2160p • 4K UHD"
+        if len(video_items) > 1:
+            res_display = ", ".join(_format_quality_display(v["quality"]) for v in video_items if v.get("quality"))
+        else:
+            res_display = str(resolution)
+            if resolution == "1080p":
+                res_display = "1080p • Full HD"
+            elif resolution == "720p":
+                res_display = "720p • HD"
+            elif resolution == "2160p":
+                res_display = "2160p • 4K UHD"
         spec_lines.append(f"🎞️ <b>Kualitas :</b> {html_mod.escape(res_display)}")
     if source:
         spec_lines.append(f"📡 <b>Source :</b> {html_mod.escape(str(source))}")
@@ -661,6 +762,7 @@ async def async_send_rich_article_post(
     reply_markup: Optional[Dict[str, Any]] = None,
     protect_content: bool = False,
     disable_notification: bool = False,
+    video_variants: Optional[Union[str, List[Dict[str, Any]]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Send rich article post using Telegram Bot API sendRichMessage.
 
@@ -688,6 +790,7 @@ async def async_send_rich_article_post(
         reply_markup=reply_markup,
         protect_content=protect_content,
         disable_notification=disable_notification,
+        video_variants=video_variants,
     )
 
     def _sync_request():

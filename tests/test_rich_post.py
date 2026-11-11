@@ -326,6 +326,60 @@ class TestRichArticlePost(unittest.TestCase):
         self.assertEqual(photos[2]["media"]["media"], "https://image.tmdb.org/t/p/w1280/cuplikan_adegan_tmdb.jpg")
 
 
+    def test_single_video_backward_compatible_with_explicit_variant(self):
+        meta = {"title": "Film Satu", "year": 2024, "resolution": "1080p"}
+        payload = build_rich_article_payload(
+            chat_id="@testchan",
+            metadata=meta,
+            watermark="@testchan",
+            video_file_id="vid_primary",
+            video_variants=[{"quality": "1080p", "file_id": "vid_primary"}]
+        )
+        html = payload["rich_message"]["html"]
+        self.assertIn('<video src="tg://video?id=film_video"></video>', html)
+        self.assertNotIn("Kualitas Tersedia", html)
+        videos = [m for m in payload["rich_message"]["media"] if m["media"]["type"] == "video"]
+        self.assertEqual(len(videos), 1)
+
+    def test_multi_video_slideshow_and_quality_line(self):
+        meta = {"title": "Film Dua", "year": 2024, "resolution": "1080p"}
+        payload = build_rich_article_payload(
+            chat_id="@testchan",
+            metadata=meta,
+            watermark="@testchan",
+            video_file_id="vid_1080",
+            video_variants=[
+                {"quality": "720p", "file_id": "vid_720"},
+                {"quality": "1080p", "file_id": "vid_1080"},
+                {"quality": "480p", "file_id": "vid_480"},
+            ]
+        )
+        html = payload["rich_message"]["html"]
+        self.assertIn("<tg-slideshow>", html)
+        self.assertIn('<video src="tg://video?id=film_video"/>', html)
+        self.assertIn('<video src="tg://video?id=film_video_2"/>', html)
+        self.assertIn('<video src="tg://video?id=film_video_3"/>', html)
+        self.assertIn("🎞️ <b>Kualitas Tersedia:</b> 1080p • 720p • 480p", html)
+        videos = [m for m in payload["rich_message"]["media"] if m["media"]["type"] == "video"]
+        self.assertEqual([v["media"]["media"] for v in videos], ["vid_1080", "vid_720", "vid_480"])
+        self.assertIn("🎞️ <b>Kualitas :</b> 1080p • Full HD, 720p • HD, 480p", html)
+
+    def test_video_variants_json_string_and_dedupe(self):
+        meta = {"title": "Film Tiga", "year": 2024, "resolution": "1080p"}
+        payload = build_rich_article_payload(
+            chat_id="@testchan",
+            metadata=meta,
+            watermark="@testchan",
+            video_file_id="vid_primary",
+            video_variants='[{"quality":"720p","file_id":"vid_720"},'
+                            '{"quality":"720p","file_id":"vid_720"},'
+                            '{"quality":"1080p","file_id":"vid_other"}]'
+        )
+        videos = [m for m in payload["rich_message"]["media"] if m["media"]["type"] == "video"]
+        # Primary 1080p + one 720p. The second 1080p is a different file, but duplicates the primary quality.
+        self.assertEqual([v["media"]["media"] for v in videos], ["vid_primary", "vid_720"])
+
+
 if __name__ == "__main__":
     unittest.main()
 
