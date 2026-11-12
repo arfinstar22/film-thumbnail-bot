@@ -288,10 +288,12 @@ class CaptionGenerator:
                 f_norm = re.sub(r"[^\w\s]", "", f["title"]).lower().strip()
                 s_p = extract_movie_sequel_tag(p_title)
                 s_f = extract_movie_sequel_tag(f["title"])
+                p_words = p_norm.split()
+                f_words = f_norm.split()
                 is_current = (s_p == s_f) and (
                     p_norm == f_norm
                     or p_norm.replace("q", "k") == f_norm.replace("q", "k")
-                    or (bool(p_year and f.get("year") and abs(p_year - f["year"]) <= 1) and difflib.SequenceMatcher(None, p_norm, f_norm).ratio() >= 0.80)
+                    or (len(p_words) == len(f_words) and bool(p_year and f.get("year") and abs(p_year - f["year"]) <= 1) and difflib.SequenceMatcher(None, p_norm, f_norm).ratio() >= 0.90)
                 )
                 if is_current:
                     col_lines.append(f"{num} <b>{html.escape(p_title)}{p_year_str}</b> 📍 <i>(Film Ini)</i>")

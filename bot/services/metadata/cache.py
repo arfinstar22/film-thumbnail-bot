@@ -66,17 +66,38 @@ def normalize_movie_title_and_year(title: str, year: Optional[int] = None) -> Tu
 
 def extract_movie_sequel_tag(title: str) -> Optional[str]:
     """Extracts sequel/part indicators such as 2, 3, II, III, part 2, chapter 2,
-    or 4-digit distinct title numbers (e.g. 1990, 1991, 1983, 1995, 2049)."""
+    4-digit distinct title numbers (e.g. 1990, 1991, 1983, 1995, 2049),
+    or sequel keywords (e.g. lagi, reborn, returns, kembali, beranak, lanjutan)."""
     t = (title or "").lower().strip()
-    m = re.search(r"\b(?:part|chapter|vol|volume|season)\s*(\d+|[ivx]+)\b", t, re.I)
+
+    # 1. Part/Chapter/Volume/Season/Jilid/Babak
+    m = re.search(r"\b(?:part|chapter|vol|volume|season|babak|jilid|bagian|edisi)\s*(\d+|[ivx]+|satu|dua|tiga|empat|lima|enam|tujuh|delapan|sembilan|one|two|three|four|five)\b", t, re.I)
     if m:
-        return m.group(1).lower()
-    m2 = re.search(r"\b(2|3|4|5|6|7|8|9|ii|iii|iv|v|vi|vii|viii)\b", t, re.I)
+        val = m.group(1).lower()
+        num_map = {"satu": "1", "dua": "2", "tiga": "3", "empat": "4", "lima": "5", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5"}
+        return num_map.get(val, val)
+
+    # 2. Ordinal numbers e.g. ke-2, kedua, ke-3, ketiga
+    m_ord = re.search(r"\b(?:ke[- ]?)?(kedua|ketiga|keempat|kelima|keenam|ketujuh|kedelapan|kesembilan)\b", t, re.I)
+    if m_ord:
+        ord_map = {"kedua": "2", "ketiga": "3", "keempat": "4", "kelima": "5", "keenam": "6", "ketujuh": "7", "kedelapan": "8", "kesembilan": "9"}
+        return ord_map.get(m_ord.group(1).lower(), m_ord.group(1).lower())
+
+    # 3. Numeric digits & Roman numerals
+    m2 = re.search(r"\b(2|3|4|5|6|7|8|9|ii|iii|iv|v|vi|vii|viii|ix|x)\b", t, re.I)
     if m2:
         return m2.group(1).lower()
+
+    # 4. Indonesian & English sequel keywords (lagi, kembali, reborn, returns, beranak, lanjutan)
+    m_seq = re.search(r"\b(lagi|reborn|returns|kembali|beranak|lanjutan)\b", t, re.I)
+    if m_seq:
+        return m_seq.group(1).lower()
+
+    # 5. Distinct 4-digit title year
     m3 = re.search(r"(?<!\d)(19\d\d|20\d\d)(?!\d)", t)
     if m3:
         return m3.group(1).lower()
+
     return None
 
 
@@ -1091,15 +1112,17 @@ class MetadataCache:
             ratio = difflib.SequenceMatcher(None, norm_t.lower(), mt.lower()).ratio()
 
             is_valid_typo = False
-            if ratio >= 0.88:
-                if len(target_words) == 1 and len(cand_words) == 1:
-                    is_valid_typo = True
-                elif overlap_ratio >= 0.50:
-                    is_valid_typo = True
-                elif len(target_words) == len(cand_words) and ratio >= 0.90:
-                    is_valid_typo = True
-            elif ratio >= 0.80 and norm_y and my and abs(norm_y - my) <= 1:
-                is_valid_typo = True
+            diff_words = target_words ^ cand_words
+            has_distinct_extra_word = any(len(w) >= 3 and w not in {"the", "dan", "and", "di", "ke", "dari"} for w in diff_words)
+
+            if not (has_distinct_extra_word and len(target_words) != len(cand_words)):
+                if ratio >= 0.88:
+                    if len(target_words) == 1 and len(cand_words) == 1:
+                        is_valid_typo = True
+                    elif len(target_words) == len(cand_words) and ratio >= 0.90:
+                        is_valid_typo = True
+                    elif overlap_ratio >= 0.75 and ratio >= 0.92:
+                        is_valid_typo = True
 
             if is_valid_typo and ratio > best_ratio:
                 if norm_y and my and norm_y != my:

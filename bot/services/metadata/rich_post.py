@@ -699,10 +699,12 @@ def build_rich_article_payload(
             t_norm = re.sub(r"[^\w\s]", "", title).lower().strip()
             s_p = extract_movie_sequel_tag(p_title)
             s_t = extract_movie_sequel_tag(title)
+            p_words = p_norm.split()
+            t_words = t_norm.split()
             is_current = (s_p == s_t) and (
                 p_norm == t_norm
                 or p_norm.replace("q", "k") == t_norm.replace("q", "k")
-                or (bool(year and p_year and abs(year - p_year) <= 1) and difflib.SequenceMatcher(None, p_norm, t_norm).ratio() >= 0.80)
+                or (len(p_words) == len(t_words) and bool(year and p_year and abs(year - p_year) <= 1) and difflib.SequenceMatcher(None, p_norm, t_norm).ratio() >= 0.90)
             )
 
             if is_current:

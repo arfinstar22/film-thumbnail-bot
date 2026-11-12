@@ -6292,7 +6292,9 @@ def _is_same_collection_part(p_title: str, p_year: Optional[int], target_title: 
     n2 = re.sub(r"[^\w\s]", "", target_title).lower().strip()
     if n1 == n2 or n1.replace("q", "k") == n2.replace("q", "k"):
         return True
-    if difflib.SequenceMatcher(None, n1, n2).ratio() >= 0.80:
+    w1 = n1.split()
+    w2 = n2.split()
+    if len(w1) == len(w2) and difflib.SequenceMatcher(None, n1, n2).ratio() >= 0.90:
         return True
     return False
 

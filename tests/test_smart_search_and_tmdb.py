@@ -191,6 +191,48 @@ class TestSmartSearchAndFuzzyMatching(unittest.TestCase):
         self.assertIsNotNone(found_exact)
         self.assertEqual(found_exact["message_id"], 104)
 
+    def test_kawin_kontrak_vs_kawin_kontrak_lagi_not_duplicate(self):
+        # Save Kawin Kontrak (2008) in catalog
+        self.cache.save_movie_post(
+            title="Kawin Kontrak",
+            year=2008,
+            rating="6.0",
+            genre="Komedi, Romantis",
+            quality="1080p",
+            channel_username="film_indonesia1",
+            message_id=2753,
+            caption="Kawin Kontrak (2008)"
+        )
+
+        # 1. Kawin Kontrak Lagi (2008) must NOT be detected as duplicate of Kawin Kontrak (2008)
+        found_lagi = self.cache.find_existing_movie("Kawin Kontrak Lagi", 2008, "film_indonesia1")
+        self.assertIsNone(found_lagi)
+
+        # 2. Filename style for Kawin Kontrak Lagi must NOT match
+        found_file = self.cache.find_existing_movie("Kawin.Kontrak.Lagi.2008.1080p.WEB-DL.mkv", 2008, "film_indonesia1")
+        self.assertIsNone(found_file)
+
+        # 3. Check duplicate movie alias
+        dup = self.cache.check_duplicate_movie("film_indonesia1", "Kawin Kontrak Lagi", 2008)
+        self.assertIsNone(dup)
+
+        # 4. Exact match for Kawin Kontrak (2008) must still be found
+        found_orig = self.cache.find_existing_movie("Kawin Kontrak", 2008, "film_indonesia1")
+        self.assertIsNotNone(found_orig)
+        self.assertEqual(found_orig["message_id"], 2753)
+
+        # 5. Sequel tag extraction
+        from bot.services.metadata.cache import extract_movie_sequel_tag
+        self.assertIsNone(extract_movie_sequel_tag("Kawin Kontrak"))
+        self.assertEqual(extract_movie_sequel_tag("Kawin Kontrak Lagi"), "lagi")
+        self.assertEqual(extract_movie_sequel_tag("Kawin Kontrak 3"), "3")
+
+        # 6. Collection part matching in handlers
+        from bot.handlers import _is_same_collection_part
+        self.assertFalse(_is_same_collection_part("Kawin Kontrak", 2008, "Kawin Kontrak Lagi", 2008))
+        self.assertTrue(_is_same_collection_part("Kawin Kontrak Lagi", 2008, "Kawin Kontrak Lagi", 2008))
+        self.assertTrue(_is_same_collection_part("Kawin Kontrak", 2008, "Kawin Kontrak", 2008))
+
     def test_delete_movie_posts_removes_from_search(self):
         # Movie 103 is Agak Laen
         results_before = self.cache.search_catalog("agak laen")
