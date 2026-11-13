@@ -376,8 +376,12 @@ class TestRichArticlePost(unittest.TestCase):
                             '{"quality":"1080p","file_id":"vid_other"}]'
         )
         videos = [m for m in payload["rich_message"]["media"] if m["media"]["type"] == "video"]
-        # Primary 1080p + one 720p. The second 1080p is a different file, but duplicates the primary quality.
-        self.assertEqual([v["media"]["media"] for v in videos], ["vid_primary", "vid_720"])
+        # Both 1080p files are preserved (different file_id), vid_720 is deduplicated by file_id
+        self.assertEqual([v["media"]["media"] for v in videos], ["vid_primary", "vid_other", "vid_720"])
+        html = payload["rich_message"]["html"]
+        # Ensure header labels deduplicate quality names so 1080p only appears once
+        self.assertIn("🎞️ <b>Kualitas Tersedia:</b> 1080p • 720p", html)
+        self.assertIn("🎞️ <b>Kualitas :</b> 1080p • Full HD, 720p • HD", html)
 
 
 if __name__ == "__main__":

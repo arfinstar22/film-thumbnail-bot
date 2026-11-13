@@ -33,9 +33,15 @@ class TestVideoVariants(unittest.TestCase):
         variants = _upsert_video_variant(variants, "fid_480", "480p")
         self.assertEqual([v["quality"] for v in variants], ["1080p", "720p", "480p"])
 
-        replaced = _upsert_video_variant(variants, "fid_720_new", "720p")
-        self.assertEqual([v["quality"] for v in replaced], ["1080p", "720p", "480p"])
-        self.assertEqual([v["file_id"] for v in replaced], ["fid_1080", "fid_720_new", "fid_480"])
+        # Multiple files with same quality (e.g. 1080p 1.75GB and 1080p 782MB) are preserved
+        added_same_quality = _upsert_video_variant(variants, "fid_720_new", "720p")
+        self.assertEqual([v["quality"] for v in added_same_quality], ["1080p", "720p", "720p", "480p"])
+        self.assertEqual([v["file_id"] for v in added_same_quality], ["fid_1080", "fid_720", "fid_720_new", "fid_480"])
+
+        # Identical file_id is deduplicated
+        same_fid = _upsert_video_variant(added_same_quality, "fid_720_new", "720p")
+        self.assertEqual(len(same_fid), 4)
+        self.assertEqual([v["file_id"] for v in same_fid], ["fid_1080", "fid_720", "fid_720_new", "fid_480"])
 
     def test_caption_kb_has_add_quality_button(self):
         handlers = _import_handlers()

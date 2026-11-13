@@ -1202,12 +1202,12 @@ def _upsert_video_variant(
     file_id: str,
     quality: str
 ) -> List[Dict[str, str]]:
-    q_key = str(quality or "").strip().lower()
+    fid = str(file_id or "").strip()
     out = [
         v for v in variants
-        if v.get("file_id") != file_id and str(v.get("quality") or "").strip().lower() != q_key
+        if str(v.get("file_id") or "").strip() != fid
     ]
-    out.append({"quality": str(quality or "Original").strip(), "file_id": file_id})
+    out.append({"quality": str(quality or "Original").strip(), "file_id": fid})
     out.sort(key=lambda v: _quality_rank(v.get("quality")), reverse=True)
     return out
 
@@ -8180,26 +8180,6 @@ async def _handle_quality_video_upload(client: Client, msg: Message, target_chat
         )
         return
 
-    primary_file_id = None
-    sent_msg = job.get("sent_msg")
-    if sent_msg and getattr(sent_msg, "video", None):
-        primary_file_id = sent_msg.video.file_id
-    elif job.get("video_msg"):
-        vm = job.get("video_msg")
-        vm_media = getattr(vm, "video", None) or getattr(vm, "document", None)
-        primary_file_id = getattr(vm_media, "file_id", None)
-    primary_quality = next(
-        (str(v.get("quality") or "").lower() for v in variants if v.get("file_id") == primary_file_id),
-        ""
-    )
-    if primary_quality and primary_quality == quality.lower():
-        await msg.reply_text(
-            f"⚠️ Kualitas <b>{html.escape(quality)}</b> sama dengan kualitas utama film.\n"
-            f"Kirim video dengan kualitas lain.",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
     await _confirm_quality_attachment(msg, target_chat_id, job, title, year, file_id, quality, filename)
 
 
@@ -8214,11 +8194,11 @@ async def _confirm_quality_attachment(
     filename: str
 ):
     variants = job.get("video_variants") or []
-    replace_note = ""
+    info_note = ""
     if any(str(v.get("quality") or "").strip().lower() == quality.lower() for v in variants):
-        replace_note = (
-            f"\n⚠️ Kualitas <b>{html.escape(quality)}</b> sudah ada — "
-            f"file baru akan menggantikan file lama untuk kualitas tersebut."
+        info_note = (
+            f"\nℹ️ <i>Film sudah memiliki varian {html.escape(quality)}. "
+            f"Video ini akan ditambahkan sebagai varian tambahan.</i>"
         )
 
     job["pending_quality"] = {"file_id": file_id, "quality": quality, "filename": filename}
@@ -8229,7 +8209,7 @@ async def _confirm_quality_attachment(
         f"🎬 Film: <b>{html.escape(title)}</b>{f' ({html.escape(str(year))})' if year else ''}\n"
         f"📦 File: <code>{html.escape(filename)}</code>\n"
         f"🎞️ Kualitas: <b>{html.escape(quality)}</b>"
-        f"{replace_note}\n\n"
+        f"{info_note}\n\n"
         f"Lampirkan video ini ke film di atas?",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup([
@@ -8271,7 +8251,7 @@ async def handle_addquality_callback(client: Client, call: CallbackQuery):
     title = meta.get("title") or job.get("filename") or "Film"
     year = meta.get("year")
     variants = job.get("video_variants") or []
-    labels = ", ".join(v.get("quality") or "Original" for v in variants) or "belum ada"
+    labels = ", ".join(dict.fromkeys(v.get("quality") or "Original" for v in variants)) or "belum ada"
 
     await call.answer("Kirim video kualitas lain")
     await call.message.reply_text(
@@ -8307,7 +8287,7 @@ async def handle_quality_confirm_callback(client: Client, call: CallbackQuery):
     meta = job.get("metadata") or {}
     title = meta.get("title") or job.get("filename") or "Film"
     year = meta.get("year")
-    labels = ", ".join(v.get("quality") or "Original" for v in job.get("video_variants") or [])
+    labels = ", ".join(dict.fromkeys(v.get("quality") or "Original" for v in job.get("video_variants") or []))
 
     await call.answer("✅ Kualitas ditambahkan")
     try:
@@ -8347,7 +8327,7 @@ async def handle_quality_pick_callback(client: Client, call: CallbackQuery):
     meta = job.get("metadata") or {}
     title = meta.get("title") or job.get("filename") or "Film"
     year = meta.get("year")
-    labels = ", ".join(v.get("quality") or "Original" for v in job.get("video_variants") or [])
+    labels = ", ".join(dict.fromkeys(v.get("quality") or "Original" for v in job.get("video_variants") or []))
 
     await call.answer(f"✅ Kualitas {quality} ditambahkan")
     try:

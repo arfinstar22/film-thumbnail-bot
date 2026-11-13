@@ -184,16 +184,17 @@ def _normalize_video_variants(
             "file_id": fid,
         })
 
-    seen_ids = set()
-    seen_qualities = set()
+    seen_ids = {}
     unique: List[Dict[str, str]] = []
     for item in items:
-        q_key = item["quality"].lower()
-        if item["file_id"] in seen_ids or (q_key and q_key in seen_qualities):
+        fid = item["file_id"]
+        q = item["quality"]
+        if fid in seen_ids:
+            idx = seen_ids[fid]
+            if unique[idx]["quality"].lower() in ("", "video", "original") and q.lower() not in ("", "video", "original"):
+                unique[idx]["quality"] = q
             continue
-        seen_ids.add(item["file_id"])
-        if q_key:
-            seen_qualities.add(q_key)
+        seen_ids[fid] = len(unique)
         unique.append(item)
 
     unique.sort(key=lambda item: _quality_rank(item["quality"]), reverse=True)
@@ -282,7 +283,7 @@ def build_rich_article_payload(
             }
         })
     elif len(video_items) > 1:
-        variant_labels = [v["quality"] for v in video_items if v.get("quality")]
+        variant_labels = list(dict.fromkeys(v["quality"] for v in video_items if v.get("quality")))
         if variant_labels:
             html_parts.append(
                 f"<p>🎞️ <b>Kualitas Tersedia:</b> {html_mod.escape(' • '.join(variant_labels))} "
@@ -540,7 +541,7 @@ def build_rich_article_payload(
         spec_lines.append(f"💵 <b>Box Office :</b> {html_mod.escape(_format_money(revenue))}")
     if resolution:
         if len(video_items) > 1:
-            res_display = ", ".join(_format_quality_display(v["quality"]) for v in video_items if v.get("quality"))
+            res_display = ", ".join(dict.fromkeys(_format_quality_display(v["quality"]) for v in video_items if v.get("quality")))
         else:
             res_display = str(resolution)
             if resolution == "1080p":
