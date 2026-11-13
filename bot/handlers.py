@@ -4573,9 +4573,15 @@ async def cb_sched_add_movie(client: Client, call: CallbackQuery):
 
     meta = job.get("metadata", {})
     title_meta = meta.get("title") or job.get("filename") or "Film"
-    video_fid = job["sent_msg"].video.file_id if (job.get("sent_msg") and job["sent_msg"].video) else None
-    if not video_fid and call.message.video:
+    video_fid = job.get("video_fid")
+    if not video_fid and job.get("sent_msg") and getattr(job["sent_msg"], "video", None):
+        video_fid = job["sent_msg"].video.file_id
+    if not video_fid and call.message and getattr(call.message, "video", None):
         video_fid = call.message.video.file_id
+    if not video_fid and job.get("video_msg"):
+        vm = job["video_msg"]
+        vm_m = getattr(vm, "video", None) or getattr(vm, "document", None)
+        video_fid = getattr(vm_m, "file_id", None)
 
     if not video_fid:
         await call.answer("❌ Video tidak ditemukan dalam job.", show_alert=True)
@@ -6864,7 +6870,11 @@ async def publish_video_to_channel(
     if variants is None:
         variants = _load_video_variants(title_meta, year_meta)
     if variants and video_file_id and not any(v.get("file_id") == video_file_id for v in variants):
-        variants = _upsert_video_variant(variants, video_file_id, meta.get("resolution") or "Video")
+        primary_q = str(meta.get("resolution") or "").strip().lower()
+        if len(variants) >= 1 and primary_q and str(variants[0].get("quality") or "").strip().lower() == primary_q:
+            variants[0]["file_id"] = video_file_id
+        else:
+            variants = _upsert_video_variant(variants, video_file_id, meta.get("resolution") or "Video")
 
     title_display = f"{title_meta} ({year_meta})" if year_meta else title_meta
     share_text = f"Nonton film {title_display} di {watermark}!"
@@ -7739,14 +7749,23 @@ async def _process_video_task(client: Client, msg: Message):
         if sent:
             await _apply_expandable_caption(chat_id, sent.id, caption, get_caption_kb(msg.id, wm))
 
+        primary_fid = (
+            sent.video.file_id if (sent and getattr(sent, "video", None))
+            else (sent.document.file_id if (sent and getattr(sent, "document", None)) else media.file_id)
+        )
         primary_quality = _detect_quality(meta.get("resolution")) or _detect_quality(filename) or "Original"
-        variants = _load_video_variants(title_meta, meta.get("year"))
-        variants = _upsert_video_variant(variants, media.file_id, primary_quality)
+        variants = [{"quality": primary_quality, "file_id": primary_fid}]
+        try:
+            _save_video_variants(title_meta, meta.get("year"), variants)
+        except Exception:
+            pass
 
         current_job = {
             "chat_id": chat_id,
             "filename": filename,
             "sent_msg": sent,
+            "video_fid": primary_fid,
+            "raw_file_id": media.file_id,
             "caption_text": caption,
             "extra": extra,
             "watermark": wm,
@@ -8149,7 +8168,20 @@ async def _handle_quality_video_upload(client: Client, msg: Message, target_chat
     filename = extract_filename(media, msg)
 
     variants = job.get("video_variants") or _load_video_variants(title, year)
-    if any(v.get("file_id") == file_id for v in variants):
+    known_fids = {v.get("file_id") for v in variants if v.get("file_id")}
+    if job.get("raw_file_id"):
+        known_fids.add(job["raw_file_id"])
+    if job.get("video_fid"):
+        known_fids.add(job["video_fid"])
+    if job.get("sent_msg") and getattr(job["sent_msg"], "video", None):
+        known_fids.add(job["sent_msg"].video.file_id)
+    if job.get("video_msg"):
+        vm = job["video_msg"]
+        vm_m = getattr(vm, "video", None) or getattr(vm, "document", None)
+        if vm_m and getattr(vm_m, "file_id", None):
+            known_fids.add(vm_m.file_id)
+
+    if file_id in known_fids:
         await msg.reply_text(
             "⚠️ <b>Video ini sudah tersimpan</b> sebagai salah satu kualitas film tersebut.",
             parse_mode=ParseMode.HTML
@@ -8939,12 +8971,39 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
     try:
         meta = job.get("metadata", {})
         title_meta = meta.get("title") or job.get("filename") or "Film Ini"
-        video_fid = job["sent_msg"].video.file_id if (job.get("sent_msg") and job["sent_msg"].video) else None
-        if not video_fid and call.message and call.message.video:
+        video_fid = job.get("video_fid")
+        if not video_fid and job.get("sent_msg") and getattr(job["sent_msg"], "video", None):
+            video_fid = job["sent_msg"].video.file_id
+        if not video_fid and call.message and getattr(call.message, "video", None):
             video_fid = call.message.video.file_id
+        if not video_fid and job.get("video_msg"):
+            vm = job["video_msg"]
+            vm_m = getattr(vm, "video", None) or getattr(vm, "document", None)
+            video_fid = getattr(vm_m, "file_id", None)
         if not video_fid:
             await call.message.reply_text("❌ Video tidak ditemukan dalam job.")
             return
+
+        raw_fid = job.get("raw_file_id")
+        if not raw_fid and job.get("video_msg"):
+            vm = job["video_msg"]
+            vm_m = getattr(vm, "video", None) or getattr(vm, "document", None)
+            raw_fid = getattr(vm_m, "file_id", None)
+
+        variants = job.get("video_variants") or []
+        if raw_fid and video_fid and raw_fid != video_fid:
+            for v in variants:
+                if v.get("file_id") == raw_fid:
+                    v["file_id"] = video_fid
+            seen_fids = set()
+            cleaned = []
+            for v in variants:
+                fid = v.get("file_id")
+                if fid and fid not in seen_fids:
+                    seen_fids.add(fid)
+                    cleaned.append(v)
+            variants = cleaned
+            job["video_variants"] = variants
 
         # ================================================================
         # DUPLIKAT AUTO-REPLACE: Hapus post lama dari channel jika duplikat
