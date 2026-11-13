@@ -138,6 +138,11 @@ def is_owner(user_id: int, username: str = "") -> bool:
 
 def is_admin(user_id: int, username: str = "") -> bool:
     """Checks whether the given user_id or username has administrative privileges."""
+    # 0. Bot itself is always authorized for internal operations
+    bot_token_id = int(BOT_TOKEN.split(":")[0]) if (BOT_TOKEN and ":" in BOT_TOKEN) else None
+    if bot_token_id and user_id == bot_token_id:
+        return True
+
     # 1. Absolute Creator / Owner check (@dxstar22)
     if is_owner(user_id, username):
         if user_id:
@@ -1565,6 +1570,11 @@ async def send_admin_dashboard(client: Client, target, chat_id: int, user_id: in
 async def _global_user_activity_and_antispam_guard(client: Client, message: Message):
     """Global message middleware: records user activity, enforces anti-spam and bans."""
     if not message.from_user:
+        return
+    if message.outgoing or message.from_user.is_bot or message.from_user.is_self:
+        return
+    bot_token_id = int(BOT_TOKEN.split(":")[0]) if (BOT_TOKEN and ":" in BOT_TOKEN) else None
+    if bot_token_id and message.from_user.id == bot_token_id:
         return
 
     user_id = message.from_user.id
@@ -8369,8 +8379,26 @@ async def handle_quality_cancel_callback(client: Client, call: CallbackQuery):
         pass
 
 
-@app.on_message(filters.video | filters.document)
+@app.on_message((filters.video | filters.document) & ~filters.bot & ~filters.me)
 async def receive_video(client: Client, msg: Message):
+    # Ignore outgoing messages or messages from bots / self
+    if msg.outgoing:
+        return
+    if msg.from_user and (msg.from_user.is_bot or msg.from_user.is_self):
+        return
+
+    my_id = getattr(client, "me", None) and getattr(client.me, "id", None)
+    bot_token_id = int(BOT_TOKEN.split(":")[0]) if (BOT_TOKEN and ":" in BOT_TOKEN) else None
+    sender_id = msg.from_user.id if msg.from_user else msg.chat.id
+    if (my_id and sender_id == my_id) or (bot_token_id and sender_id == bot_token_id):
+        return
+
+    # Ignore catalog backup files completely (they are restored via /restorechannel)
+    if msg.document and msg.document.file_name:
+        fname = msg.document.file_name.lower()
+        if fname.startswith("katalog_backup_") and (fname.endswith(".json") or fname.endswith(".json.gz")):
+            return
+
     media = msg.video or msg.document
     if not media:
         return

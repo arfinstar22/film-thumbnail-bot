@@ -155,3 +155,31 @@ class TestCatalogPrune(unittest.IsolatedAsyncioTestCase):
             # Must have passed is_auto=True
             _, kwargs = mock_send_backup.call_args
             self.assertTrue(kwargs.get("is_auto"))
+
+    async def test_receive_video_ignores_bot_and_backup_json(self):
+        """receive_video must ignore messages from bots, outgoing messages, and backup JSON files without sending 'Akses Ditolak'."""
+        from bot.handlers import receive_video
+        mock_client = MagicMock()
+        mock_client.me = MagicMock(id=8889592888)
+
+        # 1. Message from the bot itself
+        mock_msg_self = MagicMock()
+        mock_msg_self.outgoing = False
+        mock_msg_self.from_user = MagicMock(id=8889592888, is_bot=True, is_self=True)
+        mock_msg_self.document = MagicMock(file_name="katalog_backup_film_indonesia1.json")
+        mock_msg_self.video = None
+        mock_msg_self.reply_text = AsyncMock()
+
+        await receive_video(mock_client, mock_msg_self)
+        mock_msg_self.reply_text.assert_not_called()
+
+        # 2. Backup file sent by an unknown user ID
+        mock_msg_backup = MagicMock()
+        mock_msg_backup.outgoing = False
+        mock_msg_backup.from_user = MagicMock(id=999999, is_bot=False, is_self=False, username="")
+        mock_msg_backup.document = MagicMock(file_name="katalog_backup_film_indonesia1.json")
+        mock_msg_backup.video = None
+        mock_msg_backup.reply_text = AsyncMock()
+
+        await receive_video(mock_client, mock_msg_backup)
+        mock_msg_backup.reply_text.assert_not_called()
