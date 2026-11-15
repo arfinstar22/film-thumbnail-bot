@@ -5960,6 +5960,8 @@ async def update_pinned_homepage(
         newest = _engine.cache.get_newest_movies(clean_channel, 5)
         if not newest:
             return False
+        # Jaga-jaga: pastikan film dengan message_id terbesar (paling baru) selalu di nomor 1.
+        newest.sort(key=lambda m: int(m.get("message_id") or 0), reverse=True)
         total = len(movies)
         title_label = _engine.cache.get_setting(
             _homepage_setting_key(clean_channel, "title"), "FILM INDONESIA"
