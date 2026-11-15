@@ -19,6 +19,7 @@ class TestLocalizedTitleSelection(unittest.TestCase):
             "localized_title": "Pengabdi Setan",
             "original_title": "Pengabdi Setan",
             "alternative_titles": ["Satan's Slaves"],
+            "original_language": "id",
             "year": 2017,
         }
         accepted, title, year = resolve_verified_identity(
@@ -28,6 +29,40 @@ class TestLocalizedTitleSelection(unittest.TestCase):
         self.assertTrue(accepted)
         self.assertEqual(title, "Pengabdi Setan")
         self.assertEqual(year, 2017)
+
+    def test_petak_umpet_stays_petak_umpet_not_hide_and_seek(self):
+        rate_res = {
+            "verified_title": "Hide and Seek",
+            "localized_title": "Hide and Seek",
+            "original_title": "Petak Umpet",
+            "alternative_titles": ["Hide and Seek"],
+            "original_language": "id",
+            "year": 2024,
+        }
+        # User input Petak Umpet harus tetap Petak Umpet
+        accepted, title, year = resolve_verified_identity(
+            "Petak Umpet", 2024, rate_res, 1.0
+        )
+        self.assertTrue(accepted)
+        self.assertEqual(title, "Petak Umpet")
+        self.assertEqual(year, 2024)
+
+    def test_hide_and_seek_alias_resolves_to_petak_umpet(self):
+        rate_res = {
+            "verified_title": "Hide and Seek",
+            "localized_title": "Hide and Seek",
+            "original_title": "Petak Umpet",
+            "alternative_titles": ["Hide and Seek"],
+            "original_language": "id",
+            "year": 2024,
+        }
+        # File bertuliskan Hide and Seek harus berubah jadi Petak Umpet
+        accepted, title, year = resolve_verified_identity(
+            "Hide and Seek", 2024, rate_res, 1.0
+        )
+        self.assertTrue(accepted)
+        self.assertEqual(title, "Petak Umpet")
+        self.assertEqual(year, 2024)
 
     def test_english_original_title_stays_english(self):
         rate_res = {
@@ -70,6 +105,28 @@ class TestTMDbAlternativeTitles(unittest.TestCase):
 
         self.assertEqual(result["localized_title"], "Pengabdi Setan")
         self.assertIn("Satan's Slaves", result["alternative_titles"])
+        self.assertTrue(result["title_localized_checked"])
+
+    def test_extract_prioritizes_indonesian_original_title_over_english_tmdb_title(self):
+        details = {
+            "id": 1290547,
+            "title": "Hide and Seek",
+            "original_title": "Petak Umpet",
+            "original_language": "id",
+            "release_date": "2024-11-21",
+            "alternative_titles": {
+                "titles": [{"iso_3166_1": "ID", "title": "Petak Umpet: Wewe Gombel"}]
+            },
+        }
+        with patch.object(self.tmdb, "_fetch_omdb_extra", return_value={}):
+            result = self.tmdb._extract_metadata(details, {}, "movie")
+
+        # Harus memprioritaskan Petak Umpet, bukan Hide and Seek
+        self.assertEqual(result["verified_title"], "Petak Umpet")
+        self.assertEqual(result["localized_title"], "Petak Umpet")
+        self.assertEqual(result["original_title"], "Petak Umpet")
+        # Hide and Seek harus masuk ke alternative_titles
+        self.assertIn("Hide and Seek", result["alternative_titles"])
         self.assertTrue(result["title_localized_checked"])
 
 

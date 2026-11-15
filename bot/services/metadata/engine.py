@@ -31,6 +31,8 @@ def resolve_verified_identity(
     # Judul hasil TMDb dengan bahasa id-ID. Kalau TMDb punya terjemahan resmi
     # Indonesia, judul inilah yang dipakai (mis. Satan's Slaves -> Pengabdi Setan).
     localized = str(rate_res.get("localized_title") or verified or "").strip()
+    orig_lang = str(rate_res.get("original_language") or "").lower().strip()
+    orig_title = str(rate_res.get("original_title") or "").strip()
     rate_year = rate_res.get("year")
     o = normalize_title_for_match(parsed_title)
     v = normalize_title_for_match(localized) if localized else o
@@ -41,8 +43,15 @@ def resolve_verified_identity(
             o == c or difflib.SequenceMatcher(None, o, c).ratio() >= 0.85
         )
 
-    close = _title_close(localized) if localized else False
-    aliases = [verified, rate_res.get("original_title")]
+    # Prioritaskan Bahasa Indonesia untuk film Indonesia (orig_lang == 'id'):
+    # Jangan biarkan judul rilis internasional / bahasa Inggris dari TMDb menimpa judul Indonesia.
+    if orig_lang == "id" and orig_title:
+        target_indo_title = orig_title
+    else:
+        target_indo_title = localized or orig_title or verified
+
+    close = _title_close(target_indo_title) if target_indo_title else False
+    aliases = [verified, orig_title]
     aliases.extend(rate_res.get("alternative_titles") or [])
     alias_match = any(_title_close(a) for a in aliases if a)
 
@@ -65,12 +74,15 @@ def resolve_verified_identity(
             return False, parsed_title, parsed_year
 
     new_title = parsed_title
-    if alias_match and localized:
-        # File memakai judul alternatif/Inggris, tetapi TMDb punya judul
+    if orig_lang == "id" and orig_title and _title_close(orig_title):
+        # User menginput judul Indonesia asli, pertahankan judul Indonesia asli
+        new_title = orig_title
+    elif alias_match and target_indo_title:
+        # File memakai judul alternatif/Inggris, tetapi TMDb/film punya judul
         # Indonesia resmi. Tampilkan versi Indonesia.
-        new_title = localized
+        new_title = target_indo_title
     elif verified and (close or numeric_extension or (title_confidence < 0.6 and whole_word)):
-        new_title = verified
+        new_title = target_indo_title or verified
 
     # Tahun hasil TMDb hanya menimpa tahun file kalau file tidak punya tahun,
     # atau tahun itu jelas bagian judul (Dilan 1990: "1990" bukan tahun rilis).

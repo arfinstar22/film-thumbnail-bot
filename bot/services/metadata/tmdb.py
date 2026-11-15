@@ -173,6 +173,18 @@ class TMDbService:
         if cached_data:
             try:
                 cached_result = json.loads(cached_data)
+                # Jika film Indonesia ("id"), pastikan verified_title & localized_title
+                # tidak tertinggal sebagai judul internasional bahasa Inggris di cache lama.
+                if cached_result.get("original_language") == "id" and cached_result.get("original_title"):
+                    cached_orig = cached_result["original_title"]
+                    old_ver = cached_result.get("verified_title")
+                    if old_ver and old_ver.lower() != cached_orig.lower():
+                        alts = cached_result.setdefault("alternative_titles", [])
+                        if old_ver not in alts:
+                            alts.insert(0, old_ver)
+                    cached_result["verified_title"] = cached_orig
+                    cached_result["localized_title"] = cached_orig
+
                 # Cache lama dibuat sebelum fitur koleksi ada. Film yang memang
                 # bukan bagian franchise menyimpan collection_checked=True agar
                 # tidak di-refresh berulang kali.
@@ -497,14 +509,29 @@ class TMDbService:
         main = details_id if details_id else details_en
         fallback = details_en if details_id else {}
 
-        verified_title = main.get("title") or main.get("name") or fallback.get("title") or fallback.get("name")
+        raw_verified = main.get("title") or main.get("name") or fallback.get("title") or fallback.get("name")
         original_title = main.get("original_title") or main.get("original_name")
+        orig_lang = str(main.get("original_language") or fallback.get("original_language") or "").lower().strip()
+
+        # Prioritaskan Bahasa Indonesia: jika film berbahasa asli Indonesia ("id"),
+        # selalu pakai original_title sebagai judul utama (verified & localized).
+        # TMDb sering mengisi field 'title' film Indonesia dengan judul rilis internasional / bahasa Inggris
+        # (mis. "Petak Umpet" menjadi "Hide and Seek", "Kereta Berdarah" menjadi "Train of Death").
+        if orig_lang == "id" and original_title:
+            verified_title = original_title
+            localized_title = original_title
+        else:
+            verified_title = raw_verified or original_title
+            localized_title = raw_verified or original_title
 
         # Semua judul alternatif/terjemahan resmi. Dipakai untuk mengenali file
-        # berjudul Inggris (mis. "Satan's Slaves") lalu menampilkan judul
-        # Indonesia resminya ("Pengabdi Setan").
+        # berjudul Inggris (mis. "Satan's Slaves", "Hide and Seek") lalu menampilkan judul
+        # Indonesia resminya ("Pengabdi Setan", "Petak Umpet").
         alt_titles: List[str] = []
         seen_alt = set()
+        if raw_verified and raw_verified.strip().lower() != (verified_title or "").strip().lower():
+            seen_alt.add(raw_verified.strip().lower())
+            alt_titles.append(raw_verified.strip())
         for source in (main, fallback):
             alt_block = source.get("alternative_titles") or {}
             for item in (alt_block.get("titles") or []):
@@ -676,11 +703,12 @@ class TMDbService:
         res: Dict[str, Any] = {
             "source": "tmdb",
             "tmdb_id": main.get("id"),
-            "media_type": media_type
+            "media_type": media_type,
+            "title_localized_checked": True,
         }
         if verified_title:
             res["verified_title"] = verified_title
-            res["localized_title"] = verified_title
+            res["localized_title"] = localized_title or verified_title
         if original_title:
             res["original_title"] = original_title
         if alt_titles:
