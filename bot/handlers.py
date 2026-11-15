@@ -17,7 +17,8 @@ from typing import Union, Optional, Dict, Any, List, Tuple
 from pyrogram import Client, filters
 from pyrogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand,
-    InlineQuery, InlineQueryResultArticle, InputTextMessageContent, ChatJoinRequest
+    InlineQuery, InlineQueryResultArticle, InputTextMessageContent, ChatJoinRequest,
+    InputMediaPhoto
 )
 from pyrogram.enums import ParseMode, ChatType, ChatMemberStatus
 from pyrogram.errors import FloodWait, UserIsBlocked, InputUserDeactivated
@@ -34,6 +35,10 @@ from .services.video import (
 from .services.metadata.engine import MetadataEngine, rescue_poster_metadata
 from .services.metadata.banner import _download_image_bytes
 from .services.metadata.catalog import format_pinned_catalog, publish_or_update_telegraph_catalog, publish_movie_instant_view
+from .services.metadata.homepage import (
+    HomepageRenderer, build_homepage_caption, build_homepage_keyboard,
+    homepage_signature, resolve_homepage_assets
+)
 from .services.metadata.rich_post import (
     async_send_rich_article_post, build_rich_article_payload, async_delete_channel_post,
     _quality_rank
@@ -88,6 +93,8 @@ _jobs = {}
 _jobs_by_msg: Dict[int, Dict[str, Any]] = {}
 _banner_sessions: Dict[int, Dict[str, Any]] = {}
 _posting_inflight: set = set()
+_homepage_locks: Dict[str, asyncio.Lock] = {}
+_homepage_renderer = HomepageRenderer()
 _user_states: Dict[int, str] = {}
 _pending_smart_requests: Dict[str, Dict[str, Any]] = {}
 _video_queue: asyncio.Queue = asyncio.Queue()
@@ -1318,6 +1325,7 @@ BOT_COMMANDS_LIST = [
     BotCommand("sethighlight", "Atur rekomendasi harian otomatis"),
     BotCommand("retarget", "Update tombol post lama massal"),
     BotCommand("synckatalog", "Scan channel & update Pinned Catalog"),
+    BotCommand("homepage", "Kelola pinned visual homepage channel"),
     BotCommand("bersihkatalog", "Bersihkan link mati & update katalog aktif"),
     BotCommand("hapusfilm", "Hapus film dari katalog channel"),
     BotCommand("backup", "Ekspor backup database JSON"),
@@ -1920,6 +1928,151 @@ async def set_watermark_cmd(client: Client, msg: Message):
         f"Semua film berikutnya akan otomatis memakai watermark ini!",
         parse_mode=ParseMode.HTML
     )
+
+
+async def _homepage_missing_permissions(client: Client, channel_username: str) -> List[str]:
+    """Return missing channel permissions for the bot, empty when it can manage the pin."""
+    try:
+        me = getattr(client, "me", None) or await client.get_me()
+        member = await client.get_chat_member(channel_username, me.id)
+    except Exception as exc:
+        logger.debug(f"Could not check homepage permissions: {exc}")
+        return []
+
+    status = getattr(getattr(member, "status", None), "name", str(getattr(member, "status", ""))).lower()
+    if "owner" in status or "creator" in status:
+        return []
+    if "administrator" not in status:
+        return ["bot bukan administrator channel"]
+
+    privileges = getattr(member, "privileges", None)
+    if not privileges:
+        return []
+    missing = []
+    if not getattr(privileges, "can_post_messages", False):
+        missing.append("kirim pesan")
+    if not getattr(privileges, "can_edit_messages", False):
+        missing.append("edit pesan")
+    if not getattr(privileges, "can_pin_messages", False):
+        missing.append("pin pesan")
+    return missing
+
+
+def _homepage_status_text(clean_channel: str) -> Tuple[str, InlineKeyboardMarkup]:
+    enabled = _engine.cache.get_setting(f"homepage_visual_{clean_channel}", "off").lower() == "on"
+    message_id = _engine.cache.get_setting(_homepage_setting_key(clean_channel, "msg"), "") or "-"
+    last_error = _engine.cache.get_setting(_homepage_setting_key(clean_channel, "last_error"), "")
+    status = "✅ <b>AKTIF</b>" if enabled else "⛔ <b>MATI</b>"
+    text = (
+        f"🖼️ <b>VISUAL HOMEPAGE</b>\n"
+        f"📢 Channel: <code>@{clean_channel}</code>\n"
+        f"Status: {status}\n"
+        f"Pinned message: <code>{html.escape(message_id)}</code>\n\n"
+        f"Preview dulu sebelum aktif. Preview tidak menyentuh channel.\n"
+        f"Setelah aktif, setiap publish film akan memperbarui pinned post otomatis."
+    )
+    if last_error:
+        text += f"\n\n⚠️ <b>Error terakhir:</b>\n<code>{html.escape(last_error[:300])}</code>"
+
+    if enabled:
+        switch_button = InlineKeyboardButton("⛔ Matikan", callback_data="homepage:off")
+    else:
+        switch_button = InlineKeyboardButton("✅ Aktifkan", callback_data="homepage:on")
+    switch_button.style = "danger" if enabled else "success"
+    preview_button = InlineKeyboardButton("👁️ Preview", callback_data="homepage:preview")
+    preview_button.style = "primary"
+    refresh_button = InlineKeyboardButton("🔄 Refresh", callback_data="homepage:refresh")
+    refresh_button.style = "primary"
+    return text, InlineKeyboardMarkup([[preview_button, refresh_button], [switch_button]])
+
+
+@app.on_message(filters.command("homepage"))
+async def homepage_cmd(client: Client, msg: Message):
+    if not check_admin(msg):
+        await msg.reply_text("⛔ <b>Akses Ditolak:</b> Perintah ini khusus Administrator channel.", parse_mode=ParseMode.HTML)
+        return
+
+    channel = _get_user_watermark(msg.chat.id)
+    clean_channel = (channel or "").lstrip("@").strip().lower()
+    if not clean_channel:
+        await msg.reply_text("❌ Channel belum diatur. Gunakan /setwatermark dulu.", parse_mode=ParseMode.HTML)
+        return
+
+    args = msg.command[1:] if len(msg.command) > 1 else []
+    action = args[0].strip().lower() if args else "status"
+    bot_username = (
+        (getattr(client, "me", None).username if getattr(client, "me", None) else "")
+        or _engine.cache.get_setting("bot_username", "")
+    )
+
+    if action == "preview":
+        await send_homepage_preview(client, msg.chat.id, clean_channel, bot_username)
+        return
+
+    if action == "on":
+        missing = await _homepage_missing_permissions(client, channel)
+        if missing:
+            await msg.reply_text(
+                "❌ <b>Bot belum punya izin:</b> " + html.escape(", ".join(missing)) +
+                "\n\nJadikan bot admin channel dengan izin kirim, edit, dan pin pesan.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        _engine.cache.set_setting(f"homepage_visual_{clean_channel}", "on")
+        await update_pinned_catalog(client, channel, chat_id=msg.chat.id)
+    elif action == "off":
+        _engine.cache.set_setting(f"homepage_visual_{clean_channel}", "off")
+        await update_pinned_catalog(client, channel, chat_id=msg.chat.id)
+    elif action == "refresh":
+        await update_pinned_catalog(client, channel, chat_id=msg.chat.id)
+
+    status_text, status_kb = _homepage_status_text(clean_channel)
+    await msg.reply_text(status_text, parse_mode=ParseMode.HTML, reply_markup=status_kb)
+
+
+@app.on_callback_query(filters.regex(r"^homepage:"))
+async def homepage_callback(client: Client, cb: CallbackQuery):
+    if not check_admin(cb):
+        await cb.answer("Akses ditolak.", show_alert=True)
+        return
+
+    action = cb.data.split(":", 1)[1]
+    channel = _get_user_watermark(cb.message.chat.id)
+    clean_channel = (channel or "").lstrip("@").strip().lower()
+    if not clean_channel:
+        await cb.answer("Channel belum diatur.", show_alert=True)
+        return
+
+    bot_username = (
+        (getattr(client, "me", None).username if getattr(client, "me", None) else "")
+        or _engine.cache.get_setting("bot_username", "")
+    )
+    await cb.answer()
+
+    if action == "preview":
+        await send_homepage_preview(client, cb.message.chat.id, clean_channel, bot_username)
+    elif action == "on":
+        missing = await _homepage_missing_permissions(client, channel)
+        if missing:
+            await cb.message.reply_text(
+                "❌ <b>Bot belum punya izin:</b> " + html.escape(", ".join(missing)) +
+                "\n\nJadikan bot admin channel dengan izin kirim, edit, dan pin pesan.",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            _engine.cache.set_setting(f"homepage_visual_{clean_channel}", "on")
+            await update_pinned_catalog(client, channel, chat_id=cb.message.chat.id)
+    elif action == "off":
+        _engine.cache.set_setting(f"homepage_visual_{clean_channel}", "off")
+        await update_pinned_catalog(client, channel, chat_id=cb.message.chat.id)
+    elif action == "refresh":
+        await update_pinned_catalog(client, channel, chat_id=cb.message.chat.id)
+
+    status_text, status_kb = _homepage_status_text(clean_channel)
+    try:
+        await cb.message.edit_text(status_text, parse_mode=ParseMode.HTML, reply_markup=status_kb)
+    except Exception:
+        await cb.message.reply_text(status_text, parse_mode=ParseMode.HTML, reply_markup=status_kb)
 
 
 @app.on_message(filters.command("setdivider"))
@@ -5710,6 +5863,366 @@ async def auto_hydrate_channel_catalog(
     return scanned_movies
 
 
+def _homepage_setting_key(clean_channel: str, name: str) -> str:
+    return f"homepage_{name}_{clean_channel}"
+
+
+def _homepage_today_schedule(clean_channel: str) -> List[Tuple[str, str]]:
+    """Pending scheduled posts for today in WIB, capped to two entries."""
+    try:
+        now = datetime.datetime.now(WIB)
+        start = datetime.datetime.combine(now.date(), datetime.time.min, tzinfo=WIB)
+        end = start + datetime.timedelta(days=1)
+        slots = []
+        for post in _engine.cache.get_pending_scheduled_posts():
+            watermark = (post.get("watermark") or "").lstrip("@").strip().lower()
+            if watermark != clean_channel:
+                continue
+            try:
+                timestamp = int(post.get("scheduled_timestamp") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not (start.timestamp() <= timestamp < end.timestamp()):
+                continue
+            title = post.get("title") or (post.get("metadata") or {}).get("title") or "Film"
+            label = datetime.datetime.fromtimestamp(timestamp, WIB).strftime("%H:%M")
+            slots.append((label, str(title)))
+            if len(slots) >= 2:
+                break
+        return slots
+    except Exception as exc:
+        logger.debug(f"Could not build homepage schedule: {exc}")
+        return []
+
+
+async def _pin_single_channel_message(
+    client: Client,
+    channel_username: str,
+    message_id: int,
+    old_ids: Optional[List[int]] = None
+) -> None:
+    """Leaves exactly one pinned message and removes the pin service notices."""
+    stray_ids = [mid for mid in (old_ids or []) if mid and mid != message_id]
+    if stray_ids:
+        try:
+            await client.delete_messages(channel_username, stray_ids)
+        except Exception as de:
+            logger.warning(f"Could not delete older pinned messages {stray_ids}: {de}")
+
+    try:
+        await client.unpin_all_chat_messages(channel_username)
+        pinned_res = await client.pin_chat_message(
+            chat_id=channel_username,
+            message_id=message_id,
+            disable_notification=True
+        )
+        if pinned_res and getattr(pinned_res, "id", None) and (
+            getattr(pinned_res, "service", None) or getattr(pinned_res, "pinned_message", None)
+        ):
+            try:
+                await client.delete_messages(channel_username, [pinned_res.id])
+            except Exception:
+                pass
+
+        service_ids = []
+        async for message in client.get_chat_history(channel_username, limit=10):
+            if message and message.id != message_id and (
+                getattr(message, "service", None) or getattr(message, "pinned_message", None)
+            ):
+                service_ids.append(message.id)
+        if service_ids:
+            await client.delete_messages(channel_username, service_ids)
+            logger.info(f"Cleaned {len(service_ids)} service messages in {channel_username}: {service_ids}")
+    except Exception as pe:
+        logger.warning(f"Pin management error in {channel_username}: {pe}")
+
+
+async def update_pinned_homepage(
+    client: Client,
+    channel_username: str,
+    movies: List[Dict[str, Any]],
+    telegraph_url: str = "",
+    bot_username: str = "",
+    chat_id: Optional[int] = None
+) -> bool:
+    """Create or refresh the photo homepage pinned post.
+
+    Returns True when the pinned post is in a good state (including "old photo
+    kept because refresh failed"). Returns False only when no homepage could be
+    created, so the caller may use the legacy text catalog.
+    """
+    clean_channel = (channel_username or "").lstrip("@").strip().lower()
+    if not clean_channel or not movies:
+        return False
+
+    lock = _homepage_locks.setdefault(clean_channel, asyncio.Lock())
+    async with lock:
+        newest = _engine.cache.get_newest_movies(clean_channel, 5)
+        if not newest:
+            return False
+        total = len(movies)
+        title_label = _engine.cache.get_setting(
+            _homepage_setting_key(clean_channel, "title"), "FILM INDONESIA"
+        ) or "FILM INDONESIA"
+        subtitle_label = _engine.cache.get_setting(
+            _homepage_setting_key(clean_channel, "subtitle"), "Pusat Film Indonesia"
+        ) or "Pusat Film Indonesia"
+
+        stored_key = _homepage_setting_key(clean_channel, "msg")
+        sig_key = _homepage_setting_key(clean_channel, "sig")
+        caption_sig_key = _homepage_setting_key(clean_channel, "caption_sig")
+        stored_raw = _engine.cache.get_setting(stored_key, "")
+        stored_id = int(stored_raw) if stored_raw.isdigit() else None
+
+        pinned_message = None
+        try:
+            chat_info = await client.get_chat(channel_username)
+            pinned_message = getattr(chat_info, "pinned_message", None)
+        except Exception as ce:
+            logger.warning(f"Could not read pinned message for @{clean_channel}: {ce}")
+
+        target_id = stored_id
+        if not target_id and pinned_message and getattr(pinned_message, "photo", None):
+            target_id = pinned_message.id
+
+        target_message = pinned_message if (pinned_message and pinned_message.id == target_id) else None
+        if target_id and target_message is None:
+            try:
+                target_message = await client.get_messages(channel_username, target_id)
+            except Exception:
+                target_message = None
+
+        is_photo = bool(target_id and target_message and getattr(target_message, "photo", None))
+        existing_homepage = bool(stored_id or is_photo)
+
+        old_text_id = None
+        if pinned_message and not getattr(pinned_message, "photo", None):
+            pin_text = (getattr(pinned_message, "text", "") or getattr(pinned_message, "caption", "") or "").upper()
+            if "KATALOG" in pin_text:
+                old_text_id = pinned_message.id
+
+        try:
+            assets = await asyncio.to_thread(
+                resolve_homepage_assets, _engine.cache, newest, _engine.tmdb_service
+            )
+            signature = homepage_signature(clean_channel, assets, total)
+            schedule = _homepage_today_schedule(clean_channel)
+            caption = build_homepage_caption(
+                newest, clean_channel, total, schedule=schedule,
+                channel_title=title_label, subtitle=subtitle_label
+            )
+            search_url = (
+                f"https://t.me/{bot_username}?start=cari"
+                if bot_username else f"https://t.me/{clean_channel}"
+            )
+            request_url = _get_user_request_link(chat_id or 0, bot_username=bot_username)
+            keyboard = build_homepage_keyboard(
+                clean_channel, total, telegraph_url=telegraph_url,
+                bot_username=bot_username, request_url=request_url,
+                search_url=search_url
+            )
+            keyboard_sig = "|".join(
+                f"{getattr(button, 'text', '')}:{getattr(button, 'url', '')}"
+                for row in keyboard.inline_keyboard for button in row
+            )
+            caption_signature = hashlib.sha1(f"{caption}\n{keyboard_sig}".encode("utf-8")).hexdigest()
+        except Exception as build_error:
+            logger.warning(f"Homepage build failed for @{clean_channel}: {build_error}")
+            _engine.cache.set_setting(
+                _homepage_setting_key(clean_channel, "last_error"), str(build_error)
+            )
+            return existing_homepage
+
+        if is_photo and not pinned_message:
+            try:
+                pinned_message = (await client.get_chat(channel_username)).pinned_message
+            except Exception:
+                pinned_message = None
+
+        if (
+            is_photo
+            and _engine.cache.get_setting(sig_key, "") == signature
+            and _engine.cache.get_setting(caption_sig_key, "") == caption_signature
+        ):
+            return True
+
+        if is_photo and _engine.cache.get_setting(sig_key, "") == signature:
+            try:
+                await client.edit_message_caption(
+                    chat_id=channel_username,
+                    message_id=target_id,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard
+                )
+                await _apply_channel_post_styling(channel_username, target_id, keyboard)
+                _engine.cache.set_setting(caption_sig_key, caption_signature)
+                _engine.cache.set_setting(stored_key, str(target_id))
+                _engine.cache.set_setting(f"pinned_catalog_{clean_channel}", str(target_id))
+                return True
+            except Exception as ce:
+                logger.warning(f"Homepage caption edit failed for @{clean_channel}: {ce}")
+
+        image_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                image_path = tmp.name
+            await asyncio.to_thread(
+                _homepage_renderer.render, assets, clean_channel, total, image_path,
+                title_label, subtitle_label
+            )
+
+            if is_photo:
+                try:
+                    await client.edit_message_media(
+                        chat_id=channel_username,
+                        message_id=target_id,
+                        media=InputMediaPhoto(
+                            media=image_path,
+                            caption=caption,
+                            parse_mode=ParseMode.HTML
+                        ),
+                        reply_markup=keyboard
+                    )
+                    await _apply_channel_post_styling(channel_username, target_id, keyboard)
+                    _engine.cache.set_setting(stored_key, str(target_id))
+                    _engine.cache.set_setting(sig_key, signature)
+                    _engine.cache.set_setting(caption_sig_key, caption_signature)
+                    _engine.cache.set_setting(f"pinned_catalog_{clean_channel}", str(target_id))
+                    _engine.cache.set_setting(_homepage_setting_key(clean_channel, "last_error"), "")
+                    if not pinned_message or pinned_message.id != target_id:
+                        await _pin_single_channel_message(client, channel_username, target_id)
+                    return True
+                except Exception as media_error:
+                    logger.warning(
+                        f"Homepage editMessageMedia failed for @{clean_channel}, "
+                        f"falling back to a new pinned post: {media_error}"
+                    )
+
+            sent = await client.send_photo(
+                chat_id=channel_username,
+                photo=image_path,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard
+            )
+            target_id = sent.id
+            await _apply_channel_post_styling(channel_username, target_id, keyboard)
+
+            old_ids = [mid for mid in (stored_id, old_text_id, target_message.id if target_message else None) if mid]
+            await _pin_single_channel_message(client, channel_username, target_id, old_ids)
+
+            _engine.cache.set_setting(stored_key, str(target_id))
+            _engine.cache.set_setting(sig_key, signature)
+            _engine.cache.set_setting(caption_sig_key, caption_signature)
+            _engine.cache.set_setting(f"pinned_catalog_{clean_channel}", str(target_id))
+            _engine.cache.set_setting(_homepage_setting_key(clean_channel, "last_error"), "")
+            logger.info(f"Homepage pinned in @{clean_channel} (msg {target_id})")
+            return True
+        except Exception as error:
+            logger.error(f"Homepage render/publish failed for @{clean_channel}: {error}")
+            _engine.cache.set_setting(
+                _homepage_setting_key(clean_channel, "last_error"), str(error)
+            )
+            return existing_homepage
+        finally:
+            if image_path and os.path.exists(image_path):
+                try:
+                    os.remove(image_path)
+                except Exception:
+                    pass
+
+
+async def send_homepage_preview(
+    client: Client,
+    chat_id: int,
+    channel_username: str,
+    bot_username: str = ""
+) -> bool:
+    """Render the homepage and send it to an admin DM without touching the channel."""
+    clean_channel = (channel_username or "").lstrip("@").strip().lower()
+    movies = _engine.cache.get_deduplicated_catalog(clean_channel)
+    if not movies:
+        await client.send_message(
+            chat_id,
+            "🔎 Database lokal kosong. Memindai channel untuk mengambil katalog... "
+            "Ini bisa memakan waktu beberapa menit."
+        )
+        try:
+            await auto_hydrate_channel_catalog(client, clean_channel)
+        except Exception as exc:
+            logger.warning(f"Preview hydration failed for @{clean_channel}: {exc}")
+        movies = _engine.cache.get_deduplicated_catalog(clean_channel)
+    newest = _engine.cache.get_newest_movies(clean_channel, 5)
+    if not movies or not newest:
+        await client.send_message(chat_id, "❌ Katalog masih kosong. Tidak ada film untuk preview.")
+        return False
+
+    telegraph_url = ""
+    cached_path = _engine.cache.get_setting(f"telegraph_path_{clean_channel}", "")
+    if cached_path:
+        telegraph_url = f"https://telegra.ph/{cached_path}"
+    if not telegraph_url:
+        try:
+            telegraph_url = await asyncio.to_thread(
+                publish_or_update_telegraph_catalog,
+                movies, clean_channel, _engine.cache, bot_username
+            ) or ""
+        except Exception as exc:
+            logger.debug(f"Could not prepare Telegraph catalog for preview: {exc}")
+
+    title_label = _engine.cache.get_setting(
+        _homepage_setting_key(clean_channel, "title"), "FILM INDONESIA"
+    ) or "FILM INDONESIA"
+    subtitle_label = _engine.cache.get_setting(
+        _homepage_setting_key(clean_channel, "subtitle"), "Pusat Film Indonesia"
+    ) or "Pusat Film Indonesia"
+    image_path = None
+    try:
+        assets = await asyncio.to_thread(
+            resolve_homepage_assets, _engine.cache, newest, _engine.tmdb_service
+        )
+        caption = build_homepage_caption(
+            newest, clean_channel, len(movies),
+            schedule=_homepage_today_schedule(clean_channel),
+            channel_title=title_label, subtitle=subtitle_label
+        )
+        search_url = (
+            f"https://t.me/{bot_username}?start=cari"
+            if bot_username else f"https://t.me/{clean_channel}"
+        )
+        keyboard = build_homepage_keyboard(
+            clean_channel, len(movies), telegraph_url=telegraph_url,
+            bot_username=bot_username,
+            request_url=_get_user_request_link(chat_id, bot_username=bot_username),
+            search_url=search_url
+        )
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            image_path = tmp.name
+        await asyncio.to_thread(
+            _homepage_renderer.render, assets, clean_channel, len(movies), image_path,
+            title_label, subtitle_label
+        )
+        await client.send_photo(
+            chat_id=chat_id,
+            photo=image_path,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard
+        )
+        return True
+    except Exception as exc:
+        logger.error(f"Homepage preview failed: {exc}")
+        await client.send_message(chat_id, f"❌ Preview gagal: {html.escape(str(exc))}")
+        return False
+    finally:
+        if image_path and os.path.exists(image_path):
+            try:
+                os.remove(image_path)
+            except Exception:
+                pass
+
+
 async def update_pinned_catalog(
     client: Client,
     channel_username: str,
@@ -5753,6 +6266,19 @@ async def update_pinned_catalog(
         cached_path = _engine.cache.get_setting(f"telegraph_path_{clean_channel}", "")
         if cached_path:
             telegraph_url = f"https://telegra.ph/{cached_path}"
+
+    if _engine.cache.get_setting(f"homepage_visual_{clean_channel}", "off").lower() == "on":
+        try:
+            homepage_ok = await update_pinned_homepage(
+                client, channel_username, movies,
+                telegraph_url=telegraph_url or "",
+                bot_username=bot_username,
+                chat_id=chat_id
+            )
+            if homepage_ok:
+                return len(movies)
+        except Exception as homepage_error:
+            logger.warning(f"Visual homepage failed for @{clean_channel}: {homepage_error}")
 
     catalog_text = format_pinned_catalog(movies, clean_channel, bot_username, telegraph_url)
 
@@ -5837,42 +6363,10 @@ async def update_pinned_catalog(
 
     _engine.cache.set_setting(pinned_key, str(target_msg_id))
 
-    # DELETE all older duplicate catalog messages from channel completely!
-    stray_ids = [mid for mid in all_old_ids if mid != target_msg_id]
-    if stray_ids:
-        try:
-            await client.delete_messages(channel_username, stray_ids)
-            logger.info(f"Deleted {len(stray_ids)} older duplicate catalog messages: {stray_ids}")
-        except Exception as de:
-            logger.warning(f"Could not delete older catalog messages: {de}")
-
-    # Ensure strictly ONE pin: unpin all and pin target only
-    try:
-        await client.unpin_all_chat_messages(channel_username)
-        pinned_res = await client.pin_chat_message(
-            chat_id=channel_username,
-            message_id=target_msg_id,
-            disable_notification=True
-        )
-        if pinned_res and getattr(pinned_res, "id", None) and (getattr(pinned_res, "service", None) or getattr(pinned_res, "pinned_message", None)):
-            try:
-                await client.delete_messages(channel_username, [pinned_res.id])
-            except Exception:
-                pass
-
-        # Cleanup any service notification messages in channel history
-        try:
-            serv_ids = []
-            async for m in client.get_chat_history(channel_username, limit=10):
-                if m and m.id != target_msg_id and (getattr(m, "service", None) or getattr(m, "pinned_message", None)):
-                    serv_ids.append(m.id)
-            if serv_ids:
-                await client.delete_messages(channel_username, serv_ids)
-                logger.info(f"Cleaned {len(serv_ids)} service messages in {channel_username}: {serv_ids}")
-        except Exception:
-            pass
-    except Exception as pe:
-        logger.warning(f"Pin management error in {channel_username}: {pe}")
+    # Ensure strictly ONE pin and delete older duplicate catalog messages.
+    await _pin_single_channel_message(
+        client, channel_username, target_msg_id, list(all_old_ids)
+    )
 
     return len(movies)
 
@@ -7308,6 +7802,18 @@ async def publish_video_to_channel(
             if year_meta:
                 _engine.cache.set_setting(f"banner_fid_{clean_t.lower()}_{year_meta}", str(banner_src))
             _engine.cache.set_setting(f"banner_fid_{clean_t.lower()}", str(banner_src))
+
+        # Poster/backdrop URLs for the visual pinned homepage.
+        homepage_poster = meta.get("poster_url") or poster_source or meta.get("poster_path") or meta.get("thumb_path")
+        homepage_backdrop = meta.get("backdrop_url") or meta.get("banner_url")
+        if homepage_poster and str(homepage_poster).startswith(("http://", "https://")):
+            if year_meta:
+                _engine.cache.set_setting(f"homepage_poster_{clean_t.lower()}_{year_meta}", str(homepage_poster))
+            _engine.cache.set_setting(f"homepage_poster_{clean_t.lower()}", str(homepage_poster))
+        if homepage_backdrop and str(homepage_backdrop).startswith(("http://", "https://")):
+            if year_meta:
+                _engine.cache.set_setting(f"homepage_backdrop_{clean_t.lower()}_{year_meta}", str(homepage_backdrop))
+            _engine.cache.set_setting(f"homepage_backdrop_{clean_t.lower()}", str(homepage_backdrop))
         try:
             _save_video_variants(title_meta, year_meta, variants or [])
         except Exception as ve:
