@@ -2782,6 +2782,8 @@ async def cb_ans_req_menu(client: Client, query: CallbackQuery):
         [InlineKeyboardButton("🎬 Masih Tayang di Bioskop", callback_data=f"ans_act:{req_id}:bioskop")],
         [InlineKeyboardButton("⏳ Belum Tersedia / Rilis Digital", callback_data=f"ans_act:{req_id}:belum_ada")],
         [InlineKeyboardButton("🍿 Sudah Ada di Channel", callback_data=f"ans_act:{req_id}:sudah_ada")],
+        [InlineKeyboardButton("📺 Format Series / Bukan Film", callback_data=f"ans_act:{req_id}:series")],
+        [InlineKeyboardButton("🇮🇩 Bukan Film Indonesia", callback_data=f"ans_act:{req_id}:bukan_indo")],
         [InlineKeyboardButton("🔍 Judul Kurang Jelas / Butuh Info", callback_data=f"ans_act:{req_id}:info_kurang")],
         [InlineKeyboardButton("✍️ Tulis Pesan Kustom Sendiri", callback_data=f"ans_act:{req_id}:custom")],
         [
@@ -2865,6 +2867,20 @@ async def cb_ans_act(client: Client, query: CallbackQuery):
             f"Silakan langsung gunakan fitur pencarian bot atau cari judulnya di channel @{clean_chan} untuk langsung menonton sekarang. Selamat menonton! 🎉</i>"
         )
         label_action = "Sudah Tersedia di Channel"
+    elif action == "series":
+        body_text = (
+            f"📺 <i>Mohon maaf, judul <b>{html.escape(title)}</b> yang kamu ajukan berformat <b>Series / Serial Drama</b>, bukan film layar lebar.\n\n"
+            f"Channel @{clean_chan} khusus hanya menyediakan <b>Film Bioskop / Movie (Single Link)</b> dan tidak mengunggah format Series / Serial berkelanjutan.\n\n"
+            f"Silakan ajukan request kembali untuk judul-judul berformat film ya! Terima kasih banyak atas pengertiannya. 🙏🎬</i>"
+        )
+        label_action = "Format Series / Bukan Film"
+    elif action == "bukan_indo":
+        body_text = (
+            f"🇮🇩 <i>Mohon maaf, judul <b>{html.escape(title)}</b> yang kamu ajukan merupakan <b>Film Luar / Internasional</b>.\n\n"
+            f"Channel @{clean_chan} khusus hanya menyajikan dan mengoleksi karya-karya <b>Film Indonesia</b>.\n\n"
+            f"Yuk dukung terus perfilman karya anak bangsa dengan me-request film-film Indonesia favoritmu! Terima kasih banyak atas pengertiannya. 🇮🇩✨</i>"
+        )
+        label_action = "Bukan Film Indonesia"
     elif action == "info_kurang":
         body_text = (
             f"🔍 <i>Judul film <b>{html.escape(title)}</b> yang kamu ajukan kurang spesifik atau memiliki beberapa versi berbeda.\n\n"

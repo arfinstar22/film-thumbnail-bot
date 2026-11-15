@@ -138,5 +138,37 @@ class TestSmartRequestAndQuota(unittest.TestCase):
         self.assertIn("bot_users", tables)
 
 
+    def test_admin_request_responses_series_and_bukan_indo(self):
+        """Admin quick responses for 'series' and 'bukan_indo' mark requests as answered and return requesters."""
+        user_id = 998877
+        res1 = self.cache.add_movie_request(user_id, "penonton1", "Layangan Putus The Series", "film_indonesia1")
+        req_id1 = res1.get("id")
+        self.assertIsNotNone(req_id1)
+
+        # Answer with 'series'
+        answered1 = self.cache.answer_movie_requests(req_id1, answer_note="Format Series / Bukan Film")
+        self.assertEqual(len(answered1), 1)
+        self.assertEqual(answered1[0]["user_id"], user_id)
+
+        # Status must now be answered, not pending
+        pending = self.cache.get_pending_requests()
+        matched = [r for r in pending if req_id1 in r.get("ids", [])]
+        self.assertEqual(len(matched), 0)
+
+        # Add foreign film request and answer with 'bukan_indo'
+        res2 = self.cache.add_movie_request(user_id, "penonton1", "Spider-Man No Way Home", "film_indonesia1")
+        req_id2 = res2.get("id")
+        self.assertIsNotNone(req_id2)
+
+        answered2 = self.cache.answer_movie_requests(req_id2, answer_note="Bukan Film Indonesia")
+        self.assertEqual(len(answered2), 1)
+        self.assertEqual(answered2[0]["user_id"], user_id)
+
+        # Status must now be answered
+        pending2 = self.cache.get_pending_requests()
+        matched2 = [r for r in pending2 if req_id2 in r.get("ids", [])]
+        self.assertEqual(len(matched2), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
