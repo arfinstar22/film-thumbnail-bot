@@ -643,7 +643,10 @@ class MetadataCache:
                             clean_chan or (affected_channels[0] if affected_channels else None)
                         ))
                     except RuntimeError:
-                        pass
+                        self.cloud._sync_delete_catalog(
+                            list(message_ids),
+                            clean_chan or (affected_channels[0] if affected_channels else None)
+                        )
         except Exception as e:
             logger.error(f"Delete movie posts error: {e}")
         return affected_channels
@@ -686,7 +689,10 @@ class MetadataCache:
                             clean_chan or (affected_channels[0] if affected_channels else None)
                         ))
                     except RuntimeError:
-                        pass
+                        self.cloud._sync_delete_catalog_by_title(
+                            clean_title,
+                            clean_chan or (affected_channels[0] if affected_channels else None)
+                        )
         except Exception as e:
             logger.error(f"Delete movie by title error: {e}")
         return affected_channels
@@ -774,7 +780,7 @@ class MetadataCache:
             is_dup = False
             if key in seen_keys:
                 prev_y = seen_keys[key].get("year")
-                if not prev_y or not y or prev_y == y:
+                if not prev_y or not y or abs(prev_y - y) <= 1:
                     is_dup = True
 
             if is_dup:
@@ -881,7 +887,7 @@ class MetadataCache:
             is_dup = False
             if key in seen_keys:
                 prev_y = seen_keys[key].get("year")
-                if not prev_y or not y or prev_y == y:
+                if not prev_y or not y or abs(prev_y - y) <= 1:
                     is_dup = True
             if is_dup:
                 target = seen_keys[key]

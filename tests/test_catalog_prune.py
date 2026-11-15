@@ -61,6 +61,7 @@ class TestCatalogPrune(unittest.IsolatedAsyncioTestCase):
         m_legacy.empty = False
         m_legacy.service = False
         m_legacy.pinned_message = False
+        m_legacy.sticker = None
 
         # 102: rich post (Telegram returns empty caption/media but message exists)
         m_rich = MagicMock()
@@ -71,11 +72,13 @@ class TestCatalogPrune(unittest.IsolatedAsyncioTestCase):
         m_rich.caption = None
         m_rich.text = None
         m_rich.video = None
+        m_rich.sticker = None
 
         # 103: deleted post (Telegram returns empty=True or None)
         m_dead = MagicMock()
         m_dead.id = 103
         m_dead.empty = True
+        m_dead.sticker = None
 
         mock_client.get_messages = AsyncMock(return_value=[m_legacy, m_rich, m_dead])
 
@@ -100,6 +103,104 @@ class TestCatalogPrune(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0][0], 101)
         self.assertEqual(rows[1][0], 102)
         self.assertEqual(rows[1][1], "The Big 4 (Rich Post)")
+
+    async def test_prune_dead_channel_catalog_prunes_sticker_messages(self):
+        """Should detect sticker posts (e.g. divider stickers) and prune them from catalog."""
+        self.cache.save_movie_post(
+            title="Agak Laen",
+            year=2023,
+            rating="7.2",
+            genre="Komedi",
+            quality="720p",
+            channel_username="testchannel",
+            message_id=1423
+        )
+        self.cache.save_movie_post(
+            title="Agak Laen",
+            year=2024,
+            rating="7.8",
+            genre="Komedi",
+            quality="1080p",
+            channel_username="testchannel",
+            message_id=2857
+        )
+
+        mock_client = MagicMock()
+
+        # 1423 is actually a divider sticker
+        m_sticker = MagicMock()
+        m_sticker.id = 1423
+        m_sticker.empty = False
+        m_sticker.service = False
+        m_sticker.pinned_message = False
+        m_sticker.sticker = MagicMock()
+
+        # 2857 is the real rich movie post
+        m_real = MagicMock()
+        m_real.id = 2857
+        m_real.empty = False
+        m_real.service = False
+        m_real.pinned_message = False
+        m_real.sticker = None
+
+        # Stored mids order is [1423, 2857]
+        mock_client.get_messages = AsyncMock(return_value=[m_sticker, m_real])
+
+        with patch("bot.handlers._engine.cache", self.cache):
+            total_checked, alive_count, pruned_count = await prune_dead_channel_catalog(
+                mock_client,
+                "@testchannel",
+                "testchannel",
+                batch_size=10
+            )
+
+        self.assertEqual(total_checked, 2)
+        self.assertEqual(alive_count, 1)
+        self.assertEqual(pruned_count, 1)
+
+        # 1423 must be pruned from cache
+        self.assertFalse(self.cache.is_message_in_catalog("testchannel", 1423))
+        self.assertTrue(self.cache.is_message_in_catalog("testchannel", 2857))
+
+    def test_deduplicated_catalog_year_difference_within_one(self):
+        """Identical movie titles with year difference <= 1 (e.g. 2024 vs 2023) must be deduplicated."""
+        self.cache.save_movie_post(
+            title="Agak Laen",
+            year=2024,
+            rating="7.8",
+            genre="Komedi",
+            quality="1080p",
+            channel_username="film_indonesia1",
+            message_id=2857
+        )
+        self.cache.save_movie_post(
+            title="Agak Laen",
+            year=2023,
+            rating="7.2",
+            genre="Komedi",
+            quality="720p",
+            channel_username="film_indonesia1",
+            message_id=1423
+        )
+        # Sequel should NOT be deduplicated
+        self.cache.save_movie_post(
+            title="Agak Laen: Menyala Pantiku!",
+            year=2025,
+            rating="8.0",
+            genre="Komedi",
+            quality="1080p",
+            channel_username="film_indonesia1",
+            message_id=3000
+        )
+
+        dedup = self.cache.get_deduplicated_catalog("film_indonesia1")
+        agak_main = [m for m in dedup if m["title"] == "Agak Laen"]
+        self.assertEqual(len(agak_main), 1, "Agak Laen (2024) and Agak Laen (2023) should be deduplicated to 1 entry")
+        self.assertEqual(agak_main[0]["message_id"], 2857)
+        self.assertEqual(agak_main[0]["year"], 2024)
+
+        sequels = [m for m in dedup if "Menyala Pantiku" in m["title"]]
+        self.assertEqual(len(sequels), 1, "Sequel Agak Laen 2 must be preserved")
 
     async def test_clean_catalog_cmd_flow(self):
         """Should execute clean_catalog_cmd successfully for channel admin."""

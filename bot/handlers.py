@@ -6576,7 +6576,11 @@ async def prune_dead_channel_catalog(
                 m = msgs[idx] if idx < len(msgs) else None
                 if not m or getattr(m, "empty", False):
                     dead_ids.append(mid)
-                elif getattr(m, "service", False) or getattr(m, "pinned_message", False):
+                elif (
+                    getattr(m, "service", False)
+                    or getattr(m, "pinned_message", False)
+                    or getattr(m, "sticker", None) is not None
+                ):
                     dead_ids.append(mid)
                 else:
                     alive_count += 1
