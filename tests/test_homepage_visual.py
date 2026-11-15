@@ -178,16 +178,16 @@ class TestHomepageHandler(unittest.IsolatedAsyncioTestCase):
 
         self.handlers = handlers
         self.tmpdir = tempfile.mkdtemp()
-        self.cache = MetadataCache(os.path.join(self.tmpdir, "test.db"))
+        self.cache = MetadataCache(os.path.join(self.tmpdir, "test.db"), enable_cloud=False)
         self.previous_cache = handlers._engine.cache
         handlers._engine.cache = self.cache
         self.cache.save_movie_post(
-            title="Agak Laen", year=2024, rating="7.8", genre="Komedi",
+            title="Film Uji Homepage", year=2024, rating="7.8", genre="Komedi",
             quality="1080p", channel_username="film_indonesia1",
-            message_id=2857, caption="caption", file_id="file-id"
+            message_id=9999, caption="caption", file_id="file-id"
         )
         self.assets = [{
-            "title": "Agak Laen", "year": 2024, "rating": "7.8",
+            "title": "Film Uji Homepage", "year": 2024, "rating": "7.8",
             "quality": "1080p", "poster_url": "https://example.com/p.jpg",
             "poster": _image_bytes(), "backdrop": _image_bytes((10, 20, 40)),
         }]

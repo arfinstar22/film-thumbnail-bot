@@ -285,10 +285,13 @@ def calculate_search_relevance(
 
 
 class MetadataCache:
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: Optional[str] = None, enable_cloud: Optional[bool] = None):
+        is_custom = db_path is not None
         self.db_path = db_path or os.path.join(os.path.dirname(__file__), "..", "films.db")
         self._local = threading.local()
-        self.cloud = SupabaseSyncService()
+        if enable_cloud is None:
+            enable_cloud = not is_custom
+        self.cloud = SupabaseSyncService(enabled=enable_cloud)
 
     def hydrate_from_cloud(self) -> Dict[str, int]:
         """Pulls persistent data from Supabase Cloud to local SQLite cache on startup."""

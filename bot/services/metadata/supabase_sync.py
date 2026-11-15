@@ -19,7 +19,7 @@ class SupabaseSyncService:
     Ensures 100% data persistence across Render Free sleeps/restarts while
     keeping local SQLite access blazing fast (0.1ms)."""
 
-    def __init__(self, db_url: Optional[str] = None):
+    def __init__(self, db_url: Optional[str] = None, enabled: Optional[bool] = None):
         raw_url = (
             db_url
             or os.getenv("DATABASE_URL", "").strip()
@@ -31,7 +31,8 @@ class SupabaseSyncService:
         self.db_url = raw_url
         self.supabase_url = os.getenv("SUPABASE_URL", "").strip()
         self.supabase_key = os.getenv("SUPABASE_KEY", "").strip()
-        self._enabled = bool((self.db_url and HAS_PSYCOPG2) or (self.supabase_url and self.supabase_key))
+        can_connect = bool((self.db_url and HAS_PSYCOPG2) or (self.supabase_url and self.supabase_key))
+        self._enabled = bool(enabled and can_connect) if enabled is not None else can_connect
         self._pg_ready = False
         if not HAS_PSYCOPG2 and self.db_url:
             logger.warning("psycopg2 is not installed. Supabase direct DB sync disabled.")
