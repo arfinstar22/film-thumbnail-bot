@@ -263,5 +263,51 @@ class TestHomepageHandler(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cache.get_setting("homepage_msg_film_indonesia1"), "900")
 
 
+class TestHomepagePermissions(unittest.IsolatedAsyncioTestCase):
+    async def test_channel_admin_without_can_pin_messages_is_allowed(self):
+        """In Telegram broadcast channels, can_pin_messages is False by spec and pinning is granted via can_edit_messages."""
+        from bot.handlers import _homepage_missing_permissions
+        mock_client = AsyncMock()
+        mock_client.me = SimpleNamespace(id=123)
+
+        # Telegram channel admin privilege structure (can_pin_messages is False by Telegram specification)
+        privileges = SimpleNamespace(
+            can_post_messages=True,
+            can_edit_messages=True,
+            can_pin_messages=False,
+            can_delete_messages=True,
+            can_manage_chat=True
+        )
+        member = SimpleNamespace(
+            status=SimpleNamespace(name="ADMINISTRATOR"),
+            privileges=privileges
+        )
+        mock_client.get_chat_member = AsyncMock(return_value=member)
+
+        missing = await _homepage_missing_permissions(mock_client, "@film_indonesia1")
+        self.assertEqual(missing, [], "Channel admin with can_edit_messages=True should have no missing permissions")
+
+    async def test_missing_edit_messages_reports_both(self):
+        """If can_edit_messages is False, bot cannot edit or pin in channel."""
+        from bot.handlers import _homepage_missing_permissions
+        mock_client = AsyncMock()
+        mock_client.me = SimpleNamespace(id=123)
+
+        privileges = SimpleNamespace(
+            can_post_messages=True,
+            can_edit_messages=False,
+            can_pin_messages=False
+        )
+        member = SimpleNamespace(
+            status=SimpleNamespace(name="ADMINISTRATOR"),
+            privileges=privileges
+        )
+        mock_client.get_chat_member = AsyncMock(return_value=member)
+
+        missing = await _homepage_missing_permissions(mock_client, "@film_indonesia1")
+        self.assertIn("edit pesan", missing)
+        self.assertIn("pin pesan", missing)
+
+
 if __name__ == "__main__":
     unittest.main()

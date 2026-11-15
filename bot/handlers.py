@@ -1953,7 +1953,10 @@ async def _homepage_missing_permissions(client: Client, channel_username: str) -
         missing.append("kirim pesan")
     if not getattr(privileges, "can_edit_messages", False):
         missing.append("edit pesan")
-    if not getattr(privileges, "can_pin_messages", False):
+    # In Telegram broadcast channels, pinning is granted via can_edit_messages.
+    # The can_pin_messages field in Telegram API is strictly for groups/supergroups and always False in channels.
+    can_pin = getattr(privileges, "can_pin_messages", False) or getattr(privileges, "can_edit_messages", False)
+    if not can_pin:
         missing.append("pin pesan")
     return missing
 
@@ -5924,15 +5927,18 @@ async def _pin_single_channel_message(
             except Exception:
                 pass
 
-        service_ids = []
-        async for message in client.get_chat_history(channel_username, limit=10):
-            if message and message.id != message_id and (
-                getattr(message, "service", None) or getattr(message, "pinned_message", None)
-            ):
-                service_ids.append(message.id)
-        if service_ids:
-            await client.delete_messages(channel_username, service_ids)
-            logger.info(f"Cleaned {len(service_ids)} service messages in {channel_username}: {service_ids}")
+        try:
+            service_ids = []
+            async for message in client.get_chat_history(channel_username, limit=10):
+                if message and message.id != message_id and (
+                    getattr(message, "service", None) or getattr(message, "pinned_message", None)
+                ):
+                    service_ids.append(message.id)
+            if service_ids:
+                await client.delete_messages(channel_username, service_ids)
+                logger.info(f"Cleaned {len(service_ids)} service messages in {channel_username}: {service_ids}")
+        except Exception:
+            pass
     except Exception as pe:
         logger.warning(f"Pin management error in {channel_username}: {pe}")
 
