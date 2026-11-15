@@ -1231,6 +1231,29 @@ def _detect_quality(text: str, fallback: str = "") -> str:
     return token
 
 
+def _is_matching_banner_session(session: Optional[Dict[str, Any]], job: Optional[Dict[str, Any]]) -> bool:
+    """Check if an active banner session belongs to the current film job."""
+    if not session or not job:
+        return False
+    s_meta = session.get("metadata") or {}
+    j_meta = job.get("metadata") or {}
+    s_title = str(s_meta.get("title") or session.get("query") or "").strip().lower()
+    j_title = str(j_meta.get("title") or job.get("filename") or "").strip().lower()
+    if not s_title or not j_title:
+        return False
+    clean_s = re.sub(r"[^\w\s]", "", s_title).strip()
+    clean_j = re.sub(r"[^\w\s]", "", j_title).strip()
+    if not clean_s or not clean_j:
+        return False
+    if clean_s != clean_j:
+        return False
+    s_year = str(s_meta.get("year") or "").strip()
+    j_year = str(j_meta.get("year") or "").strip()
+    if s_year and j_year and s_year != j_year:
+        return False
+    return True
+
+
 def get_caption_kb(message_id: int, watermark: str):
     btn_post = InlineKeyboardButton("🚀 Posting ke Channel", callback_data=f"post_banner:{message_id}")
     btn_post.style = "primary"
@@ -7678,10 +7701,11 @@ async def _process_video_task(client: Client, msg: Message):
     result = await _engine.process(filename, extra=extra, watermark=wm, enable_synopsis=syn_enabled)
     caption = result["caption"]
 
-    # Clean up previous job's temp directory if one exists
+    # Clean up previous job's temp directory and banner session if one exists
     old_job = _jobs.get(chat_id)
     if old_job and old_job.get("temp_dir") and os.path.isdir(old_job["temp_dir"]):
         shutil.rmtree(old_job["temp_dir"], ignore_errors=True)
+    _banner_sessions.pop(chat_id, None)
 
     tmp = tempfile.mkdtemp()
     thumb_path = None
@@ -8685,6 +8709,9 @@ async def handle_custom_photo_thumbnail(client: Client, msg: Message):
 
     job = _jobs.get(target_chat_id)
     session = _banner_sessions.get(target_chat_id)
+    if session and job and not _is_matching_banner_session(session, job):
+        session = None
+        _banner_sessions.pop(target_chat_id, None)
     if not job and not session:
         await msg.reply_text(
             "ℹ️ <b>Tidak ada video atau banner yang sedang aktif.</b>\n"
@@ -9045,11 +9072,15 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
                 )
 
         session = _banner_sessions.get(chat_id)
+        if session and not _is_matching_banner_session(session, job):
+            session = None
+            _banner_sessions.pop(chat_id, None)
+
         latest_poster = (
             job.get("poster_url")
-            or (session.get("poster_url") if session else None)
             or meta.get("poster_url")
             or meta.get("poster_path")
+            or (session.get("poster_url") if session else None)
             or job.get("thumb_path")
         )
         if latest_poster:
@@ -9079,6 +9110,7 @@ async def handle_post_callback(client: Client, call: CallbackQuery):
 
         job["posted"] = True
         _jobs.pop(chat_id, None)
+        _banner_sessions.pop(chat_id, None)
 
         if call.message:
             try:
@@ -9228,13 +9260,16 @@ async def handle_fixbanner_callback(client: Client, call: CallbackQuery):
         return
 
     chat_id = call.message.chat.id
-    session = _banner_sessions.get(chat_id)
     job = _jobs.get(chat_id)
+    session = _banner_sessions.get(chat_id)
+    if session and job and not _is_matching_banner_session(session, job):
+        session = None
+        _banner_sessions.pop(chat_id, None)
     if not session and not job:
         await call.answer("Sesi poster atau film tidak ditemukan atau sudah kadaluarsa.", show_alert=True)
         return
 
-    meta = (session.get("metadata") if session else None) or (job.get("metadata") if job else {})
+    meta = (job.get("metadata") if job else None) or (session.get("metadata") if session else {})
     title = meta.get("title") or (job.get("filename") if job else "Film")
 
     await call.answer("🛠️ Menu Perbaikan Poster")
