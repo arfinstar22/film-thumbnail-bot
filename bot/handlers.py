@@ -5961,6 +5961,7 @@ async def update_pinned_homepage(
         if not newest:
             return False
         # Jaga-jaga: pastikan film dengan message_id terbesar (paling baru) selalu di nomor 1.
+        newest = [m for m in newest if m.get("message_id")]
         newest.sort(key=lambda m: int(m.get("message_id") or 0), reverse=True)
         total = len(movies)
         title_label = _engine.cache.get_setting(
@@ -6155,7 +6156,7 @@ async def send_homepage_preview(
         except Exception as exc:
             logger.warning(f"Preview hydration failed for @{clean_channel}: {exc}")
         movies = _engine.cache.get_deduplicated_catalog(clean_channel)
-    newest = _engine.cache.get_newest_movies(clean_channel, 5)
+    newest = [m for m in _engine.cache.get_newest_movies(clean_channel, 5) if m.get("message_id")]
     if not movies or not newest:
         await client.send_message(chat_id, "❌ Katalog masih kosong. Tidak ada film untuk preview.")
         return False
