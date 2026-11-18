@@ -383,6 +383,148 @@ class TestRichArticlePost(unittest.TestCase):
         self.assertIn("🎞️ <b>Kualitas Tersedia:</b> 1080p • 720p", html)
         self.assertIn("🎞️ <b>Kualitas :</b> 1080p • Full HD, 720p • HD", html)
 
+    def test_async_send_downloads_remote_still_to_attach(self):
+        """External HTTP still_url must be downloaded and sent via attach:// (never raw HTTP URL)."""
+        import json
+        import tempfile
+        from unittest.mock import patch, MagicMock
+        from bot.services.metadata.rich_post import async_send_rich_article_post
+
+        captured = {}
+
+        class _FakeResp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return json.dumps({"ok": True, "result": {"message_id": 999}}).encode()
+
+        def _fake_urlopen(req, timeout=30):
+            captured["body"] = req.data
+            captured["content_type"] = req.get_header("Content-type")
+            return _FakeResp()
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as b_tmp, \
+             tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as p_tmp:
+            b_tmp.write(b"\xff\xd8\xff\xe0banner")
+            p_tmp.write(b"\xff\xd8\xff\xe0poster")
+            b_path, p_path = b_tmp.name, p_tmp.name
+
+        try:
+            meta = {
+                "title": "Heart",
+                "year": 2006,
+                "still_url": "https://image.tmdb.org/t/p/w1280/9szww8nGR1ZCeYgqyoZSWqqVbhT.jpg",
+            }
+            with patch("bot.services.metadata.rich_post._download_photo_bytes",
+                       return_value=(b"\xff\xd8\xff\xe0still", "image/jpeg", "jpg")), \
+                 patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+                res = asyncio.run(async_send_rich_article_post(
+                    bot_token="123:ABC",
+                    chat_id="@film_indonesia1",
+                    metadata=meta,
+                    watermark="@film_indonesia1",
+                    video_file_id="vid_heart_2006",
+                    banner_path=b_path,
+                    poster_path=p_path,
+                ))
+            self.assertEqual(res, {"message_id": 999})
+            body_text = captured["body"].decode("latin1")
+            self.assertIn("attach://banner_file", body_text)
+            self.assertIn("attach://poster_file", body_text)
+            self.assertIn("attach://remote_img_1", body_text)
+            self.assertNotIn("https://image.tmdb.org/t/p/w1280/9szww8nGR1ZCeYgqyoZSWqqVbhT.jpg", body_text)
+        finally:
+            for p in (b_path, p_path):
+                if os.path.exists(p):
+                    os.remove(p)
+
+    def test_async_send_drops_broken_still_url_and_still_sends_rich_post(self):
+        """If downloading external still_url fails, skip it cleanly so Rich Post still succeeds."""
+        import json
+        import tempfile
+        from unittest.mock import patch
+        from bot.services.metadata.rich_post import async_send_rich_article_post
+
+        captured = {}
+
+        class _FakeResp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return json.dumps({"ok": True, "result": {"message_id": 1000}}).encode()
+
+        def _fake_urlopen(req, timeout=30):
+            captured["body"] = req.data
+            return _FakeResp()
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as b_tmp, \
+             tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as p_tmp:
+            b_tmp.write(b"\xff\xd8\xff\xe0banner")
+            p_tmp.write(b"\xff\xd8\xff\xe0poster")
+            b_path, p_path = b_tmp.name, p_tmp.name
+
+        try:
+            meta = {
+                "title": "Heart",
+                "year": 2006,
+                "still_url": "https://image.tmdb.org/t/p/w1280/broken_404.jpg",
+                "gallery_images": ["https://image.tmdb.org/t/p/w1280/also_unfetched.jpg"],
+            }
+            with patch("bot.services.metadata.rich_post._download_photo_bytes", return_value=None), \
+                 patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+                res = asyncio.run(async_send_rich_article_post(
+                    bot_token="123:ABC",
+                    chat_id="@film_indonesia1",
+                    metadata=meta,
+                    watermark="@film_indonesia1",
+                    video_file_id="vid_heart_2006",
+                    banner_path=b_path,
+                    poster_path=p_path,
+                ))
+            self.assertEqual(res, {"message_id": 1000})
+            body_text = captured["body"].decode("latin1")
+            self.assertIn("Poster &amp; Banner HD (2 gambar)", body_text)
+            self.assertNotIn("broken_404.jpg", body_text)
+            self.assertNotIn("also_unfetched.jpg", body_text)
+        finally:
+            for p in (b_path, p_path):
+                if os.path.exists(p):
+                    os.remove(p)
+
+    def test_async_send_retries_without_http_on_http_400_url_error(self):
+        """Safety net: if Telegram still responds HTTP 400 failed to get HTTP URL content, retry cleanly."""
+        import json
+        import urllib.error
+        from io import BytesIO
+        from unittest.mock import patch
+        from bot.services.metadata.rich_post import async_send_rich_article_post
+
+        calls = []
+
+        class _FakeResp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return json.dumps({"ok": True, "result": {"message_id": 1001}}).encode()
+
+        def _fake_urlopen(req, timeout=30):
+            calls.append(req.data)
+            if len(calls) == 1:
+                raise urllib.error.HTTPError(
+                    req.full_url, 400, "Bad Request", {},
+                    BytesIO(b'{"ok":false,"error_code":400,"description":"Bad Request: failed to get HTTP URL content"}')
+                )
+            return _FakeResp()
+
+        meta = {"title": "Heart", "year": 2006}
+        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            res = asyncio.run(async_send_rich_article_post(
+                bot_token="123:ABC",
+                chat_id="@film_indonesia1",
+                metadata=meta,
+                watermark="@film_indonesia1",
+                video_file_id="vid_heart_2006",
+            ))
+        self.assertEqual(res, {"message_id": 1001})
+        self.assertEqual(len(calls), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

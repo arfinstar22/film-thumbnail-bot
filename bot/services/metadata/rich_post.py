@@ -759,6 +759,42 @@ def build_rich_article_payload(
     return payload
 
 
+def _download_photo_bytes(
+    url: str,
+    timeout: int = 10,
+    max_bytes: int = 10 * 1024 * 1024,
+) -> Optional[Tuple[bytes, str, str]]:
+    """Download an external HTTP(S) photo URL into validated (bytes, content_type, ext).
+
+    Returns None on network error, non-image payload, or size > 10MB (Telegram photo limit).
+    """
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read(max_bytes + 1)
+        if not data or len(data) > max_bytes:
+            return None
+        if data[:3] == b"\xff\xd8\xff":
+            return data, "image/jpeg", "jpg"
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return data, "image/png", "png"
+        # Convert WebP/other valid image formats to JPEG via Pillow; reject HTML/corrupt data
+        from io import BytesIO
+        from PIL import Image
+
+        with Image.open(BytesIO(data)) as im:
+            rgb = im.convert("RGB")
+            buf = BytesIO()
+            rgb.save(buf, format="JPEG", quality=90)
+            out = buf.getvalue()
+            if out and len(out) <= max_bytes:
+                return out, "image/jpeg", "jpg"
+        return None
+    except Exception as e:
+        logger.debug(f"Failed to download rich post photo {url}: {e}")
+        return None
+
+
 async def async_send_rich_article_post(
     bot_token: str,
     chat_id: Union[int, str],
@@ -777,35 +813,127 @@ async def async_send_rich_article_post(
     """Send rich article post using Telegram Bot API sendRichMessage.
 
     Supports local file attachments via multipart/form-data with attach://.
+    External HTTP(S) photo URLs (such as TMDb still/gallery images) are downloaded
+    locally and uploaded via attach:// so Telegram never fails with
+    "Bad Request: failed to get HTTP URL content".
     Returns the message result dict from Telegram on success, or None on error.
     """
     url = f"https://api.telegram.org/bot{bot_token}/sendRichMessage"
 
-    files_to_upload: Dict[str, str] = {}
-    if banner_path and os.path.exists(banner_path):
-        banner_file_id_or_url = "attach://banner_file"
-        files_to_upload["banner_file"] = banner_path
+    # attach_name -> (filename, content_type, raw_bytes)
+    files_to_upload: Dict[str, Tuple[str, str, bytes]] = {}
 
-    if poster_path and os.path.exists(poster_path):
-        poster_file_id_or_url = "attach://poster_file"
-        files_to_upload["poster_file"] = poster_path
+    def _load_local_file(attach_name: str, path: Optional[str]) -> Optional[str]:
+        if path and os.path.exists(path) and os.path.getsize(path) > 0:
+            try:
+                with open(path, "rb") as f:
+                    raw = f.read()
+                if raw:
+                    ctype = "image/png" if raw[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
+                    files_to_upload[attach_name] = (os.path.basename(path), ctype, raw)
+                    return f"attach://{attach_name}"
+            except Exception as fe:
+                logger.debug(f"Failed to read local file {path}: {fe}")
+        return None
 
-    payload = build_rich_article_payload(
-        chat_id=chat_id,
-        metadata=metadata,
-        watermark=watermark,
-        video_file_id=video_file_id,
-        banner_file_id_or_url=banner_file_id_or_url,
-        poster_file_id_or_url=poster_file_id_or_url,
-        reply_markup=reply_markup,
-        protect_content=protect_content,
-        disable_notification=disable_notification,
-        video_variants=video_variants,
-    )
+    local_banner = _load_local_file("banner_file", banner_path)
+    if local_banner:
+        banner_file_id_or_url = local_banner
 
-    def _sync_request():
-        if not files_to_upload:
-            data = json.dumps(payload).encode("utf-8")
+    local_poster = _load_local_file("poster_file", poster_path)
+    if local_poster:
+        poster_file_id_or_url = local_poster
+
+    def _is_http_url(val: Any) -> bool:
+        return isinstance(val, str) and val.startswith(("http://", "https://"))
+
+    def _build_filtered_payload(
+        drop_urls: set,
+        allowed_http_urls: Optional[set] = None,
+    ) -> Dict[str, Any]:
+        def _keep(u: Any) -> bool:
+            if not u:
+                return False
+            if u in drop_urls:
+                return False
+            if allowed_http_urls is not None and _is_http_url(u) and u not in allowed_http_urls:
+                return False
+            return True
+
+        b_src = banner_file_id_or_url if _keep(banner_file_id_or_url) else None
+        p_src = poster_file_id_or_url if _keep(poster_file_id_or_url) else None
+        meta_copy = metadata
+        if (drop_urls or allowed_http_urls is not None) and isinstance(metadata, dict):
+            meta_copy = dict(metadata)
+            if not _keep(meta_copy.get("still_url")):
+                meta_copy["still_url"] = None
+            if meta_copy.get("gallery_images"):
+                meta_copy["gallery_images"] = [
+                    u for u in meta_copy["gallery_images"] if _keep(u)
+                ]
+        return build_rich_article_payload(
+            chat_id=chat_id,
+            metadata=meta_copy,
+            watermark=watermark,
+            video_file_id=video_file_id,
+            banner_file_id_or_url=b_src,
+            poster_file_id_or_url=p_src,
+            reply_markup=reply_markup,
+            protect_content=protect_content,
+            disable_notification=disable_notification,
+            video_variants=video_variants,
+        )
+
+    payload = _build_filtered_payload(set())
+
+    # Unduh semua URL foto HTTP(S) di media_items secara lokal lalu unggah via attach://
+    # agar Telegram tidak pernah gagal dengan "Bad Request: failed to get HTTP URL content".
+    http_photo_urls: List[str] = []
+    for item in payload.get("rich_message", {}).get("media") or []:
+        m = item.get("media") or {}
+        target = m.get("media")
+        if m.get("type") == "photo" and _is_http_url(target) and target not in http_photo_urls:
+            http_photo_urls.append(target)
+
+    url_to_attach: Dict[str, str] = {}
+    failed_urls: set = set()
+    if http_photo_urls:
+        dl_results = await asyncio.gather(
+            *(asyncio.to_thread(_download_photo_bytes, u) for u in http_photo_urls)
+        )
+        for idx, (u, dl) in enumerate(zip(http_photo_urls, dl_results)):
+            if dl:
+                raw_bytes, ctype, ext = dl
+                aname = f"remote_img_{idx + 1}"
+                files_to_upload[aname] = (f"{aname}.{ext}", ctype, raw_bytes)
+                url_to_attach[u] = f"attach://{aname}"
+            else:
+                logger.warning(f"sendRichMessage: gagal unduh foto eksternal {u}; dilewati agar Rich Post tetap terkirim.")
+                failed_urls.add(u)
+
+    if failed_urls:
+        # Rebuild tanpa URL yang gagal dan jangan tarik URL HTTP baru yang belum diunduh
+        payload = _build_filtered_payload(failed_urls, allowed_http_urls=set(url_to_attach.keys()))
+
+    if url_to_attach:
+        for item in payload.get("rich_message", {}).get("media") or []:
+            m = item.get("media") or {}
+            target = m.get("media")
+            if m.get("type") == "photo" and target in url_to_attach:
+                m["media"] = url_to_attach[target]
+
+    def _active_attachments(p: Dict[str, Any]) -> Dict[str, Tuple[str, str, bytes]]:
+        referenced = set()
+        for item in p.get("rich_message", {}).get("media") or []:
+            target = (item.get("media") or {}).get("media")
+            if isinstance(target, str) and target.startswith("attach://"):
+                referenced.add(target[len("attach://"):])
+        return {k: v for k, v in files_to_upload.items() if k in referenced}
+
+    def _sync_request(p: Dict[str, Any]):
+        active_files = _active_attachments(p)
+        if not active_files:
+            data = json.dumps(p).encode("utf-8")
             req = urllib.request.Request(
                 url,
                 data=data,
@@ -814,19 +942,17 @@ async def async_send_rich_article_post(
         else:
             boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
             body = bytearray()
-            for k, v in payload.items():
+            for k, v in p.items():
                 body.extend(f"--{boundary}\r\n".encode())
                 body.extend(f'Content-Disposition: form-data; name="{k}"\r\n\r\n'.encode())
                 body.extend(json.dumps(v).encode() if isinstance(v, (dict, list)) else str(v).encode())
                 body.extend(b"\r\n")
-            for fname, fpath in files_to_upload.items():
-                if fpath and os.path.exists(fpath):
-                    body.extend(f"--{boundary}\r\n".encode())
-                    body.extend(f'Content-Disposition: form-data; name="{fname}"; filename="{os.path.basename(fpath)}"\r\n'.encode())
-                    body.extend(b"Content-Type: image/jpeg\r\n\r\n")
-                    with open(fpath, "rb") as f:
-                        body.extend(f.read())
-                    body.extend(b"\r\n")
+            for fname, (filename, ctype, raw_bytes) in active_files.items():
+                body.extend(f"--{boundary}\r\n".encode())
+                body.extend(f'Content-Disposition: form-data; name="{fname}"; filename="{filename}"\r\n'.encode())
+                body.extend(f"Content-Type: {ctype}\r\n\r\n".encode())
+                body.extend(raw_bytes)
+                body.extend(b"\r\n")
             body.extend(f"--{boundary}--\r\n".encode())
             req = urllib.request.Request(
                 url,
@@ -837,20 +963,40 @@ async def async_send_rich_article_post(
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
-    try:
-        res = await asyncio.to_thread(_sync_request)
-        if res and res.get("ok"):
-            logger.info(f"sendRichMessage successful: msg_id={res['result'].get('message_id')}")
-            return res.get("result")
-        logger.warning(f"sendRichMessage returned error: {res}")
-        return None
-    except urllib.error.HTTPError as he:
-        body = he.read().decode("utf-8", errors="ignore")
-        logger.warning(f"sendRichMessage HTTP {he.code}: {body}")
-        return None
-    except Exception as e:
-        logger.warning(f"sendRichMessage failed: {e}")
-        return None
+    async def _attempt_send(p: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        try:
+            res = await asyncio.to_thread(_sync_request, p)
+            if res and res.get("ok"):
+                logger.info(f"sendRichMessage successful: msg_id={res['result'].get('message_id')}")
+                return res.get("result"), None
+            err_desc = str(res.get("description") if isinstance(res, dict) else res)
+            logger.warning(f"sendRichMessage returned error: {res}")
+            return None, err_desc
+        except urllib.error.HTTPError as he:
+            body_err = he.read().decode("utf-8", errors="ignore")
+            logger.warning(f"sendRichMessage HTTP {he.code}: {body_err}")
+            return None, body_err
+        except Exception as e:
+            logger.warning(f"sendRichMessage failed: {e}")
+            return None, str(e)
+
+    res_msg, err_msg = await _attempt_send(payload)
+    if res_msg:
+        return res_msg
+
+    # Safety net: jika Telegram masih menolak karena URL konten HTTP, ulangi sekali
+    # tanpa semua foto URL HTTP (tetap pertahankan video & file lokal attach://).
+    if err_msg and any(
+        tok in err_msg.lower()
+        for tok in ("failed to get http url content", "wrong type of the web page content", "webpage_curl_failed")
+    ):
+        logger.warning("sendRichMessage: retrying without external HTTP photo URLs...")
+        fallback_payload = _build_filtered_payload(set(), allowed_http_urls=set())
+        res_retry, _ = await _attempt_send(fallback_payload)
+        if res_retry:
+            return res_retry
+
+    return None
 
 
 async def async_delete_telegram_message(
