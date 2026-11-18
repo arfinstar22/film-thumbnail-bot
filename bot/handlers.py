@@ -5943,6 +5943,82 @@ async def _pin_single_channel_message(
         logger.warning(f"Pin management error in {channel_username}: {pe}")
 
 
+async def _http_edit_homepage_media(
+    bot_token: str,
+    chat_id: str,
+    message_id: int,
+    image_path: str,
+    caption: str,
+    keyboard: Any,
+) -> bool:
+    """Fast HTTP Bot API editMessageMedia fallback when Pyrogram DC5 media upload lags or times out."""
+    if not bot_token or not image_path or not os.path.exists(image_path):
+        return False
+    clean_chat = str(chat_id).strip()
+    if not clean_chat.startswith("@") and not clean_chat.startswith("-"):
+        clean_chat = f"@{clean_chat}"
+
+    def _sync_edit():
+        import uuid as _uuid
+
+        boundary = f"----WebKitFormBoundary{_uuid.uuid4().hex}"
+        body = bytearray()
+
+        def _field(name: str, value: str):
+            body.extend(f"--{boundary}\r\n".encode())
+            body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+            body.extend(value.encode("utf-8"))
+            body.extend(b"\r\n")
+
+        media_obj = {
+            "type": "photo",
+            "media": "attach://homepage_photo",
+            "caption": caption,
+            "parse_mode": "HTML",
+        }
+        _field("chat_id", clean_chat)
+        _field("message_id", str(int(message_id)))
+        _field("media", json.dumps(media_obj))
+        markup = _build_bot_api_reply_markup(keyboard) if keyboard else None
+        if markup:
+            _field("reply_markup", json.dumps(markup))
+
+        body.extend(f"--{boundary}\r\n".encode())
+        body.extend(b'Content-Disposition: form-data; name="homepage_photo"; filename="homepage.jpg"\r\n')
+        body.extend(b"Content-Type: image/jpeg\r\n\r\n")
+        with open(image_path, "rb") as _f:
+            body.extend(_f.read())
+        body.extend(b"\r\n")
+        body.extend(f"--{boundary}--\r\n".encode())
+
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{bot_token}/editMessageMedia",
+            data=bytes(body),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    try:
+        res = await asyncio.to_thread(_sync_edit)
+        if res and res.get("ok"):
+            return True
+        desc = str((res or {}).get("description") or "").lower()
+        if "message is not modified" in desc:
+            return True
+        logger.warning(f"HTTP editMessageMedia homepage rejected: {res}")
+        return False
+    except urllib.error.HTTPError as he:
+        err_body = he.read().decode("utf-8", errors="ignore")
+        if "message is not modified" in err_body.lower():
+            return True
+        logger.warning(f"HTTP editMessageMedia homepage HTTP {he.code}: {err_body}")
+        return False
+    except Exception as exc:
+        logger.warning(f"HTTP editMessageMedia homepage error: {exc}")
+        return False
+
+
 async def update_pinned_homepage(
     client: Client,
     channel_username: str,
@@ -5991,15 +6067,22 @@ async def update_pinned_homepage(
             logger.warning(f"Could not read pinned message for @{clean_channel}: {ce}")
 
         target_id = stored_id
-        if not target_id and pinned_message and getattr(pinned_message, "photo", None):
-            target_id = pinned_message.id
-
         target_message = pinned_message if (pinned_message and pinned_message.id == target_id) else None
         if target_id and target_message is None:
             try:
                 target_message = await client.get_messages(channel_username, target_id)
+                if getattr(target_message, "empty", False):
+                    target_message = None
             except Exception:
                 target_message = None
+
+        if (
+            (not target_message or not getattr(target_message, "photo", None))
+            and pinned_message
+            and getattr(pinned_message, "photo", None)
+        ):
+            target_id = pinned_message.id
+            target_message = pinned_message
 
         is_photo = bool(target_id and target_message and getattr(target_message, "photo", None))
         existing_homepage = bool(stored_id or is_photo)
@@ -6082,18 +6165,34 @@ async def update_pinned_homepage(
             )
 
             if is_photo:
+                edited_media = False
                 try:
-                    await client.edit_message_media(
-                        chat_id=channel_username,
-                        message_id=target_id,
-                        media=InputMediaPhoto(
-                            media=image_path,
-                            caption=caption,
-                            parse_mode=ParseMode.HTML
+                    await asyncio.wait_for(
+                        client.edit_message_media(
+                            chat_id=channel_username,
+                            message_id=target_id,
+                            media=InputMediaPhoto(
+                                media=image_path,
+                                caption=caption,
+                                parse_mode=ParseMode.HTML
+                            ),
+                            reply_markup=keyboard
                         ),
-                        reply_markup=keyboard
+                        timeout=20.0
                     )
                     await _apply_channel_post_styling(channel_username, target_id, keyboard)
+                    edited_media = True
+                except Exception as media_error:
+                    logger.warning(
+                        f"Pyrogram editMessageMedia failed for @{clean_channel}: {media_error}; "
+                        f"trying HTTP Bot API editMessageMedia..."
+                    )
+                    if BOT_TOKEN:
+                        edited_media = await _http_edit_homepage_media(
+                            BOT_TOKEN, channel_username, target_id, image_path, caption, keyboard
+                        )
+
+                if edited_media:
                     _engine.cache.set_setting(stored_key, str(target_id))
                     _engine.cache.set_setting(sig_key, signature)
                     _engine.cache.set_setting(caption_sig_key, caption_signature)
@@ -6102,11 +6201,10 @@ async def update_pinned_homepage(
                     if not pinned_message or pinned_message.id != target_id:
                         await _pin_single_channel_message(client, channel_username, target_id)
                     return True
-                except Exception as media_error:
-                    logger.warning(
-                        f"Homepage editMessageMedia failed for @{clean_channel}, "
-                        f"falling back to a new pinned post: {media_error}"
-                    )
+                logger.warning(
+                    f"Homepage editMessageMedia failed for @{clean_channel}, "
+                    f"falling back to a new pinned post."
+                )
 
             sent = await client.send_photo(
                 chat_id=channel_username,
@@ -6269,18 +6367,28 @@ async def update_pinned_catalog(
             pass
     bot_username = bot_user.username if bot_user else ""
 
-    # Publish / update Telegra.ph Instant View page
-    telegraph_url = publish_or_update_telegraph_catalog(movies, clean_channel, _engine.cache, bot_username)
-    if not telegraph_url:
-        cached_path = _engine.cache.get_setting(f"telegraph_path_{clean_channel}", "")
-        if cached_path:
-            telegraph_url = f"https://telegra.ph/{cached_path}"
+    cached_path = _engine.cache.get_setting(f"telegraph_path_{clean_channel}", "")
+    cached_telegraph_url = f"https://telegra.ph/{cached_path}" if cached_path else ""
+    homepage_enabled = _engine.cache.get_setting(f"homepage_visual_{clean_channel}", "off").lower() == "on"
 
-    if _engine.cache.get_setting(f"homepage_visual_{clean_channel}", "off").lower() == "on":
+    # Jika homepage visual aktif dan URL Telegraph master sudah ada di cache,
+    # perbarui pesan tersemat (foto + caption) TERLEBIH DAHULU sambil memperbarui
+    # halaman Telegraph di background thread agar pesan tersemat langsung update (~2 detik).
+    if homepage_enabled and cached_telegraph_url:
+        async def _refresh_telegraph_bg():
+            try:
+                await asyncio.to_thread(
+                    publish_or_update_telegraph_catalog,
+                    movies, clean_channel, _engine.cache, bot_username
+                )
+            except Exception as tg_err:
+                logger.warning(f"Background Telegraph refresh failed for @{clean_channel}: {tg_err}")
+
+        asyncio.create_task(_refresh_telegraph_bg())
         try:
             homepage_ok = await update_pinned_homepage(
                 client, channel_username, movies,
-                telegraph_url=telegraph_url or "",
+                telegraph_url=cached_telegraph_url,
                 bot_username=bot_username,
                 chat_id=chat_id
             )
@@ -6288,6 +6396,28 @@ async def update_pinned_catalog(
                 return len(movies)
         except Exception as homepage_error:
             logger.warning(f"Visual homepage failed for @{clean_channel}: {homepage_error}")
+        telegraph_url = cached_telegraph_url
+    else:
+        # Publish / update Telegra.ph Instant View page in worker thread (never block event loop)
+        telegraph_url = await asyncio.to_thread(
+            publish_or_update_telegraph_catalog,
+            movies, clean_channel, _engine.cache, bot_username
+        )
+        if not telegraph_url and cached_telegraph_url:
+            telegraph_url = cached_telegraph_url
+
+        if homepage_enabled:
+            try:
+                homepage_ok = await update_pinned_homepage(
+                    client, channel_username, movies,
+                    telegraph_url=telegraph_url or "",
+                    bot_username=bot_username,
+                    chat_id=chat_id
+                )
+                if homepage_ok:
+                    return len(movies)
+            except Exception as homepage_error:
+                logger.warning(f"Visual homepage failed for @{clean_channel}: {homepage_error}")
 
     catalog_text = format_pinned_catalog(movies, clean_channel, bot_username, telegraph_url)
 

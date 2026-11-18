@@ -126,6 +126,15 @@ class TestHomepageRenderer(unittest.TestCase):
         self.assertNotEqual(base, homepage_signature("film_indonesia1", changed, 514))
         self.assertNotEqual(base, homepage_signature("film_indonesia1", assets, 515))
 
+        # Replacing a movie (same total & poster_url, new message_id) or recovering a missing poster must refresh image
+        replaced = [dict(asset) for asset in assets]
+        replaced[0]["message_id"] = 9999
+        self.assertNotEqual(base, homepage_signature("film_indonesia1", replaced, 514))
+
+        missing_poster = [dict(asset) for asset in assets]
+        missing_poster[0]["poster"] = None
+        self.assertNotEqual(base, homepage_signature("film_indonesia1", missing_poster, 514))
+
 
 class TestHomepageAssets(unittest.TestCase):
     def setUp(self):
@@ -259,6 +268,28 @@ class TestHomepageHandler(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(ok)
         client.edit_message_media.assert_awaited_once()
+        client.send_photo.assert_not_awaited()
+        self.assertEqual(self.cache.get_setting("homepage_msg_film_indonesia1"), "900")
+
+    async def test_http_edit_media_fallback_when_pyrogram_times_out(self):
+        """If Pyrogram edit_message_media fails/times out, HTTP Bot API editMessageMedia updates in-place."""
+        photo_pin = SimpleNamespace(id=900, photo=object(), text=None, caption="homepage")
+        self.cache.set_setting("homepage_msg_film_indonesia1", "900")
+        self.cache.set_setting("homepage_sig_film_indonesia1", "old-signature")
+        client = self._client(photo_pin)
+        client.edit_message_media = AsyncMock(side_effect=TimeoutError("DC5 media timeout"))
+
+        with patch.object(self.handlers, "BOT_TOKEN", "123:TEST"), \
+             patch.object(self.handlers, "resolve_homepage_assets", return_value=self.assets), \
+             patch.object(self.handlers, "_http_edit_homepage_media", new=AsyncMock(return_value=True)) as mock_http_edit, \
+             patch.object(self.handlers, "_homepage_today_schedule", return_value=[]):
+            ok = await self.handlers.update_pinned_homepage(
+                client, "@film_indonesia1", [dict(MOVIES[0]), dict(MOVIES[1])],
+                "https://telegra.ph/x", "film_bot"
+            )
+
+        self.assertTrue(ok)
+        mock_http_edit.assert_awaited_once()
         client.send_photo.assert_not_awaited()
         self.assertEqual(self.cache.get_setting("homepage_msg_film_indonesia1"), "900")
 

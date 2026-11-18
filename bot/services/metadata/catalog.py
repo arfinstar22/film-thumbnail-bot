@@ -129,7 +129,9 @@ def _build_film_nodes(films: List[Dict[str, Any]], channel: str,
         title = (m.get("title") or "Film").strip()
         year = m.get("year")
         msg_id = m.get("message_id")
-        post_url = f"https://t.me/{channel}/{msg_id}"
+        # Pakai deep-link tg://resolve agar klik judul di Telegraph langsung loncat
+        # ke film di dalam aplikasi Telegram tanpa popup "mau buka di aplikasi mana".
+        post_url = f"tg://resolve?domain={channel}&post={msg_id}" if msg_id else f"tg://resolve?domain={channel}"
         t_str = f"{title} ({year})" if year else title
 
         link_node = {"tag": "a", "attrs": {"href": post_url}, "children": [f"🎬 {t_str}"]}
@@ -587,9 +589,9 @@ def publish_movie_instant_view(
         nodes.append({"tag": "blockquote", "children": cast_children})
         nodes.append({"tag": "hr"})
 
-    # 5. Direct Action CTA
-    channel_url = f"https://t.me/{clean_channel}"
-    watch_url = f"{channel_url}/{post_message_id}" if post_message_id else channel_url
+    # 5. Direct Action CTA (tg://resolve untuk loncat langsung ke Telegram tanpa popup browser)
+    channel_url = f"tg://resolve?domain={clean_channel}"
+    watch_url = f"tg://resolve?domain={clean_channel}&post={post_message_id}" if post_message_id else channel_url
     nodes.append({"tag": "h4", "children": ["🍿 NONTON & DOWNLOAD FILM"]})
     nodes.append({
         "tag": "p",

@@ -89,6 +89,18 @@ class TestTelegraphCatalogRefresh(unittest.TestCase):
         self.assertIn("Bagian 1/2", rendered)
         self.assertIn("Bagian 2/2", rendered)
 
+    def test_film_nodes_use_tg_resolve_deep_link(self):
+        """Movie links in Telegraph must use tg://resolve so tapping jumps straight into Telegram without browser chooser."""
+        from bot.services.metadata.catalog import _build_film_nodes
+
+        nodes = _build_film_nodes(
+            [{"title": "Heart", "year": 2006, "message_id": 2924, "quality": "1080p"}],
+            "film_indonesia1",
+        )
+        rendered = json.dumps(nodes)
+        self.assertIn("tg://resolve?domain=film_indonesia1&post=2924", rendered)
+        self.assertNotIn("https://t.me/film_indonesia1/2924", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

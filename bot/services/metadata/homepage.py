@@ -163,6 +163,7 @@ def resolve_homepage_assets(
         assets.append({
             "title": title,
             "year": year,
+            "message_id": movie.get("message_id"),
             "rating": movie.get("rating"),
             "quality": _quality_label(movie),
             "poster_url": poster_src,
@@ -267,15 +268,22 @@ def homepage_signature(
     channel_username: str,
     assets: List[Dict[str, Any]],
     total: int,
+    now: Optional[datetime.datetime] = None,
 ) -> str:
     clean_channel = (channel_username or "").lstrip("@").strip().lower()
-    parts = [clean_channel, str(int(total))]
+    current = now or datetime.datetime.now(WIB)
+    date_key = current.strftime("%Y-%m-%d")
+    parts = [clean_channel, str(int(total)), date_key]
     for movie in assets[:5]:
         parts.append(
             "|".join([
                 str(movie.get("title") or ""),
                 str(movie.get("year") or ""),
+                str(movie.get("message_id") or ""),
+                str(movie.get("rating") or ""),
+                str(movie.get("quality") or ""),
                 str(movie.get("poster_url") or ""),
+                "1" if movie.get("poster") else "0",
             ])
         )
     return hashlib.sha1("::".join(parts).encode("utf-8")).hexdigest()
