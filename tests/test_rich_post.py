@@ -525,6 +525,31 @@ class TestRichArticlePost(unittest.TestCase):
         self.assertEqual(res, {"message_id": 1001})
         self.assertEqual(len(calls), 2)
 
+    def test_async_send_returns_timed_out_sentinel_and_uses_120s_timeout(self):
+        """Read timeout must return _timed_out sentinel (not None) so caller never double-posts."""
+        from unittest.mock import patch
+        from bot.services.metadata.rich_post import async_send_rich_article_post
+
+        seen_timeouts = []
+
+        def _fake_urlopen(req, timeout=30):
+            seen_timeouts.append(timeout)
+            raise TimeoutError("The read operation timed out")
+
+        meta = {"title": "Heart", "year": 2006}
+        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            res = asyncio.run(async_send_rich_article_post(
+                bot_token="123:ABC",
+                chat_id="@film_indonesia1",
+                metadata=meta,
+                watermark="@film_indonesia1",
+                video_file_id="vid_heart_2006",
+            ))
+        self.assertEqual(seen_timeouts, [120])
+        self.assertIsInstance(res, dict)
+        self.assertTrue(res.get("_timed_out"))
+        self.assertIsNone(res.get("message_id"))
+
 
 if __name__ == "__main__":
     unittest.main()

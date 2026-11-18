@@ -960,8 +960,16 @@ async def async_send_rich_article_post(
                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
             )
 
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=120) as resp:
             return json.loads(resp.read().decode("utf-8"))
+
+    def _is_timeout_error(exc: Exception) -> bool:
+        if isinstance(exc, TimeoutError):
+            return True
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, TimeoutError):
+            return True
+        return "timed out" in str(exc).lower()
 
     async def _attempt_send(p: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         try:
@@ -978,6 +986,11 @@ async def async_send_rich_article_post(
             return None, body_err
         except Exception as e:
             logger.warning(f"sendRichMessage failed: {e}")
+            if _is_timeout_error(e):
+                # Read timeout terjadi SETELAH request dikirim ke Telegram; server Telegram
+                # kemungkinan besar tetap menerbitkan Rich Post. Jangan return None agar
+                # caller tidak jatuh ke fallback legacy (mencegah postingan double).
+                return {"_timed_out": True, "_error": str(e)}, str(e)
             return None, str(e)
 
     res_msg, err_msg = await _attempt_send(payload)

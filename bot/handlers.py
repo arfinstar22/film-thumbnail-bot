@@ -7544,6 +7544,7 @@ async def publish_video_to_channel(
     # === TRY RICH ARTICLE POST (sendRichMessage, Bot API 10.1+) ===
     sent_channel = None
     rich_post_success = False
+    rich_post_timed_out = False
 
     if BOT_TOKEN:
         try:
@@ -7576,10 +7577,33 @@ async def publish_video_to_channel(
                 rich_post_success = True
                 logger.info(f"Rich article post published: {title_display} (msg_id={sent_channel.id})")
                 _record_rich_outcome(True)
+            elif result and result.get("_timed_out"):
+                rich_post_timed_out = True
+                _record_rich_outcome(False)
         except Exception as rich_err:
             logger.info(f"sendRichMessage not available or failed, falling back to legacy: {rich_err}")
             rich_post_success = False
             _record_rich_outcome(False)
+
+    if rich_post_timed_out:
+        if cleanup_banner and banner_path and os.path.exists(banner_path):
+            try:
+                os.remove(banner_path)
+            except Exception:
+                pass
+        if cleanup_poster and poster_path and os.path.exists(poster_path):
+            try:
+                os.remove(poster_path)
+            except Exception:
+                pass
+        logger.warning(
+            f"sendRichMessage timeout untuk '{title_display}' di {watermark}; "
+            f"fallback legacy dibatalkan untuk mencegah postingan double."
+        )
+        raise RuntimeError(
+            f"Waktu tunggu respons Telegram (sendRichMessage) habis untuk {title_display}. "
+            f"Cek channel {watermark} — Rich Post kemungkinan sudah terkirim (fallback legacy dibatalkan agar tidak double)."
+        )
 
     # === FALLBACK: Legacy sendVideo with caption ===
     if not rich_post_success:
